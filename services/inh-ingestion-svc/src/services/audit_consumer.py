@@ -39,6 +39,11 @@ class AuditLogConsumer:
         """
         audit_id = message.get("audit_id")
         if not isinstance(audit_id, str) or not audit_id.strip():
+            # Permanently invalid (retry can't fix it) so we drop — but make the
+            # drop observable via a metric, not just a warning log (#18).
+            from src.services.metrics import AUDIT_MESSAGES_DROPPED_TOTAL
+
+            AUDIT_MESSAGES_DROPPED_TOTAL.labels(reason="missing_audit_id").inc()
             logger.warning(
                 "Dropping audit message without valid audit_id", message_keys=list(message)
             )

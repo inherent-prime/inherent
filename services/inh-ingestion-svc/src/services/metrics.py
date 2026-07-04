@@ -46,6 +46,15 @@ DOCUMENTS_PROCESSED_TOTAL = Counter(
     ["content_type"],
 )
 
+# Audit messages dropped for a permanently-invalid payload (e.g. missing
+# audit_id). Retrying can't fix these, so they are dropped — but the drop must
+# be observable, not silent (#18). `reason` is a small bounded set.
+AUDIT_MESSAGES_DROPPED_TOTAL = Counter(
+    "ingestion_audit_messages_dropped_total",
+    "Audit messages dropped due to a permanently-invalid payload",
+    ["reason"],
+)
+
 # ── Backpressure / MQ Metrics (#18) ──────────────────────────────────
 
 # Latency from receiving a message off the MQ to Temporal accepting the

@@ -52,6 +52,21 @@ class TestAuditLogConsumer:
         temporal_client.start_workflow.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_drop_increments_observable_metric(
+        self, consumer: AuditLogConsumer, temporal_client: AsyncMock
+    ) -> None:
+        """A dropped audit event must be observable via a metric, not silent (#18)."""
+        from src.services.metrics import AUDIT_MESSAGES_DROPPED_TOTAL
+
+        counter = AUDIT_MESSAGES_DROPPED_TOTAL.labels(reason="missing_audit_id")
+        before = counter._value.get()
+
+        await consumer.handle({"workspace_id": "ws-1"})  # no audit_id
+
+        assert counter._value.get() == before + 1
+        temporal_client.start_workflow.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_none_audit_id_drops_message(
         self, consumer: AuditLogConsumer, temporal_client: AsyncMock
     ) -> None:

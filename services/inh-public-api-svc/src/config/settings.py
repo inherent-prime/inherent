@@ -127,6 +127,12 @@ class Settings(BaseSettings):
         description="Redis URL for distributed rate limiting. Falls back to in-memory if not set.",
     )
 
+    # Trusted reverse proxies whose X-Forwarded-For / X-Real-IP headers may be
+    # believed when deriving the client IP for audit/rate-limiting (#16). Empty
+    # (default) = trust nobody; the direct peer IP is always used, so a client
+    # can't forge its audited IP. Set to your LB/ingress IPs in production.
+    trusted_proxies: list[str] = Field(default=[])
+
     # CORS Configuration
     cors_origins: list[str] = Field(
         default=[

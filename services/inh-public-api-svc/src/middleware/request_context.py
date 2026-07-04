@@ -7,6 +7,7 @@ This middleware:
 4. Adds request ID to response headers
 """
 
+import re
 import time
 import uuid
 from contextvars import ContextVar
@@ -18,6 +19,7 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.requests import Request
 from starlette.responses import Response
 
+from src.config import settings
 from src.config.constants import CORRELATION_ID_HEADER, REQUEST_ID_HEADER
 
 # Context variable for storing request context across async calls
@@ -94,24 +96,38 @@ def _generate_request_id() -> str:
     return str(uuid.uuid4())
 
 
+_REQUEST_ID_MAX_LEN = 128
+_REQUEST_ID_ALLOWED = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _sanitize_request_id(value: str) -> str:
+    """Strip control chars / markup and cap length on a client-supplied id.
+
+    A client-supplied X-Request-ID is untrusted: unsanitized it can inject
+    newlines/markup into logs and audit records (#16).
+    """
+    return _REQUEST_ID_ALLOWED.sub("", value)[:_REQUEST_ID_MAX_LEN]
+
+
 def _get_client_ip(request: Request) -> str | None:
-    """Extract client IP from request, handling proxies."""
-    # Check X-Forwarded-For first (from load balancers/proxies)
-    forwarded_for = request.headers.get("X-Forwarded-For")
-    if forwarded_for:
-        # Take the first IP (original client)
-        return forwarded_for.split(",")[0].strip()
+    """Extract the client IP, trusting forwarded headers only from a proxy.
 
-    # Check X-Real-IP (common proxy header)
-    real_ip = request.headers.get("X-Real-IP")
-    if real_ip:
-        return real_ip
+    X-Forwarded-For / X-Real-IP are trusted only when the *direct peer*
+    (``request.client.host``) is in ``settings.trusted_proxies``; otherwise any
+    client could forge its audited IP (#16). Default trusted set is empty.
+    """
+    peer = request.client.host if request.client else None
 
-    # Fall back to direct client
-    if request.client:
-        return request.client.host
+    if peer and peer in settings.trusted_proxies:
+        forwarded_for = request.headers.get("X-Forwarded-For")
+        if forwarded_for:
+            # Client-closest untrusted IP is the first entry.
+            return forwarded_for.split(",")[0].strip()
+        real_ip = request.headers.get("X-Real-IP")
+        if real_ip:
+            return real_ip
 
-    return None
+    return peer
 
 
 def _bind_context_to_structlog(context: RequestContext) -> None:
@@ -135,11 +151,18 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
     """Middleware that establishes request context for tracing and logging."""
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
-        # Extract or generate request ID
-        request_id = request.headers.get(REQUEST_ID_HEADER) or _generate_request_id()
+        # Extract or generate request ID. A client-supplied id is sanitized
+        # (untrusted) and regenerated if it sanitizes to empty (#16).
+        raw_request_id = request.headers.get(REQUEST_ID_HEADER)
+        request_id = _sanitize_request_id(raw_request_id) if raw_request_id else ""
+        if not request_id:
+            request_id = _generate_request_id()
 
-        # Extract or use request ID as correlation ID
-        correlation_id = request.headers.get(CORRELATION_ID_HEADER) or request_id
+        # Extract or use request ID as correlation ID (also sanitized).
+        raw_correlation_id = request.headers.get(CORRELATION_ID_HEADER)
+        correlation_id = _sanitize_request_id(raw_correlation_id) if raw_correlation_id else ""
+        if not correlation_id:
+            correlation_id = request_id
 
         # Create context
         context = RequestContext(
