@@ -246,3 +246,40 @@ class TestStorageService:
 
         assert content == b"content"
         mock_client.get.assert_called_with("http://example.com/file")
+
+
+class TestLocalStorageTraversal:
+    """LocalStorageBackend._resolve must block escapes via a real path
+    boundary, not a string prefix (a sibling dir sharing the base name used to
+    slip through) (#11)."""
+
+    def _backend(self, base):
+        settings = MagicMock()
+        settings.local_storage_path = str(base)
+        return LocalStorageBackend(settings)
+
+    def test_blocks_sibling_dir_prefix_escape(self, tmp_path):
+        base = tmp_path / "store"
+        base.mkdir()
+        secrets = tmp_path / "store-secrets"
+        secrets.mkdir()
+        (secrets / "creds").write_text("top secret")
+
+        backend = self._backend(base)
+        # /tmp/../store-secrets/creds startswith('/tmp/.../store') -> True (old bug).
+        with pytest.raises(PermissionError):
+            backend._resolve("../store-secrets/creds")
+
+    def test_blocks_absolute_and_parent_escape(self, tmp_path):
+        base = tmp_path / "store"
+        base.mkdir()
+        backend = self._backend(base)
+        with pytest.raises(PermissionError):
+            backend._resolve("../../etc/passwd")
+
+    def test_allows_legitimate_descendant(self, tmp_path):
+        base = tmp_path / "store"
+        base.mkdir()
+        backend = self._backend(base)
+        resolved = backend._resolve("sub/doc.txt")
+        assert resolved.is_relative_to(base.resolve())

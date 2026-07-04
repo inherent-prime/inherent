@@ -133,7 +133,12 @@ class LocalStorageBackend(BaseStorageBackend):
         else:
             resolved = (self._base_path / path).resolve()
 
-        if not str(resolved).startswith(str(self._base_path)):
+        # Use a real path-boundary check, not a string prefix: a prefix match
+        # lets a sibling directory that shares the base's name escape the base
+        # (base=/data/store, path=../store-secrets/x -> /data/store-secrets/x
+        # passes ``startswith('/data/store')``). ``is_relative_to`` compares path
+        # components, so only true descendants (and the base itself) are allowed (#11).
+        if resolved != self._base_path and not resolved.is_relative_to(self._base_path):
             raise PermissionError(f"Path traversal blocked: {path}")
 
         return resolved

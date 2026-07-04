@@ -114,6 +114,10 @@ class Settings(BaseSettings):
     )
     mq_topic_document_uploaded: str = Field(
         default="core.document.uploaded.v1",
+        # Must match the ingestion consumer's MQ_UPLOAD_TOPIC (#15) — a separate
+        # env var name would let an operator override one side only and silently
+        # publish uploads to a stream nobody consumes.
+        alias="MQ_UPLOAD_TOPIC",
         description="MQ topic for document upload events",
     )
 
