@@ -42,6 +42,8 @@ class TestWeaviateServiceExtended:
         weaviate_service.client.collections.get.return_value = mock_collection
         mock_collection.with_tenant.return_value = mock_tenant_collection
         mock_tenant_collection.batch.dynamic.return_value.__enter__.return_value = mock_batch
+        # No per-object failures (#8): the store now inspects failed_objects.
+        mock_tenant_collection.batch.failed_objects = []
 
         chunks = [
             DocumentChunk(

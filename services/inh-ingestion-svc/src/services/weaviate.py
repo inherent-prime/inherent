@@ -520,7 +520,19 @@ class WeaviateService:
                         uuid=chunk_uuid,
                         vector=vector,
                     )
-                    stored_count += 1
+
+            # The v4 batch collects per-object errors in failed_objects instead
+            # of raising, so a partial failure would otherwise be reported as a
+            # full success -> Postgres/Weaviate divergence with no error (#8).
+            # Raise so the store activity retries / dead-letters (see #2).
+            failed = tenant_collection.batch.failed_objects
+            if failed:
+                first = getattr(failed[0], "message", failed[0])
+                raise RuntimeError(
+                    f"Weaviate batch store failed for {len(failed)}/{len(chunks)} "
+                    f"chunks in document {document_id}: {first}"
+                )
+            stored_count = len(chunks)
 
             logger.info(
                 "Stored chunks in Weaviate with multi-tenancy",

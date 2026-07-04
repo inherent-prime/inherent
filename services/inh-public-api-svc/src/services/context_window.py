@@ -28,24 +28,34 @@ def _match_chunk_index(match: SearchResult) -> int | None:
 
 
 def _compute_ranges(matches: list[SearchResult], k: int) -> list[tuple[str, int, int]]:
-    """Group matches by document_id and compute combined (lo, hi) per doc.
+    """Compute one (lo, hi) fetch range per match, merging only overlapping or
+    adjacent ranges within a document.
 
-    Lo is clamped to 0 here; hi is left uncapped because the DB naturally
-    returns only real rows.
+    Emitting a per-match ``[idx-k, idx+k]`` window (rather than one
+    ``[min-k, max+k]`` span per document) means two far-apart matches fetch just
+    their own neighbourhoods instead of the entire document between them (#21).
+    Lo is clamped to 0; hi is uncapped because the DB returns only real rows.
     """
     if k <= 0:
         return []
-    per_doc: dict[str, list[int]] = {}
+    per_doc: dict[str, list[tuple[int, int]]] = {}
     for m in matches:
         idx = _match_chunk_index(m)
         if idx is None:
             continue
-        per_doc.setdefault(m.document_id, []).append(idx)
+        per_doc.setdefault(m.document_id, []).append((max(0, idx - k), idx + k))
+
     ranges: list[tuple[str, int, int]] = []
-    for doc_id, indexes in per_doc.items():
-        lo = max(0, min(indexes) - k)
-        hi = max(indexes) + k
-        ranges.append((doc_id, lo, hi))
+    for doc_id, spans in per_doc.items():
+        spans.sort()
+        cur_lo, cur_hi = spans[0]
+        for lo, hi in spans[1:]:
+            if lo <= cur_hi + 1:  # overlapping or adjacent -> merge
+                cur_hi = max(cur_hi, hi)
+            else:
+                ranges.append((doc_id, cur_lo, cur_hi))
+                cur_lo, cur_hi = lo, hi
+        ranges.append((doc_id, cur_lo, cur_hi))
     return ranges
 
 
