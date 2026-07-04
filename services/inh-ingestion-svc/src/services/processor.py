@@ -1,5 +1,16 @@
 """Document processor service with full extraction and storage logic.
 
+.. deprecated::
+    LEGACY / NOT ON THE LIVE PATH (#23). ``DocumentProcessor`` is the pre-Temporal
+    synchronous ingestion pipeline. The live ingestion path is the Temporal
+    workflow (``temporal/workflows/document_ingestion.py``) driving the
+    ``temporal/activities/*`` activities. No runtime entrypoint imports this
+    module — it is referenced only by tests. Do NOT build on it; its behaviour
+    (e.g. it reports success even when a store fails, and does not delete-before-
+    reindex) diverges from the live activities. Scheduled for removal — see the
+    defect register. Kept for now only to preserve its extraction/OCR test
+    coverage until that coverage is confirmed duplicated by the activity tests.
+
 This processor integrates with the TenantManager for multi-tenancy support,
 ensuring proper tenant isolation in both PostgreSQL and Weaviate.
 """
