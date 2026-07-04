@@ -52,6 +52,7 @@ services:
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-knowledge_base}
       # Required by the shared Settings model; migrate mode never connects to it.
       WEAVIATE_URL: http://weaviate:8080
+      WEAVIATE_API_KEY: ${WEAVIATE_API_KEY:?WEAVIATE_API_KEY must be set}
       LOG_LEVEL: INFO
     networks:
       - inherent-oss
@@ -79,18 +80,20 @@ services:
     container_name: inherent-oss-weaviate
     restart: unless-stopped
     ports:
-      # Loopback-only (#3). Weaviate runs with anonymous access, so publishing
-      # it on all interfaces would let any host on the network read every
-      # tenant's vectors. Binding to 127.0.0.1 is the isolation boundary until
-      # API-key auth is wired through the service clients (tracked follow-up).
+      # Loopback-only (#3) as defense-in-depth alongside API-key auth below.
       - "127.0.0.1:18080:8080"
       - "127.0.0.1:15051:50051"
     environment:
       QUERY_DEFAULTS_LIMIT: 25
-      # NOTE: anonymous access is only safe because the ports above are
-      # loopback-bound. Do NOT publish these on 0.0.0.0 without enabling
-      # AUTHENTICATION_APIKEY_* here and passing WEAVIATE_API_KEY to the services.
-      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
+      # API-key auth (#3): the vector store holding every tenant's chunks is no
+      # longer anonymous. Both services authenticate with WEAVIATE_API_KEY
+      # (Bearer token). Fail-fast if it's unset.
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "false"
+      AUTHENTICATION_APIKEY_ENABLED: "true"
+      AUTHENTICATION_APIKEY_ALLOWED_KEYS: ${WEAVIATE_API_KEY:?WEAVIATE_API_KEY must be set}
+      AUTHENTICATION_APIKEY_USERS: inherent@local
+      AUTHORIZATION_ADMINLIST_ENABLED: "true"
+      AUTHORIZATION_ADMINLIST_USERS: inherent@local
       PERSISTENCE_DATA_PATH: /var/lib/weaviate
       DEFAULT_VECTORIZER_MODULE: none
       ENABLE_MODULES: ""
@@ -215,6 +218,7 @@ services:
     environment:
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-knowledge_base}
       WEAVIATE_URL: http://weaviate:8080
+      WEAVIATE_API_KEY: ${WEAVIATE_API_KEY:?WEAVIATE_API_KEY must be set}
       MQ_BACKEND: redis
       REDIS_URL: redis://valkey:6379
       STORAGE_BACKEND: s3
@@ -277,6 +281,7 @@ services:
       MONGODB_URI: mongodb://mongodb:27017/main
       MONGODB_DB_NAME: main
       WEAVIATE_URL: http://weaviate:8080
+      WEAVIATE_API_KEY: ${WEAVIATE_API_KEY:?WEAVIATE_API_KEY must be set}
       MQ_REDIS_URL: redis://valkey:6379
       REDIS_URL: redis://valkey:6379
       AWS_S3_ENDPOINT: http://s3rver:9000

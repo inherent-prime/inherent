@@ -143,17 +143,27 @@ class SearchService:
     invariants are enforced upstream; no redundant per-result filter is added.
     """
 
-    def __init__(self, database: DatabaseService, weaviate_url: str):
+    def __init__(
+        self,
+        database: DatabaseService,
+        weaviate_url: str,
+        weaviate_api_key: str | None = None,
+    ):
         self.database = database
         self.weaviate_url = weaviate_url.rstrip("/")
+        self._api_key = weaviate_api_key
         self._client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get HTTP client for Weaviate."""
         if self._client is None:
+            # Authenticate when Weaviate API-key auth is enabled (#3 follow-up);
+            # Weaviate accepts the key as a Bearer token.
+            headers = {"Authorization": f"Bearer {self._api_key}"} if self._api_key else None
             self._client = httpx.AsyncClient(
                 base_url=self.weaviate_url,
                 timeout=30.0,
+                headers=headers,
             )
         return self._client
 
@@ -653,7 +663,11 @@ async def get_search_service() -> SearchService:
     global _search_service
     if _search_service is None:
         database = await get_database()
-        _search_service = SearchService(database, settings.effective_weaviate_url)
+        _search_service = SearchService(
+            database,
+            settings.effective_weaviate_url,
+            weaviate_api_key=settings.weaviate_api_key,
+        )
     return _search_service
 
 

@@ -44,8 +44,9 @@ A codescan-driven pass fixing correctness, isolation, and durability defects.
   are set (no more shipped `postgres` / `dev-ingestion-key` defaults), and all
   backing datastores (Postgres, Mongo, Weaviate, Valkey, S3) publish their
   ports on `127.0.0.1` only. Set both variables (see `.env.example`) before
-  `docker compose up`. Weaviate still runs anonymous — the loopback bind is its
-  isolation boundary; enabling `AUTHENTICATION_APIKEY_*` is a tracked follow-up.
+  `docker compose up`. **Weaviate now runs with API-key auth** (anonymous access
+  off): set `WEAVIATE_API_KEY` too — both services authenticate to Weaviate with
+  it (Bearer token), and the ports stay loopback-bound as defense-in-depth.
 
 ### M0–M2 (merged: #62, #63, #64)
 - **Boundary** — agent-memory-substrate ADR + org-readiness plan (#46).

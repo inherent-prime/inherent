@@ -64,3 +64,11 @@ def test_datastore_ports_bound_to_loopback(name: str, host_port: str) -> None:
         f"datastore '{name}' host port {host_port} is not loopback-bound "
         f"(reachable from other hosts)"
     )
+
+
+def test_weaviate_requires_api_key_not_anonymous() -> None:
+    """Weaviate must not run anonymous in the release stack (#3 follow-up)."""
+    assert 'AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "false"' in COMPOSE
+    assert 'AUTHENTICATION_APIKEY_ENABLED: "true"' in COMPOSE
+    # The key is required (fail-fast) both at the DB and passed to the services.
+    assert "WEAVIATE_API_KEY:?" in COMPOSE

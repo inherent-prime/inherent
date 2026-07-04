@@ -93,7 +93,14 @@ services:
       - "15051:50051"
     environment:
       QUERY_DEFAULTS_LIMIT: 25
-      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
+      # API-key auth (#3). Dev defaults the key for convenience; both services
+      # authenticate with the same value.
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "false"
+      AUTHENTICATION_APIKEY_ENABLED: "true"
+      AUTHENTICATION_APIKEY_ALLOWED_KEYS: ${WEAVIATE_API_KEY:-local-dev-weaviate-key}
+      AUTHENTICATION_APIKEY_USERS: inherent@local
+      AUTHORIZATION_ADMINLIST_ENABLED: "true"
+      AUTHORIZATION_ADMINLIST_USERS: inherent@local
       PERSISTENCE_DATA_PATH: /var/lib/weaviate
       DEFAULT_VECTORIZER_MODULE: none
       ENABLE_MODULES: ""
@@ -217,6 +224,7 @@ services:
     environment:
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-knowledge_base}
       WEAVIATE_URL: http://weaviate:8080
+      WEAVIATE_API_KEY: ${WEAVIATE_API_KEY:-local-dev-weaviate-key}
       MQ_BACKEND: redis
       REDIS_URL: redis://valkey:6379
       STORAGE_BACKEND: s3
@@ -282,6 +290,7 @@ services:
       MONGODB_URI: mongodb://mongodb:27017/main
       MONGODB_DB_NAME: main
       WEAVIATE_URL: http://weaviate:8080
+      WEAVIATE_API_KEY: ${WEAVIATE_API_KEY:-local-dev-weaviate-key}
       MQ_REDIS_URL: redis://valkey:6379
       REDIS_URL: redis://valkey:6379
       AWS_S3_ENDPOINT: http://s3rver:9000
