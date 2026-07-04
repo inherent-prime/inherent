@@ -556,7 +556,9 @@ class SearchService:
                     citation=citation,
                 )
             )
-        return results
+        # Truncate back to the requested page size after min_score filtering
+        # (the query may have over-fetched to avoid under-filling) (#31).
+        return results[: request.limit]
 
     def _build_graphql(
         self,
@@ -572,6 +574,11 @@ class SearchService:
         computed here for semantic/hybrid modes (#13).
         """
         escaped_query = request.query.replace("\\", "\\\\").replace('"', '\\"')
+        # Over-fetch when a min_score filter is active: Weaviate returns exactly
+        # `limit` rows, then min_score is applied client-side, so without this a
+        # page could come back short even when more above-threshold matches
+        # exist. Results are truncated back to request.limit after filtering (#31).
+        fetch_limit = min(100, request.limit * 3) if request.min_score > 0 else request.limit
         where_clause = ""
         if request.document_ids:
             where_filter: dict[str, Any] = {
@@ -609,7 +616,7 @@ class SearchService:
                     {search_args}
                     tenant: "{tenant_name}"
                     {where_clause}
-                    limit: {request.limit}
+                    limit: {fetch_limit}
                 ) {{
                     document_id
                     original_filename

@@ -1,6 +1,6 @@
 """Unit tests for TemporalWorkflowTrigger and get_workflow_trigger factory."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -150,6 +150,28 @@ class TestGetWorkflowTriggerSingleton:
 # ---------------------------------------------------------------------------
 # async poison-message handling tests (Fix #6)
 # ---------------------------------------------------------------------------
+
+
+class TestTriggerFailurePathRobustness:
+    """A non-validation error before upload_message is bound must not raise an
+    UnboundLocalError in the failure path that masks the real error (#39)."""
+
+    @pytest.mark.asyncio
+    async def test_non_validation_error_does_not_mask_with_nameerror(self):
+        trigger = TemporalWorkflowTrigger(_make_settings())
+        trigger._initialized = True
+        trigger._mq_service = AsyncMock()
+
+        with patch(
+            "src.temporal.trigger.DocumentUploadMessage", side_effect=TypeError("boom")
+        ):
+            result = await trigger.trigger_workflow({"document_id": "d1"})
+
+        # Clean failure result carrying the real error, not an UnboundLocalError.
+        assert result.success is False
+        assert "boom" in (result.error or "")
+        # No completion publish attempted with an unbound message.
+        trigger._mq_service.publish_completion.assert_not_awaited()
 
 
 class TestAsyncTriggerPoisonHandling:

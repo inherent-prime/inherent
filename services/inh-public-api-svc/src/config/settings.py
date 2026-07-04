@@ -252,6 +252,18 @@ class Settings(BaseSettings):
             return ["*"]
         return self.cors_origins
 
+    @property
+    def cors_allow_credentials_effective(self) -> bool:
+        """Never advertise credentials alongside a wildcard origin (#36).
+
+        allow_origins=["*"] with allow_credentials=True lets any site make
+        credentialed cross-origin calls (and is spec-invalid). When the origin
+        list is a wildcard, force credentials off regardless of config.
+        """
+        if "*" in self.cors_origins_list:
+            return False
+        return self.cors_allow_credentials
+
 
 @lru_cache
 def get_settings() -> Settings:

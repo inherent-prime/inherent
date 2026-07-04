@@ -150,6 +150,9 @@ class TemporalWorkflowTrigger:
             await self.initialize()
 
         document_id = message.get("document_id", "unknown")
+        # Bind up front so the failure path can't hit an UnboundLocalError if an
+        # unexpected (non-validation) error is raised before it is assigned (#39).
+        upload_message = None
 
         try:
             # Validate message schema
@@ -258,8 +261,10 @@ class TemporalWorkflowTrigger:
                 error=str(e),
             )
 
-            # Publish completion notification for failure
-            if self._mq_service:
+            # Publish completion notification for failure. Skip if the message
+            # never parsed (upload_message is None) — there's nothing to notify
+            # against, and this avoids a masking UnboundLocalError (#39).
+            if self._mq_service and upload_message is not None:
                 try:
                     await self._mq_service.publish_completion(failure_result, upload_message)
                 except Exception as pub_e:
