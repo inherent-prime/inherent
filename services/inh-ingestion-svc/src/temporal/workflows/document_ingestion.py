@@ -27,12 +27,13 @@ with workflow.unsafe.imports_passed_through():
     from src.temporal.activities.dead_letter import record_dead_letter
     from src.temporal.activities.extract import extract_text
     from src.temporal.activities.fetch import fetch_document
-    from src.temporal.activities.status import set_document_status
+    from src.temporal.activities.status import create_pending_document, set_document_status
     from src.temporal.activities.store import store_in_postgresql, store_in_weaviate
     from src.temporal.activities.tenant import ensure_tenant_ready, update_workspace_stats
     from src.temporal.models import (
         ChunkTextInput,
         CleanupStagingInput,
+        CreatePendingDocumentInput,
         DocumentIngestionInput,
         EnsureTenantInput,
         ExtractTextInput,
@@ -202,6 +203,37 @@ class DocumentIngestionWorkflow:
         workflow_run_id = workflow.info().run_id
 
         try:
+            # Create a minimal 'processing' row up front so the document is
+            # observable via the status API before the store step; a failure in
+            # fetch/extract/chunk then shows as 'failed', not 'not found' (#10).
+            # Best-effort: a create failure must not fail the workflow.
+            try:
+                await workflow.execute_activity(
+                    create_pending_document,
+                    CreatePendingDocumentInput(
+                        document_id=input.document_id,
+                        workspace_id=input.workspace_id,
+                        user_id=input.user_id,
+                        filename=input.filename,
+                        original_filename=input.original_filename,
+                        content_type=input.content_type,
+                        size_bytes=input.size_bytes,
+                        storage_backend=input.storage_backend,
+                        storage_path=input.storage_path,
+                        storage_bucket=input.storage_bucket,
+                        storage_url=input.storage_url,
+                    ),
+                    start_to_close_timeout=timedelta(seconds=15),
+                    retry_policy=RetryPolicy(
+                        maximum_attempts=2,
+                        initial_interval=timedelta(seconds=1),
+                        maximum_interval=timedelta(seconds=5),
+                        backoff_coefficient=2.0,
+                    ),
+                )
+            except Exception:
+                workflow.logger.warning("Failed to create pending document row (non-fatal)")
+
             # Mark the document as 'processing' before heavy work begins.
             # Best-effort: a status-write failure must not fail the workflow.
             await self._set_status_best_effort(

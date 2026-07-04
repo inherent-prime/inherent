@@ -20,6 +20,7 @@ from src.config.settings import Settings
 from src.temporal.activities import (
     chunk_text,
     cleanup_staging,
+    create_pending_document,
     ensure_tenant_ready,
     extract_text,
     fetch_document,
@@ -49,6 +50,7 @@ TASK_QUEUE_NAME = "document-ingestion"
 
 # All activities registered with the ingestion worker
 _ALL_ACTIVITIES: list[Callable[..., Any]] = [
+    create_pending_document,
     ensure_tenant_ready,
     fetch_document,
     extract_text,

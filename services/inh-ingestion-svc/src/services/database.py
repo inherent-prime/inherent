@@ -921,6 +921,55 @@ class DatabaseService:
                 )
                 raise
 
+    async def create_pending_document(
+        self,
+        *,
+        document_id: str,
+        workspace_id: str,
+        user_id: str,
+        filename: str,
+        original_filename: str,
+        content_type: str,
+        size_bytes: int,
+        storage_backend: str,
+        storage_path: str,
+        storage_bucket: str | None = None,
+        storage_url: str | None = None,
+    ) -> bool:
+        """Create a minimal 'processing' processed_documents row up front (#10).
+
+        Without this, no row exists until the store step, so an early
+        'processing'/'failed' status write hits 0 rows and a document that fails
+        during fetch/extract/chunk is invisible ('not found') to the status API.
+        No-op if the row already exists (the store step upserts the full record).
+
+        Returns True if a row was created, False if one already existed.
+        """
+        if not self.engine:
+            raise RuntimeError("Database not connected")
+
+        with self.get_session() as session:
+            now = datetime.now(UTC)
+            stmt = pg_insert(self.processed_documents).values(
+                document_id=document_id,
+                workspace_id=workspace_id,
+                user_id=user_id,
+                filename=filename,
+                original_filename=original_filename,
+                content_type=content_type,
+                size_bytes=size_bytes,
+                storage_backend=storage_backend,
+                storage_path=storage_path,
+                storage_bucket=storage_bucket,
+                storage_url=storage_url,
+                status=DocumentStatus.PROCESSING.value,
+                chunk_count=0,
+                created_at=now,
+                updated_at=now,
+            ).on_conflict_do_nothing(index_elements=["document_id"])
+            result = session.execute(stmt)
+            return bool(result.rowcount and result.rowcount > 0)
+
     async def update_document_status(
         self,
         document_id: str,

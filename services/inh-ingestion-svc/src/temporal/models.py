@@ -255,6 +255,28 @@ class UpdateStatsInput:
     document_id: str | None = None
 
 
+@dataclass
+class CreatePendingDocumentInput:
+    """Input for the create_pending_document activity (#10).
+
+    Creates a minimal 'processing' processed_documents row at workflow start so
+    a failure during fetch/extract/chunk is observable via the status API
+    instead of returning 'not found'. The store step later upserts the full row.
+    """
+
+    document_id: str
+    workspace_id: str
+    user_id: str
+    filename: str
+    original_filename: str
+    content_type: str
+    size_bytes: int
+    storage_backend: str
+    storage_path: str
+    storage_bucket: str | None = None
+    storage_url: str | None = None
+
+
 # =============================================================================
 # Staging Cleanup Models
 # =============================================================================
