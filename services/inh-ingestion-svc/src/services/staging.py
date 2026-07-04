@@ -104,7 +104,7 @@ class StagingService:
                 text(
                     """
                     INSERT INTO ingestion_staging (workflow_run_id, data_key, json_data, created_at)
-                    VALUES (:wf_id, 'chunks', :data, NOW())
+                    VALUES (:wf_id, 'chunks', CAST(:data AS jsonb), NOW())
                     ON CONFLICT (workflow_run_id, data_key)
                     DO UPDATE SET json_data = EXCLUDED.json_data
                     """

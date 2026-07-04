@@ -413,7 +413,11 @@ async def search_documents(
     # same authorised fan-out so a fallback can never widen the workspace scope.
     await _apply_quality_gate_and_fallback(response, request, _retrieve_multi)
 
-    # PM-S019: for multi-workspace, use primary workspace when unambiguous
+    # PM-S019: context expansion needs a single workspace scope. For a
+    # multi-workspace search (len != 1) we deliberately skip it — expanding a
+    # match with a workspace that isn't its own risks a cross-tenant neighbour
+    # read (#30). So include_context is honored only for single-workspace users;
+    # for multi-workspace users it is a documented no-op (empty ctx_ws below).
     ctx_ws = user_workspaces[0] if len(user_workspaces) == 1 else ""
     await _expand_context_and_total_tokens(response, request, ctx_ws, auth.key_info.user_id)
     _record_search_metrics(request, None)

@@ -97,16 +97,9 @@ _SEARCH_INPUT_SCHEMA = {
             "description": "Hybrid fusion weight in [0,1] (1.0=vector-heavy, 0.0=keyword-heavy); only used when search_mode=hybrid",
             "default": 0.7,
         },
-        "include_context": {
-            "type": "boolean",
-            "description": "If true, include surrounding chunks for each result",
-            "default": False,
-        },
-        "context_window": {
-            "type": "integer",
-            "description": "Chunks before AND after each match when include_context=true (0-5, default 2)",
-            "default": 2,
-        },
+        # include_context / context_window were advertised but never honored by
+        # _run_search (a silent no-op). Use the dedicated get_document_context
+        # tool for surrounding chunks instead (#29).
     },
     "required": ["api_key", "query"],
 }
