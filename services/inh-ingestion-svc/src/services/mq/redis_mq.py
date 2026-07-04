@@ -39,6 +39,13 @@ class RedisMQService(BaseMQService):
         # plain MagicMock(spec=Settings) in tests still works.
         self._concurrency_limit = self._resolve_concurrency_limit(settings)
         self._semaphore = asyncio.Semaphore(self._concurrency_limit)
+        # Runtime redelivery (#17): reclaim messages that were delivered but not
+        # ACKed and have sat idle for this long, so a transient handler failure
+        # is retried while the service runs — not only on the next restart.
+        self._reclaim_min_idle_ms = 30_000
+        # Drop as poison after this many delivery attempts (feeds the warn/drop
+        # path so one bad message can't loop forever).
+        self._max_deliveries = 5
 
     @staticmethod
     def _resolve_concurrency_limit(settings: Settings) -> int:
@@ -196,6 +203,11 @@ class RedisMQService(BaseMQService):
                 if tasks:
                     await asyncio.gather(*tasks)
 
+                # Runtime redelivery (#17): reclaim any messages that failed and
+                # have sat idle past the threshold, so a transient handler error
+                # is retried while running, not only on the next restart.
+                await self._reclaim_pending(stream, group, consumer, handler)
+
                 # Best-effort: publish current pending/lag for this stream+group.
                 await self._update_pending_gauge(stream, group)
 
@@ -210,6 +222,63 @@ class RedisMQService(BaseMQService):
                     error=str(e),
                 )
                 await asyncio.sleep(1)
+
+    async def _reclaim_pending(
+        self,
+        stream: str,
+        group: str,
+        consumer: str,
+        handler: MessageHandler,
+    ) -> None:
+        """Reclaim and re-dispatch messages that failed and have sat idle (#17).
+
+        The live poll loop only reads new (">") entries, so without this a
+        transient handler failure (e.g. Temporal briefly down) would leave the
+        message pending until the next restart. XAUTOCLAIM transfers messages
+        idle >= ``_reclaim_min_idle_ms`` to this consumer; we re-dispatch each,
+        and drop (ACK) any that have exceeded ``_max_deliveries`` as poison.
+        """
+        assert self._redis is not None
+        try:
+            _cursor, claimed, _deleted = await self._redis.xautoclaim(
+                name=stream,
+                groupname=group,
+                consumername=consumer,
+                min_idle_time=self._reclaim_min_idle_ms,
+                start_id="0-0",
+                count=20,
+            )
+        except Exception as e:
+            logger.warning("Redis MQ: xautoclaim failed", stream=stream, error=str(e))
+            return
+
+        for message_id, fields in claimed:
+            if not fields:
+                continue  # tombstone / already ACKed
+            delivered = await self._delivery_count(stream, group, message_id)
+            if delivered > self._max_deliveries:
+                # Poison: keeps failing. Drop it so it can't loop forever.
+                await self._redis.xack(stream, group, message_id)
+                logger.error(
+                    "Redis MQ: message exceeded max deliveries, dropping",
+                    stream=stream,
+                    message_id=message_id,
+                    deliveries=delivered,
+                )
+                continue
+            await self._handle_message(stream, group, message_id, fields, handler)
+
+    async def _delivery_count(self, stream: str, group: str, message_id: str) -> int:
+        """Return how many times ``message_id`` has been delivered (>=1)."""
+        try:
+            pending = await self._redis.xpending_range(
+                stream, group, min=message_id, max=message_id, count=1
+            )
+            if pending:
+                return int(pending[0]["times_delivered"])
+        except Exception:
+            pass
+        return 1
 
     async def _process_pending(
         self,
