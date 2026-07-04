@@ -143,6 +143,22 @@ async def _extract_text_inner(input: ExtractTextInput) -> ExtractTextOutput:
             f"Text quality check failed for {input.original_filename}: empty extraction"
         )
 
+    # Strip NUL (0x00) bytes before staging (issue #84). Postgres text/varchar
+    # columns cannot store the NUL byte at all -- the driver raises before the
+    # query reaches the server -- so an unsanitized value fails the staging
+    # write permanently. Some documents (e.g. PDFs pypdf decodes imperfectly)
+    # produce embedded NUL bytes. We strip *after* the quality check so its
+    # `no_binary_content` diagnostic still sees the raw signal, and before the
+    # empty-text guard so a text made up entirely of NUL bytes is caught below.
+    if "\x00" in text:
+        null_count = text.count("\x00")
+        text = text.replace("\x00", "")
+        logger.warning(
+            "Stripped NUL bytes from extracted text before staging",
+            filename=input.original_filename,
+            null_bytes_removed=null_count,
+        )
+
     if not text.strip():
         raise RuntimeError(
             f"Text extraction produced empty result for {filename} "

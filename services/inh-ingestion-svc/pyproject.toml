@@ -1,6 +1,6 @@
 [project]
 name = "inh-ingestion-svc"
-version = "0.4.0"
+version = "0.4.1"
 description = "Document ingestion service with multi-tenancy for processing and storing documents in PostgreSQL and Weaviate"
 readme = "Readme.md"
 requires-python = ">=3.11"

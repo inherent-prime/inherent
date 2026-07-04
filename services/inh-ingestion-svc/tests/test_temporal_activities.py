@@ -76,6 +76,37 @@ class TestExtractTextActivity:
     @patch("src.temporal.shared_services.get_staging_service")
     @patch("src.temporal.shared_services.get_storage_service")
     @pytest.mark.asyncio
+    async def test_extract_text_strips_nul_bytes_before_staging(
+        self, mock_get_storage, mock_get_staging, extract_input
+    ):
+        """NUL (0x00) bytes must be stripped before writing to Postgres staging.
+
+        Regression for issue #84: Postgres text columns cannot store NUL bytes,
+        so extraction succeeds but the staging write crashes permanently. The
+        activity must sanitize NUL bytes so the write goes through.
+        """
+        mock_storage = MagicMock()
+        # Extracted text with embedded NUL bytes (as some PDFs decode to).
+        mock_storage.read_file.return_value = b"Hello\x00 world\x00!"
+        mock_get_storage.return_value = mock_storage
+
+        mock_staging = MagicMock()
+        mock_get_staging.return_value = mock_staging
+
+        from src.temporal.activities.extract import extract_text
+
+        result = await extract_text(extract_input)
+
+        # The text written to staging must contain no NUL bytes.
+        written_text = mock_staging.write_text.call_args[0][1]
+        assert "\x00" not in written_text
+        assert written_text == "Hello world!"
+        # Reported length reflects the sanitized text that was actually stored.
+        assert result.text_length == len("Hello world!")
+
+    @patch("src.temporal.shared_services.get_staging_service")
+    @patch("src.temporal.shared_services.get_storage_service")
+    @pytest.mark.asyncio
     async def test_extract_text_raises_on_empty_content(
         self, mock_get_storage, mock_get_staging, extract_input
     ):
