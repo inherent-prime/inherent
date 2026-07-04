@@ -189,6 +189,54 @@ def setup_exception_handlers(app):
             media_type="application/problem+json",
         )
 
+    from starlette.exceptions import HTTPException as StarletteHTTPException
+
+    # Map raw HTTP status codes to problem-detail error keys so a plain
+    # ``fastapi.HTTPException(404/403/...)`` still renders as problem+json,
+    # consistent with InherentAPIError, instead of FastAPI's default
+    # ``{"detail": ...}`` application/json (#12).
+    _STATUS_ERROR_KEYS = {
+        400: "bad_request",
+        401: "authentication_failed",
+        403: "authorization_failed",
+        404: "resource_not_found",
+        422: "validation_error",
+        429: "rate_limit_exceeded",
+        503: "service_unavailable",
+    }
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_exception_handler(
+        request: Request, exc: StarletteHTTPException
+    ) -> JSONResponse:
+        ctx = get_request_context()
+        trace_id = ctx.request_id if ctx else None
+
+        error_key = _STATUS_ERROR_KEYS.get(exc.status_code, "internal_error")
+        detail = exc.detail if isinstance(exc.detail, str) else "Request failed."
+
+        if exc.status_code >= 500:
+            logger.error("HTTP error", status_code=exc.status_code, exc_info=True)
+        else:
+            logger.warning("Client HTTP error", status_code=exc.status_code)
+
+        response = JSONResponse(
+            status_code=exc.status_code,
+            content=create_problem_detail(
+                error_key=error_key,
+                status=exc.status_code,
+                detail=detail,
+                instance=request.url.path,
+                trace_id=trace_id,
+            ),
+            media_type="application/problem+json",
+        )
+        # Preserve auth challenge headers (e.g. WWW-Authenticate) if present.
+        if exc.headers:
+            for k, v in exc.headers.items():
+                response.headers[k] = v
+        return response
+
     @app.exception_handler(Exception)
     async def generic_error_handler(request: Request, exc: Exception) -> JSONResponse:
         ctx = get_request_context()
