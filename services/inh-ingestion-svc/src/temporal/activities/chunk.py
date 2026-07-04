@@ -245,118 +245,128 @@ def _chunk_by_size(text: str, document_id: str, max_size: int, overlap: int) -> 
 def _chunk_by_sentences(
     text: str, document_id: str, max_size: int, overlap: int
 ) -> list[ChunkData]:
-    """Split text into chunks by sentences."""
+    """Split text into chunks by sentences.
+
+    Offsets map to the real source positions (#25): each sentence's span in the
+    source is precomputed, so a chunk's start_char/end_char come from its first
+    and last sentence spans rather than accumulated join-length guesses. The
+    source span is preserved even with overlap or non-single-space separators.
+    """
     sentences = re.split(r"(?<=[.!?])\s+", text)
 
-    chunks = []
-    current_chunk: list[str] = []
+    # Precompute each sentence's (start, end) in the source by scanning forward.
+    spans: list[tuple[int, int]] = []
+    cursor = 0
+    for sentence in sentences:
+        idx = text.find(sentence, cursor) if sentence else cursor
+        if idx == -1:
+            idx = cursor
+        spans.append((idx, idx + len(sentence)))
+        cursor = idx + len(sentence)
+
+    chunks: list[ChunkData] = []
+    current: list[int] = []  # sentence indices in the current chunk
     current_size = 0
     chunk_index = 0
-    start_char = 0
 
-    for sentence in sentences:
+    def _emit(indices: list[int]) -> None:
+        nonlocal chunk_index
+        content = " ".join(sentences[i] for i in indices).strip()
+        if not content:
+            return
+        chunks.append(
+            ChunkData(
+                document_id=document_id,
+                content=content,
+                chunk_index=chunk_index,
+                start_char=spans[indices[0]][0],
+                end_char=spans[indices[-1]][1],
+            )
+        )
+        chunk_index += 1
+
+    for i, sentence in enumerate(sentences):
         sentence_len = len(sentence)
 
-        # If adding this sentence exceeds max size, save current chunk
-        if current_size + sentence_len > max_size and current_chunk:
-            chunk_text = " ".join(current_chunk).strip()
-            if chunk_text:
-                chunks.append(
-                    ChunkData(
-                        document_id=document_id,
-                        content=chunk_text,
-                        chunk_index=chunk_index,
-                        start_char=start_char,
-                        end_char=start_char + len(chunk_text),
-                    )
-                )
-                chunk_index += 1
-                start_char += len(chunk_text) + 1
+        if current_size + sentence_len > max_size and current:
+            _emit(current)
 
-            # Keep some sentences for overlap
-            overlap_sentences: list[str] = []
+            # Keep some trailing sentences (by size) for overlap.
+            overlap_indices: list[int] = []
             overlap_size = 0
-            for s in reversed(current_chunk):
-                if overlap_size + len(s) <= overlap:
-                    overlap_sentences.insert(0, s)
-                    overlap_size += len(s)
+            for j in reversed(current):
+                if overlap_size + len(sentences[j]) <= overlap:
+                    overlap_indices.insert(0, j)
+                    overlap_size += len(sentences[j])
                 else:
                     break
-
-            current_chunk = overlap_sentences
+            current = overlap_indices
             current_size = overlap_size
 
-        current_chunk.append(sentence)
+        current.append(i)
         current_size += sentence_len
 
-    # Save final chunk
-    if current_chunk:
-        chunk_text = " ".join(current_chunk).strip()
-        if chunk_text:
-            chunks.append(
-                ChunkData(
-                    document_id=document_id,
-                    content=chunk_text,
-                    chunk_index=chunk_index,
-                    start_char=start_char,
-                    end_char=start_char + len(chunk_text),
-                )
-            )
+    if current:
+        _emit(current)
 
     return chunks
 
 
 def _chunk_by_paragraphs(text: str, document_id: str, max_size: int) -> list[ChunkData]:
-    """Split text into chunks by paragraphs."""
-    paragraphs = text.split("\n\n")
+    """Split text into chunks by paragraphs.
 
-    chunks = []
-    current_chunk: list[str] = []
-    current_size = 0
-    chunk_index = 0
-    start_char = 0
+    Offsets map to real source positions (#25): each (stripped) paragraph's span
+    in the source is located by a forward scan, and a chunk's start/end come from
+    its first/last paragraph spans.
+    """
+    raw_paragraphs = text.split("\n\n")
 
-    for para in paragraphs:
-        para = para.strip()
+    # Build (paragraph_text, start, end) for each non-empty stripped paragraph.
+    entries: list[tuple[str, int, int]] = []
+    cursor = 0
+    for raw in raw_paragraphs:
+        para = raw.strip()
+        # Advance the cursor over the raw block (+2 for the "\n\n" separator).
+        block_start = cursor
+        cursor += len(raw) + 2
         if not para:
             continue
+        idx = text.find(para, block_start)
+        if idx == -1:
+            idx = block_start
+        entries.append((para, idx, idx + len(para)))
 
+    chunks: list[ChunkData] = []
+    current: list[tuple[str, int, int]] = []
+    current_size = 0
+    chunk_index = 0
+
+    def _emit(items: list[tuple[str, int, int]]) -> None:
+        nonlocal chunk_index
+        content = "\n\n".join(p for p, _s, _e in items).strip()
+        if not content:
+            return
+        chunks.append(
+            ChunkData(
+                document_id=document_id,
+                content=content,
+                chunk_index=chunk_index,
+                start_char=items[0][1],
+                end_char=items[-1][2],
+            )
+        )
+        chunk_index += 1
+
+    for para, s, e in entries:
         para_len = len(para)
-
-        # If adding this paragraph exceeds max size, save current chunk
-        if current_size + para_len > max_size and current_chunk:
-            chunk_text = "\n\n".join(current_chunk).strip()
-            if chunk_text:
-                chunks.append(
-                    ChunkData(
-                        document_id=document_id,
-                        content=chunk_text,
-                        chunk_index=chunk_index,
-                        start_char=start_char,
-                        end_char=start_char + len(chunk_text),
-                    )
-                )
-                chunk_index += 1
-                start_char += len(chunk_text) + 2
-
-            current_chunk = []
+        if current_size + para_len > max_size and current:
+            _emit(current)
+            current = []
             current_size = 0
-
-        current_chunk.append(para)
+        current.append((para, s, e))
         current_size += para_len
 
-    # Save final chunk
-    if current_chunk:
-        chunk_text = "\n\n".join(current_chunk).strip()
-        if chunk_text:
-            chunks.append(
-                ChunkData(
-                    document_id=document_id,
-                    content=chunk_text,
-                    chunk_index=chunk_index,
-                    start_char=start_char,
-                    end_char=start_char + len(chunk_text),
-                )
-            )
+    if current:
+        _emit(current)
 
     return chunks
