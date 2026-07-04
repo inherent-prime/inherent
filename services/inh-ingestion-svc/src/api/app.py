@@ -167,9 +167,19 @@ def create_app(settings: Settings) -> FastAPI:
         # re-publish/restart failed jobs (#8). In worker mode this returns the
         # already-initialized global trigger; in api-only mode it self-initializes
         # on first use.
+        from src.temporal.shared_services import get_db_service
         from src.temporal.trigger import get_workflow_trigger
 
-        app.state.trigger = get_workflow_trigger(settings)
+        # Wire db_service so poison-message dead-lettering works (#6). In worker
+        # mode main.py already wired it; this backfills it in api-only mode.
+        # db_service is optional for the trigger, so a bootstrap failure here
+        # must not block app startup — degrade to no dead-lettering.
+        try:
+            db_service = get_db_service()
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("db_service unavailable; trigger dead-lettering disabled", error=str(e))
+            db_service = None
+        app.state.trigger = get_workflow_trigger(settings, db_service=db_service)
 
         logger.info(
             "Standalone API ready",

@@ -92,8 +92,14 @@ async def run_worker(settings: Settings) -> None:
     await mq_service.connect()
     logger.info("MQ connected", backend=mq_service.backend)
 
-    # 2. Initialize workflow trigger (bridges MQ → Temporal → MQ)
-    trigger = get_workflow_trigger(settings, mq_service=mq_service)
+    # 2. Initialize workflow trigger (bridges MQ → Temporal → MQ). Pass the
+    # shared db_service so poison messages can be dead-lettered (#6) — without
+    # it, _record_dead_letter is a silent no-op.
+    from src.temporal.shared_services import get_db_service
+
+    trigger = get_workflow_trigger(
+        settings, mq_service=mq_service, db_service=get_db_service()
+    )
     await trigger.initialize()
     logger.info("Temporal trigger initialized")
 

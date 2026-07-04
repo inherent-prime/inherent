@@ -290,8 +290,28 @@ class TemporalWorkflowTrigger:
         if not self._initialized:
             await self.initialize()
 
-        # Validate message
-        upload_message = DocumentUploadMessage(**message)
+        # Validate message. A malformed (poison) message can never succeed on
+        # retry, so we dead-letter it and return normally → the MQ consumer ACKs
+        # it and stops redelivering. A *transient* failure below (e.g. Temporal
+        # unavailable) still raises so the message is left pending → redelivered (#6).
+        try:
+            upload_message = DocumentUploadMessage(**message)
+        except PydanticValidationError as e:
+            logger.error(
+                "Poison upload message; dead-lettering instead of redelivering",
+                error=str(e),
+                message=message,
+                validation_errors=e.errors(),
+            )
+            await self._record_dead_letter(
+                document_id=message.get("document_id", "unknown"),
+                workspace_id=message.get("workspace_id", "unknown"),
+                user_id=message.get("user_id", "unknown"),
+                workflow_run_id=None,
+                original_message=message,
+                error_message=f"Invalid message format: {e}",
+            )
+            return ""
 
         # Create workflow input
         workflow_input = DocumentIngestionInput(
@@ -394,4 +414,12 @@ def get_workflow_trigger(
         _workflow_trigger = TemporalWorkflowTrigger(
             settings, mq_service=mq_service, db_service=db_service
         )
+    else:
+        # Backfill dependencies a later caller provides (e.g. api-only mode
+        # constructs the trigger before db_service is wired) so dead-letter
+        # recording is not a permanent no-op (#6). Never downgrade to None.
+        if db_service is not None and _workflow_trigger._db_service is None:
+            _workflow_trigger._db_service = db_service
+        if mq_service is not None and _workflow_trigger._mq_service is None:
+            _workflow_trigger._mq_service = mq_service
     return _workflow_trigger

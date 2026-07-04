@@ -1,6 +1,8 @@
 """Unit tests for TemporalWorkflowTrigger and get_workflow_trigger factory."""
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 import src.temporal.trigger as trigger_mod
 from src.temporal.trigger import TemporalWorkflowTrigger, get_workflow_trigger
@@ -129,3 +131,68 @@ class TestGetWorkflowTriggerSingleton:
         settings = _make_settings()
         result = get_workflow_trigger(settings)
         assert isinstance(result, TemporalWorkflowTrigger)
+
+    def test_backfills_db_service_on_existing_singleton(self):
+        """A later caller providing db_service must backfill it onto the
+        already-created singleton (worker mode creates the trigger before the
+        api layer wires db_service), so dead-letter recording is not a no-op (#6)."""
+        settings = _make_settings()
+        first = get_workflow_trigger(settings)  # created without db_service
+        assert first._db_service is None
+
+        db = MagicMock()
+        second = get_workflow_trigger(settings, db_service=db)
+
+        assert second is first
+        assert first._db_service is db
+
+
+# ---------------------------------------------------------------------------
+# async poison-message handling tests (Fix #6)
+# ---------------------------------------------------------------------------
+
+
+class TestAsyncTriggerPoisonHandling:
+    """``trigger_workflow_async`` must dead-letter a malformed (poison) message
+    and return normally so the MQ consumer ACKs it — never re-raise into an
+    infinite redelivery loop. Transient Temporal errors must still raise so the
+    message is redelivered (#6)."""
+
+    def _ready_trigger(self, db_service):
+        settings = _make_settings()
+        trigger = TemporalWorkflowTrigger(settings, db_service=db_service)
+        trigger._initialized = True
+        trigger._client = MagicMock()
+        trigger._client.start_workflow = AsyncMock(return_value=MagicMock())
+        return trigger
+
+    @pytest.mark.asyncio
+    async def test_poison_message_is_dead_lettered_and_not_raised(self):
+        db = MagicMock()
+        db.add_dead_letter_job = AsyncMock()
+        trigger = self._ready_trigger(db)
+
+        # Malformed message: missing required fields -> validation error.
+        result = await trigger.trigger_workflow_async({"document_id": "d1"})
+
+        # Returns normally (no raise) so the consumer ACKs and stops redelivering.
+        assert result == ""
+        db.add_dead_letter_job.assert_awaited_once()
+        # No workflow is started for a poison message.
+        trigger._client.start_workflow.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_transient_temporal_error_still_raises(self, sample_upload_message):
+        db = MagicMock()
+        db.add_dead_letter_job = AsyncMock()
+        trigger = self._ready_trigger(db)
+        # Valid message, but Temporal is transiently unavailable.
+        trigger._client.start_workflow = AsyncMock(
+            side_effect=RuntimeError("temporal unavailable")
+        )
+
+        with pytest.raises(RuntimeError, match="temporal unavailable"):
+            await trigger.trigger_workflow_async(sample_upload_message)
+
+        # Transient errors must NOT be dead-lettered — the message must redeliver.
+        db.add_dead_letter_job.assert_not_awaited()
