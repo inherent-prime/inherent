@@ -69,7 +69,17 @@ class TestHealthFlow:
         assert resp.status_code == 200
 
     async def test_readiness_healthy(self, client):
-        resp = await client.get("/health/ready")
+        # Readiness now reflects dependency health in the HTTP status (#14), so
+        # mock the checks healthy to exercise the 200 path deterministically.
+        from src.api.v1 import health as health_mod
+        from src.models.health import ComponentHealth
+
+        healthy = AsyncMock(return_value=ComponentHealth(status="healthy"))
+        with (
+            patch.object(health_mod, "_check_database", healthy),
+            patch.object(health_mod, "_check_weaviate", healthy),
+        ):
+            resp = await client.get("/health/ready")
         assert resp.status_code == 200
         data = resp.json()
         assert "checks" in data

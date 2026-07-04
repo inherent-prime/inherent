@@ -35,6 +35,7 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
+from src.config.constants import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
 from src.models.api_key import APIKeyInfo
 from src.services.database import get_database
 from src.services.lineage import build_lineage
@@ -475,8 +476,17 @@ async def _handle_get_context(key_info: APIKeyInfo, arguments: dict) -> list[Tex
 
 async def _handle_list_documents(key_info: APIKeyInfo, arguments: dict) -> list[TextContent]:
     """Handle list_documents tool."""
-    page = arguments.get("page", 1)
-    page_size = arguments.get("page_size", 20)
+    # Clamp to the same bounds the REST route enforces (page>=1,
+    # 1<=page_size<=MAX_PAGE_SIZE) so an agent can't request a negative SQL
+    # OFFSET or dump the whole tenant in one call (#13).
+    try:
+        page = max(1, int(arguments.get("page", 1)))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        page_size = min(MAX_PAGE_SIZE, max(1, int(arguments.get("page_size", DEFAULT_PAGE_SIZE))))
+    except (TypeError, ValueError):
+        page_size = DEFAULT_PAGE_SIZE
     requested_workspace_id = arguments.get("workspace_id")
 
     # Get workspace IDs to list from

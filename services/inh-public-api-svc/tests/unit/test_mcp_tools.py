@@ -406,3 +406,30 @@ class TestMemoryPrimitives:
         _topic, message = mock_mq.publish.await_args.args
         assert message["event_type"] == "document.uploaded"
         assert message["document_id"] == "doc-1"
+
+
+class TestListDocumentsPageBounds:
+    """MCP list_documents must clamp page/page_size like the REST route (#13).
+
+    Unbounded page_size lets an agent dump a whole tenant; a non-positive page
+    yields a negative SQL OFFSET that crashes into a generic error string.
+    """
+
+    async def test_clamps_oversized_page_size_and_nonpositive_page(self):
+        mock_db = AsyncMock()
+        mock_db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
+        mock_db.get_documents_multi_workspace = AsyncMock(return_value=([], 0))
+        await _call(
+            "list_documents",
+            {
+                "api_key": "k",
+                "page": -5,
+                "page_size": 1_000_000,
+                "_key_info": _key(permissions=["read", "search"]),
+            },
+            mock_db,
+        )
+        mock_db.get_documents_multi_workspace.assert_awaited_once()
+        _ws, page, page_size = mock_db.get_documents_multi_workspace.await_args.args
+        assert page == 1  # clamped up from -5
+        assert page_size == 100  # clamped down from 1_000_000 (MAX_PAGE_SIZE)

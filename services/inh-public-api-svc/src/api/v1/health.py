@@ -4,7 +4,7 @@ import asyncio
 import time
 from datetime import datetime, timezone
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Response
 from sqlalchemy import text
 
 from src.config import settings
@@ -56,7 +56,7 @@ async def liveness_check_alt() -> LivenessResponse:
     summary="Readiness probe",
     description="Full readiness check with dependency status. Use for Kubernetes readiness probe.",
 )
-async def readiness_check() -> HealthResponse:
+async def readiness_check(response: Response) -> HealthResponse:
     """Readiness probe that checks all dependencies."""
     checks: dict[str, ComponentHealth] = {}
 
@@ -82,6 +82,12 @@ async def readiness_check() -> HealthResponse:
         overall_status = HEALTH_STATUS_DEGRADED
     else:
         overall_status = HEALTH_STATUS_HEALTHY
+
+    # A readiness probe keys off the HTTP status, not the body — return 503 when
+    # unhealthy so the pod is pulled from rotation instead of receiving traffic
+    # it can't serve. `degraded` stays 200 (still serving) (#14).
+    if overall_status == HEALTH_STATUS_UNHEALTHY:
+        response.status_code = 503
 
     return HealthResponse(
         status=overall_status,
