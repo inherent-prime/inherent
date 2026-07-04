@@ -89,6 +89,13 @@ class Settings(BaseSettings):
     rate_limit_enabled: bool = True
     rate_limit_window_seconds: int = 60
     rate_limit_default: int = Field(default=100, description="Default rate limit per minute")
+    rate_limit_unauthenticated: int = Field(
+        default=30,
+        description=(
+            "Per-client-IP limit for requests with no valid API key. Bounds "
+            "brute-force / DB-hammering when auth fails or is absent (#5)."
+        ),
+    )
 
     # S3 Storage
     aws_s3_endpoint: str = Field(

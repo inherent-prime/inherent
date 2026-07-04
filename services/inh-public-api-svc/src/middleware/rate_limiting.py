@@ -71,21 +71,28 @@ class RateLimitingMiddleware(BaseHTTPMiddleware):
         if request.url.path in self.EXEMPT_PATHS:
             return await call_next(request)
 
-        # Get API key info from request state (set by auth dependency)
-        # If not set, the request hasn't been authenticated yet - let it through
-        # and auth will handle rejecting it
+        # Determine the rate-limit bucket. An authenticated request is limited
+        # per API key; an unauthenticated / invalid-key request (api_key_info is
+        # None — including when a transient auth-DB error left it unset) must
+        # still be bounded per client IP, or an attacker can brute-force keys and
+        # hammer the DB at unlimited rate and a brief auth outage would disable
+        # limiting globally (#5).
         api_key_info = getattr(request.state, "api_key_info", None)
-        if api_key_info is None:
-            return await call_next(request)
-
-        # Get rate limit from API key (uses default if not specified)
-        rate_limit = getattr(api_key_info, "rate_limit", None) or DEFAULT_RATE_LIMIT
-        key_id = getattr(api_key_info, "key_id", "unknown")
+        if api_key_info is not None:
+            rate_limit = getattr(api_key_info, "rate_limit", None) or DEFAULT_RATE_LIMIT
+            bucket_key = f"key:{getattr(api_key_info, 'key_id', 'unknown')}"
+        else:
+            ctx = get_request_context()
+            client_ip = (ctx.client_ip if ctx else None) or (
+                request.client.host if request.client else "unknown"
+            )
+            bucket_key = f"ip:{client_ip}"
+            rate_limit = settings.rate_limit_unauthenticated
 
         # Check rate limit
         rate_limiter = get_rate_limiter()
         result = await rate_limiter.check_rate_limit(
-            key=key_id,
+            key=bucket_key,
             limit=rate_limit,
             window_seconds=settings.rate_limit_window_seconds,
         )
@@ -93,7 +100,7 @@ class RateLimitingMiddleware(BaseHTTPMiddleware):
         if not result.allowed:
             logger.warning(
                 "Rate limit exceeded",
-                key_id=key_id,
+                bucket_key=bucket_key,
                 limit=rate_limit,
                 path=request.url.path,
             )

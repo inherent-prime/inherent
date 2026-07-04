@@ -31,6 +31,14 @@ A codescan-driven pass fixing correctness, isolation, and durability defects.
   `ensure_tenant_ready` Temporal activities now re-raise on failure so the
   configured `RetryPolicy` actually fires (they previously swallowed errors
   into a success return → no retry, instant dead-letter, and NULL-tenant docs).
+- **Poison messages** — a malformed upload event is now dead-lettered and
+  ACKed instead of re-raising into an infinite MQ redelivery loop; the worker
+  and api trigger are wired with `db_service` so dead-lettering is not a no-op.
+- **Rate limiting** — unauthenticated / invalid-key requests (and all traffic
+  during a transient auth-DB outage) are now bounded per client IP instead of
+  bypassing the limiter; a Redis backend (selected when `REDIS_URL` is set)
+  keeps limits correct across autoscaled instances, and the in-memory fallback
+  now warns that limits are per-process. New `RATE_LIMIT_UNAUTHENTICATED`.
 - **⚠️ BREAKING (deploy) — release Compose hardening.** `docker-compose.release.yml`
   now **refuses to start** unless `POSTGRES_PASSWORD` and `INGESTION_API_KEY`
   are set (no more shipped `postgres` / `dev-ingestion-key` defaults), and all

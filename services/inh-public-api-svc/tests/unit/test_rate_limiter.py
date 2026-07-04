@@ -5,9 +5,12 @@ import time
 
 import pytest
 
+from unittest.mock import patch
+
 from src.core.rate_limiter import (
     InMemoryBackend,
     RateLimitInfo,
+    RedisBackend,
     TokenBucketRateLimiter,
 )
 
@@ -149,3 +152,85 @@ class TestTokenBucketRateLimiter:
         # Check again - should be the same
         state2 = await limiter.get_current_state("key1", limit=10, window_seconds=60)
         assert state2.remaining == 9
+
+
+class _FakeAsyncRedis:
+    """Minimal async Redis fake supporting the fixed-window counter ops."""
+
+    def __init__(self) -> None:
+        self.counters: dict[str, int] = {}
+        self.ttls: dict[str, int] = {}
+
+    async def incr(self, key: str) -> int:
+        self.counters[key] = self.counters.get(key, 0) + 1
+        return self.counters[key]
+
+    async def ttl(self, key: str) -> int:
+        return self.ttls.get(key, -1)
+
+    async def expire(self, key: str, seconds: int) -> bool:
+        self.ttls[key] = seconds
+        return True
+
+    async def get(self, key: str):
+        val = self.counters.get(key)
+        return None if val is None else str(val)
+
+
+class TestRedisBackend:
+    """RedisBackend enforces a shared fixed-window counter (#5)."""
+
+    @pytest.mark.asyncio
+    async def test_allows_up_to_limit_then_blocks(self):
+        backend = RedisBackend(_FakeAsyncRedis())
+        results = [await backend.check_and_consume("k", limit=3, window_seconds=60) for _ in range(4)]
+        assert [r.allowed for r in results] == [True, True, True, False]
+        assert results[-1].info.remaining == 0
+
+    @pytest.mark.asyncio
+    async def test_sets_expiry_on_first_hit(self):
+        fake = _FakeAsyncRedis()
+        backend = RedisBackend(fake)
+        await backend.check_and_consume("k", limit=5, window_seconds=42)
+        # Exactly one key, with the window's expiry applied so it can't count forever.
+        assert list(fake.ttls.values()) == [42]
+
+    @pytest.mark.asyncio
+    async def test_distinct_keys_are_independent(self):
+        backend = RedisBackend(_FakeAsyncRedis())
+        a = await backend.check_and_consume("ip:1.1.1.1", limit=1, window_seconds=60)
+        b = await backend.check_and_consume("ip:2.2.2.2", limit=1, window_seconds=60)
+        assert a.allowed and b.allowed
+
+
+class TestBackendSelection:
+    """get_rate_limiter selects Redis when REDIS_URL is set, else in-memory (#5)."""
+
+    def setup_method(self):
+        import src.core.rate_limiter as rl
+
+        rl._rate_limiter = None
+
+    def teardown_method(self):
+        import src.core.rate_limiter as rl
+
+        rl._rate_limiter = None
+
+    def test_uses_redis_backend_when_url_set(self):
+        import src.core.rate_limiter as rl
+        from src.config import settings as settings_obj
+
+        with (
+            patch.object(settings_obj, "redis_url", "redis://localhost:6379"),
+            patch("redis.asyncio.from_url", return_value=object()),
+        ):
+            limiter = rl.get_rate_limiter()
+        assert isinstance(limiter._backend, RedisBackend)
+
+    def test_uses_inmemory_backend_when_no_url(self):
+        import src.core.rate_limiter as rl
+        from src.config import settings as settings_obj
+
+        with patch.object(settings_obj, "redis_url", None):
+            limiter = rl.get_rate_limiter()
+        assert isinstance(limiter._backend, InMemoryBackend)

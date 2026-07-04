@@ -8,6 +8,22 @@ import pytest
 from src.models.api_key import APIKeyInfo
 
 
+@pytest.fixture(autouse=True)
+def _reset_rate_limiter_singleton():
+    """Isolate the global rate limiter between tests.
+
+    The limiter is a process-wide singleton whose in-memory buckets now count
+    unauthenticated (per-IP) traffic too (#5). Without resetting it, every
+    TestClient request shares one ``ip:testclient`` bucket that fills up across
+    the session and 429s later tests. Reset to a fresh limiter per test.
+    """
+    import src.core.rate_limiter as rl
+
+    rl._rate_limiter = None
+    yield
+    rl._rate_limiter = None
+
+
 @pytest.fixture
 def mock_api_key_info():
     """Create a mock API key info with full permissions."""
