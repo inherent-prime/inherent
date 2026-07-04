@@ -157,11 +157,11 @@ async def store_in_postgresql(input: StoreDocumentInput) -> StoreDocumentOutput:
                 error=str(rec_err),
             )
 
-        return StoreDocumentOutput(
-            success=False,
-            chunks_stored=0,
-            error=str(e),
-        )
+        # Re-raise so Temporal's RetryPolicy (maximum_attempts=5) fires. Returning
+        # success=False here is a *successful* activity completion → no retry and
+        # an instant dead-letter on the first transient blip. If retries are
+        # exhausted, the workflow's outer handler dead-letters the doc (#2).
+        raise
 
 
 @activity.defn
@@ -216,11 +216,10 @@ async def store_in_weaviate(input: StoreDocumentInput) -> StoreDocumentOutput:
                     error=str(rec_err),
                 )
 
-            return StoreDocumentOutput(
-                success=False,
-                chunks_stored=0,
-                error="Weaviate not connected",
-            )
+            # Raise so Temporal retries — a not-connected Weaviate is often a
+            # transient reconnect window; the RetryPolicy should get a shot
+            # before the doc is failed/dead-lettered (#2).
+            raise RuntimeError("Weaviate not connected")
 
         # Convert chunk dicts to DocumentChunk objects. metadata carries the
         # per-chunk risk signal (#44) so it can be written as Weaviate properties.
@@ -330,8 +329,7 @@ async def store_in_weaviate(input: StoreDocumentInput) -> StoreDocumentOutput:
                 error=str(rec_err),
             )
 
-        return StoreDocumentOutput(
-            success=False,
-            chunks_stored=0,
-            error=str(e),
-        )
+        # Re-raise so Temporal's RetryPolicy (maximum_attempts=5) fires; a
+        # swallowed success=False is a completion → no retry (#2). Exhausted
+        # retries land in the workflow's outer handler → failed + dead-letter.
+        raise

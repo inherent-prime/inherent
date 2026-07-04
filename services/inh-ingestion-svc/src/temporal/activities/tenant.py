@@ -98,8 +98,12 @@ async def ensure_tenant_ready(input: EnsureTenantInput) -> EnsureTenantOutput:
                     error=str(rec_err),
                 )
 
-        # Return partial result - processing can continue without tenant_id
-        return EnsureTenantOutput(tenant_id=None, workspace_ready=False)
+        # Re-raise so Temporal's RetryPolicy (maximum_attempts=3) fires. Returning
+        # tenant_id=None is a *successful* completion → no retry, and the workflow
+        # then stores the document + chunks with a NULL tenant_id, breaking tenant
+        # attribution for any query that filters on it (#2). Exhausted retries
+        # surface to the workflow's outer handler → failed + dead-letter.
+        raise
 
 
 @activity.defn

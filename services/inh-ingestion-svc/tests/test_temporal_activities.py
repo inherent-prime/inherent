@@ -454,6 +454,136 @@ class TestStoreInWeaviateReindex:
 
 
 # =========================================================================
+# Retry-honouring failure tests (Fix #2)
+# =========================================================================
+
+
+class TestStoreAndTenantRaiseOnFailure:
+    """Store/tenant activities must RAISE on failure so Temporal's RetryPolicy
+    fires. Returning success=False / tenant_id=None is a *successful* activity
+    completion in Temporal's eyes → no retry, instant dead-letter, and (for
+    tenant) a NULL-tenant document. A transient DB/Weaviate blip on attempt 1
+    must be retried, not immediately dead-lettered."""
+
+    def _store_input(self):
+        return StoreDocumentInput(
+            workflow_run_id="wf_1",
+            document_id="doc_1",
+            workspace_id="ws_1",
+            user_id="user_1",
+            filename="f.txt",
+            original_filename="f.txt",
+            content_type="text/plain",
+            size_bytes=10,
+            storage_backend="local",
+            storage_path="storage/f.txt",
+            text_length=10,
+            processing_time_ms=5,
+        )
+
+    def _one_chunk(self):
+        return [
+            {
+                "document_id": "doc_1",
+                "content": "chunk text",
+                "chunk_index": 0,
+                "start_char": 0,
+                "end_char": 10,
+            }
+        ]
+
+    @patch("src.temporal.shared_services.get_db_service")
+    @patch("src.temporal.shared_services.get_staging_service")
+    @pytest.mark.asyncio
+    async def test_store_in_postgresql_raises_on_db_failure(
+        self, mock_get_staging, mock_get_db
+    ):
+        from src.temporal.activities.store import store_in_postgresql
+
+        mock_staging = MagicMock()
+        mock_staging.read_chunks.return_value = self._one_chunk()
+        mock_get_staging.return_value = mock_staging
+
+        mock_db = MagicMock()
+        mock_db.store_processed_document = AsyncMock(
+            side_effect=RuntimeError("transient pg connection reset")
+        )
+        mock_db.record_ingestion_event = AsyncMock(return_value=None)
+        mock_get_db.return_value = mock_db
+
+        # Must propagate so Temporal retries (not swallow into success=False).
+        with pytest.raises(RuntimeError, match="transient pg connection reset"):
+            await store_in_postgresql(self._store_input())
+        # Failure lineage still recorded before re-raising.
+        mock_db.record_ingestion_event.assert_awaited()
+
+    @patch("src.temporal.shared_services.get_db_service")
+    @patch("src.temporal.shared_services.get_weaviate_service")
+    @patch("src.temporal.shared_services.get_staging_service")
+    @pytest.mark.asyncio
+    async def test_store_in_weaviate_raises_on_store_failure(
+        self, mock_get_staging, mock_get_weaviate, mock_get_db
+    ):
+        from src.temporal.activities.store import store_in_weaviate
+
+        mock_staging = MagicMock()
+        mock_staging.read_chunks.return_value = self._one_chunk()
+        mock_get_staging.return_value = mock_staging
+
+        weaviate = MagicMock()
+        weaviate.is_connected.return_value = True
+        weaviate.delete_document_chunks_graceful = AsyncMock(return_value=(True, 0))
+        weaviate.store_chunks_with_tenant = AsyncMock(
+            side_effect=RuntimeError("weaviate 503")
+        )
+        mock_get_weaviate.return_value = weaviate
+
+        mock_db = MagicMock()
+        mock_db.record_ingestion_event = AsyncMock(return_value=None)
+        mock_get_db.return_value = mock_db
+
+        with pytest.raises(RuntimeError, match="weaviate 503"):
+            await store_in_weaviate(self._store_input())
+
+    @patch("src.temporal.shared_services.get_db_service")
+    @patch("src.temporal.shared_services.get_weaviate_service")
+    @pytest.mark.asyncio
+    async def test_ensure_tenant_ready_raises_on_failure(
+        self, mock_get_weaviate, mock_get_db
+    ):
+        from src.temporal.activities.tenant import ensure_tenant_ready
+        from src.temporal.models import EnsureTenantInput
+
+        mock_db = MagicMock()
+        mock_db.record_ingestion_event = AsyncMock(return_value=None)
+        mock_get_db.return_value = mock_db
+        mock_get_weaviate.return_value = MagicMock()
+
+        # TenantManager and get_settings are imported inside the activity body.
+        with (
+            patch("src.services.tenant_manager.TenantManager") as mock_tm_cls,
+            patch("src.config.settings.get_settings", return_value=MagicMock()),
+        ):
+            instance = mock_tm_cls.return_value
+            instance.ensure_workspace_ready = AsyncMock(
+                side_effect=RuntimeError("tenant bootstrap failed")
+            )
+            # Must raise so the 3-attempt RetryPolicy fires instead of
+            # silently returning tenant_id=None (NULL-tenant attribution).
+            with pytest.raises(RuntimeError, match="tenant bootstrap failed"):
+                await ensure_tenant_ready(
+                    EnsureTenantInput(
+                        workspace_id="ws_1",
+                        user_id="user_1",
+                        workflow_run_id="wf_1",
+                        document_id="doc_1",
+                    )
+                )
+        # Failure lineage still recorded before re-raising.
+        mock_db.record_ingestion_event.assert_awaited()
+
+
+# =========================================================================
 # Model tests
 # =========================================================================
 
