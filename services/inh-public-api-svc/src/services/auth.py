@@ -150,16 +150,31 @@ async def _resolve_workspace(
 ) -> ResolvedAuth:
     """Resolve workspace_id from header or API key, with access validation.
 
-    Priority: X-Workspace-Id header > key_info.workspace_id > user's workspaces.
+    A *workspace-scoped* key (``key_info.workspace_id`` set) is bound to exactly
+    that workspace and may never act on a different one — even one its owning
+    user also owns. Honouring an ``X-Workspace-Id`` header that differs from the
+    key's binding would collapse the key's scope to "any workspace the user
+    owns", defeating the point of issuing a scoped key. Only *user-scoped* keys
+    (``workspace_id is None``) may select among the user's workspaces via header.
     """
-    workspace_id = header_workspace_id or key_info.workspace_id
+    # Workspace-scoped key: the binding wins. Reject a header that disagrees.
+    if key_info.workspace_id is not None:
+        if header_workspace_id is not None and header_workspace_id != key_info.workspace_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"API key is scoped to workspace '{key_info.workspace_id}' "
+                    f"and cannot access workspace '{header_workspace_id}'"
+                ),
+            )
+        return ResolvedAuth(key_info=key_info, workspace_id=key_info.workspace_id)
 
+    # User-scoped key: a header may select any workspace the user actually owns.
+    workspace_id = header_workspace_id
     if workspace_id:
-        # Validate user has access to this workspace
         database = await get_database()
         user_workspaces = await database.get_user_workspace_ids(key_info.user_id)
-        # Allow if: key is scoped to this workspace, OR user owns it
-        if key_info.workspace_id == workspace_id or workspace_id in user_workspaces:
+        if workspace_id in user_workspaces:
             return ResolvedAuth(key_info=key_info, workspace_id=workspace_id)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

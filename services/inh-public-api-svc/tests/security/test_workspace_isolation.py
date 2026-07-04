@@ -93,6 +93,66 @@ async def test_workspace_scoped_key_cannot_cross_to_another_workspace() -> None:
 
 
 @pytest.mark.asyncio
+async def test_workspace_scoped_key_cannot_cross_even_to_an_owned_workspace() -> None:
+    """A workspace-scoped key must stay bound to its workspace even when the
+    owning *user* also owns the target workspace.
+
+    Regression for the ``X-Workspace-Id`` scope-escape: a key deliberately
+    scoped to ws-A (e.g. handed to a limited integration) must not be usable
+    against ws-B just because the key's owner happens to own ws-B too —
+    otherwise the key-level scope degrades to "any workspace the user owns".
+    """
+    key = APIKeyInfo(
+        key_id="key-ws",
+        user_id="user-1",
+        workspace_id="ws-a",  # key is scoped to ws-a only
+        permissions=["read", "search"],
+        rate_limit=100,
+        expires_at=None,
+        status="active",
+    )
+    # The owner owns BOTH ws-a and ws-b, but the key is scoped to ws-a.
+    with _patch_user_workspaces(["ws-a", "ws-b"]):
+        with pytest.raises(HTTPException) as exc_info:
+            await _resolve_workspace(key, "ws-b", required=False)
+    assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
+
+
+@pytest.mark.asyncio
+async def test_workspace_scoped_key_with_matching_header_resolves() -> None:
+    """A scoped key with a header naming its own workspace resolves fine."""
+    key = APIKeyInfo(
+        key_id="key-ws",
+        user_id="user-1",
+        workspace_id="ws-a",
+        permissions=["read", "search"],
+        rate_limit=100,
+        expires_at=None,
+        status="active",
+    )
+    with _patch_user_workspaces(["ws-a", "ws-b"]):
+        resolved = await _resolve_workspace(key, "ws-a", required=False)
+    assert resolved.workspace_id == "ws-a"
+
+
+@pytest.mark.asyncio
+async def test_workspace_scoped_key_ignores_absent_header() -> None:
+    """A scoped key with no header resolves to its bound workspace."""
+    key = APIKeyInfo(
+        key_id="key-ws",
+        user_id="user-1",
+        workspace_id="ws-a",
+        permissions=["read", "search"],
+        rate_limit=100,
+        expires_at=None,
+        status="active",
+    )
+    with _patch_user_workspaces(["ws-a", "ws-b"]):
+        resolved = await _resolve_workspace(key, None, required=False)
+    assert resolved.workspace_id == "ws-a"
+
+
+@pytest.mark.asyncio
 async def test_resolve_uses_only_authorised_set_for_default() -> None:
     """With no header and a single owned workspace, the resolved workspace is
     exactly that owned one (never a foreign id)."""
