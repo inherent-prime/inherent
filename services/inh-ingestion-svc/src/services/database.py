@@ -149,6 +149,21 @@ class DatabaseService:
             Index("idx_workspace_metadata_user_id", "user_id"),
         )
 
+        # Idempotency ledger for workspace stat increments (#7): each workflow
+        # run applies its deltas at most once. See migration 011.
+        self.workspace_stats_ledger = Table(
+            "workspace_stats_ledger",
+            self.metadata,
+            Column("workflow_run_id", String, primary_key=True),
+            Column("workspace_id", String, nullable=False),
+            Column(
+                "applied_at",
+                DateTime(timezone=True),
+                nullable=False,
+                default=lambda: datetime.now(UTC),
+            ),
+        )
+
         # Parent table: processed_documents
         self.processed_documents = Table(
             "processed_documents",
@@ -663,6 +678,7 @@ class DatabaseService:
         document_delta: int = 0,
         chunk_delta: int = 0,
         size_delta: int = 0,
+        workflow_run_id: str | None = None,
     ) -> bool:
         """Update workspace statistics atomically.
 
@@ -671,14 +687,36 @@ class DatabaseService:
             document_delta: Change in document count
             chunk_delta: Change in chunk count
             size_delta: Change in total size bytes
+            workflow_run_id: When provided, the increment is applied at most once
+                per run (idempotency ledger, #7) so a Temporal retry or a
+                dead-letter reprocess of the same document cannot double-count.
 
         Returns:
-            True if updated
+            True if the increment was applied; False if it was skipped as a
+            duplicate for this ``workflow_run_id``.
         """
         if not self.engine:
             raise RuntimeError("Database not connected")
 
         with self.get_session() as session:
+            # Idempotency (#7): record the run in a ledger and only apply the
+            # increment the first time. The ledger insert and the UPDATE share
+            # one transaction, so they commit (or roll back) together.
+            if workflow_run_id is not None:
+                ledger = session.execute(
+                    text(
+                        """
+                        INSERT INTO workspace_stats_ledger (workflow_run_id, workspace_id)
+                        VALUES (:run_id, :workspace_id)
+                        ON CONFLICT (workflow_run_id) DO NOTHING
+                        """
+                    ),
+                    {"run_id": workflow_run_id, "workspace_id": workspace_id},
+                )
+                if ledger.rowcount == 0:
+                    # Already applied for this run — skip to avoid double counting.
+                    return False
+
             # Use raw SQL for atomic update with GREATEST to prevent negative values
             result = session.execute(
                 text(

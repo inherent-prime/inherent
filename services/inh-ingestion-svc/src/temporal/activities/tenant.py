@@ -137,6 +137,9 @@ async def update_workspace_stats(input: UpdateStatsInput) -> bool:
             document_delta=input.document_delta,
             chunk_delta=input.chunk_delta,
             size_delta=input.size_delta,
+            # Idempotency key (#7): dedup double-counting on Temporal retry /
+            # dead-letter reprocess of the same run.
+            workflow_run_id=input.workflow_run_id,
         )
 
         logger.info(

@@ -215,6 +215,7 @@ class TestTenantManager:
             document_delta=1,
             chunk_delta=10,
             size_delta=1024,
+            workflow_run_id=None,
         )
 
     def test_clear_cache(self, tenant_manager):

@@ -209,6 +209,7 @@ class TenantManager:
         document_delta: int = 0,
         chunk_delta: int = 0,
         size_delta: int = 0,
+        workflow_run_id: str | None = None,
     ) -> None:
         """Update workspace statistics after document processing.
 
@@ -217,6 +218,8 @@ class TenantManager:
             document_delta: Change in document count (+1 for add, -1 for delete)
             chunk_delta: Change in chunk count
             size_delta: Change in total size bytes
+            workflow_run_id: Idempotency key so a retry/reprocess of the same run
+                doesn't double-count (#7).
         """
         if not self.db_service:
             return
@@ -227,6 +230,7 @@ class TenantManager:
                 document_delta=document_delta,
                 chunk_delta=chunk_delta,
                 size_delta=size_delta,
+                workflow_run_id=workflow_run_id,
             )
         except Exception as e:
             logger.warning(
