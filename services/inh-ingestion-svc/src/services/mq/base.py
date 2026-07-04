@@ -132,6 +132,11 @@ class BaseMQService(abc.ABC):
                 topic=topic,
             )
         except Exception as e:
+            # Best-effort, but make the drop observable (not a silent loss that
+            # leaves the doc stuck "processing" downstream) (#37).
+            from src.services.metrics import COMPLETION_PUBLISH_FAILURES_TOTAL
+
+            COMPLETION_PUBLISH_FAILURES_TOTAL.inc()
             logger.error(
                 "Failed to publish completion notification",
                 document_id=result.document_id,

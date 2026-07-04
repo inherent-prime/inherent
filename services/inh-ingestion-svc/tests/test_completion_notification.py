@@ -172,10 +172,15 @@ class TestPublishCompletion:
             chunks_created=1,
         )
 
-        # Must not propagate the exception
+        # Must not propagate the exception, but the drop must be observable via
+        # a metric (best-effort publish is no longer a silent loss) (#37).
+        from src.services.metrics import COMPLETION_PUBLISH_FAILURES_TOTAL
+
+        before = COMPLETION_PUBLISH_FAILURES_TOTAL._value.get()
         await mq_service.publish_completion(result, upload_message)
 
         mq_service.publish.assert_called_once()
+        assert COMPLETION_PUBLISH_FAILURES_TOTAL._value.get() == before + 1
 
 
 # ---------------------------------------------------------------------------

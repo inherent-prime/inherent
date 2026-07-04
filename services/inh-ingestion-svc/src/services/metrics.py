@@ -55,6 +55,14 @@ AUDIT_MESSAGES_DROPPED_TOTAL = Counter(
     ["reason"],
 )
 
+# Completion notifications that failed to publish. The publish is best-effort
+# (a failure must not fail the document), but the drop must be observable rather
+# than a silent loss that leaves the doc stuck "processing" downstream (#37).
+COMPLETION_PUBLISH_FAILURES_TOTAL = Counter(
+    "ingestion_completion_publish_failures_total",
+    "Completion notifications that failed to publish",
+)
+
 # ── Backpressure / MQ Metrics (#18) ──────────────────────────────────
 
 # Latency from receiving a message off the MQ to Temporal accepting the
