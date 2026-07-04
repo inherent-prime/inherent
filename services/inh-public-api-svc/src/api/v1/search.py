@@ -178,8 +178,9 @@ async def _search_workspaces_concurrently(
     time in milliseconds (measured around the gather, NOT a sum of per-workspace
     times).
     """
-    # Embed once, reuse across all workspaces (#13).
-    query_vector = search_service.embed_query_vector(request)
+    # Embed once, reuse across all workspaces (#13). Offload the blocking TEI
+    # call to a thread so it doesn't stall the event loop (#19).
+    query_vector = await asyncio.to_thread(search_service.embed_query_vector, request)
 
     semaphore = asyncio.Semaphore(settings.search_max_workspace_concurrency)
 

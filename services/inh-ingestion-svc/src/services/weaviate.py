@@ -6,6 +6,7 @@ Multi-tenancy Design:
 - This enables efficient per-user data isolation within workspace-level organization
 """
 
+import asyncio
 import hashlib
 import uuid
 from datetime import UTC, datetime
@@ -467,11 +468,14 @@ class WeaviateService:
             # Use tenant-scoped operations
             tenant_collection = collection.with_tenant(tenant_name)
 
-            # Compute embeddings in one batch (much faster than per-chunk)
+            # Compute embeddings in one batch (much faster than per-chunk).
+            # embed_texts does blocking HTTP to the TEI sidecar, so offload it to
+            # a thread — otherwise it stalls the event loop (and every other
+            # coroutine) for the whole document's embedding round-trip (#19).
             from src.services.embedder import embed_texts
 
             chunk_texts = [c.content for c in chunks]
-            vectors = embed_texts(chunk_texts)
+            vectors = await asyncio.to_thread(embed_texts, chunk_texts)
 
             # Single ingest timestamp for this store call (#42): all chunks of a
             # document share one ingested_at so freshness is consistent per store.

@@ -78,3 +78,26 @@ async def test_returns_count_when_no_failures(service):
             content_type="text/plain",
         )
     assert n == 3
+
+
+@pytest.mark.asyncio
+async def test_embedding_is_offloaded_to_thread(service):
+    """The synchronous embed_texts call must be offloaded to a thread so it does
+    not block the event loop during document store (#19)."""
+    import src.services.weaviate as wv
+
+    _wire_batch(service, [])
+    chunks = [_chunk(0)]
+    with patch.object(
+        wv.asyncio, "to_thread", new=AsyncMock(return_value=[[0.1] * 384])
+    ) as to_thread:
+        await service.store_chunks_with_tenant(
+            chunks=chunks,
+            document_id="d",
+            workspace_id="ws",
+            user_id="u",
+            original_filename="f.txt",
+            content_type="text/plain",
+        )
+    to_thread.assert_awaited_once()
+    assert to_thread.await_args.args[0].__name__ == "embed_texts"

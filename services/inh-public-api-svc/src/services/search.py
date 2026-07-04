@@ -1,5 +1,6 @@
 """Search service for semantic search operations."""
 
+import asyncio
 import json
 import re
 import time
@@ -332,6 +333,12 @@ class SearchService:
         """
         client = await self._get_client()
 
+        # Compute the query vector here (offloaded to a thread) if the caller
+        # didn't precompute it, so _build_graphql never does a blocking embed on
+        # the event loop (#19). embed_query_vector returns None for keyword mode.
+        if query_vector is None and request.search_mode != "keyword":
+            query_vector = await asyncio.to_thread(self.embed_query_vector, request)
+
         collection_name = _get_workspace_collection_name(workspace_id)
         tenant_name = _get_user_tenant_name(user_id)
 
@@ -572,12 +579,11 @@ class SearchService:
             # because Weaviate is configured without a text vectorizer module.
             # Reuse the caller's precomputed vector when provided (#13) so a
             # multi-workspace request embeds the query only once.
-            if query_vector is not None:
-                vector_list = query_vector
-            else:
-                from src.services.embedder import embed_query
-
-                vector_list = list(embed_query(request.query))
+            # _search_weaviate always precomputes the vector for semantic/hybrid
+            # (offloaded to a thread, #19), so it is present here. Guard defensively.
+            if query_vector is None:
+                raise ValueError("query_vector is required for semantic/hybrid search")
+            vector_list = query_vector
             vector_literal = "[" + ", ".join(f"{v:.6f}" for v in vector_list) + "]"
             if request.search_mode == "hybrid":
                 search_args = (
