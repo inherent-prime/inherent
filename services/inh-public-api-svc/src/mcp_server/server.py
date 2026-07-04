@@ -362,8 +362,20 @@ async def _run_search(
         for result in response.results:
             tagged.append((workspace_id, result))
 
-    tagged.sort(key=lambda pair: pair[1].score, reverse=True)
+    tagged.sort(key=_search_rank_key)
     return tagged[: request.limit], requested_workspace_id, None
+
+
+def _search_rank_key(pair: tuple[str, object]) -> tuple[float, str, str]:
+    """Stable sort key for merged multi-workspace results (#28).
+
+    Sort by score descending, then by (chunk_id, document_id) so equal-scored
+    results at the top-k cutoff order deterministically across identical
+    requests — matching the REST path. Workspaces are iterated in a set's
+    (nondeterministic) order, so score alone is not stable.
+    """
+    result = pair[1]
+    return (-result.score, result.chunk_id, result.document_id)  # type: ignore[attr-defined]
 
 
 async def _handle_search(key_info: APIKeyInfo, arguments: dict) -> list[TextContent]:

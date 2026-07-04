@@ -86,9 +86,48 @@ class TestFilesystemConnectorLifecycle:
         connector.connect()
         connector.disconnect()
 
-    def test_default_base_path_is_dot(self):
-        """Default base_path should be Path('.')."""
+    def test_default_base_path_is_cwd(self):
+        """Default base_path resolves to the current working directory (#35).
+
+        The connector now resolves base_path so containment checks compare
+        absolute paths.
+        """
         from pathlib import Path
 
         connector = FilesystemConnector()
-        assert connector.base_path == Path(".")
+        assert connector.base_path == Path(".").resolve()
+
+
+class TestFilesystemConnectorTraversal:
+    """FilesystemConnector must not read outside its base path (#35)."""
+
+    def test_blocks_parent_traversal(self, tmp_path):
+        from src.connectors.filesystem import FilesystemConnector
+
+        base = tmp_path / "root"
+        base.mkdir()
+        connector = FilesystemConnector(str(base))
+        import pytest
+
+        with pytest.raises(PermissionError):
+            connector.fetch_document("../../../etc/passwd")
+
+    def test_blocks_absolute_path_escape(self, tmp_path):
+        from src.connectors.filesystem import FilesystemConnector
+
+        base = tmp_path / "root"
+        base.mkdir()
+        connector = FilesystemConnector(str(base))
+        import pytest
+
+        with pytest.raises(PermissionError):
+            connector.fetch_document("/etc/passwd")
+
+    def test_allows_legit_file(self, tmp_path):
+        from src.connectors.filesystem import FilesystemConnector
+
+        base = tmp_path / "root"
+        base.mkdir()
+        (base / "doc.txt").write_text("hello")
+        connector = FilesystemConnector(str(base))
+        assert connector.fetch_document("doc.txt") == b"hello"

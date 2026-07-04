@@ -3,6 +3,7 @@
 from functools import lru_cache
 from typing import Literal
 
+from inh_contracts.events import StorageBackend
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -29,7 +30,9 @@ class Settings(BaseSettings):
     storage_bucket: str = Field("", alias="STORAGE_BUCKET")
 
     # Storage Configuration
-    storage_backend: Literal["local", "gcs", "s3"] = Field("s3", alias="STORAGE_BACKEND")
+    # Reuse the shared contract type so this can't drift from the wire/DB enum
+    # (which already accept 'azure') (#27).
+    storage_backend: StorageBackend = Field("s3", alias="STORAGE_BACKEND")
 
     # S3-compatible storage (Hetzner Object Storage, AWS S3, MinIO, etc.)
     s3_access_key_id: str | None = Field(None, alias="AWS_ACCESS_KEY_ID")
