@@ -109,8 +109,14 @@ async def _chunk_text_inner(input: ChunkTextInput) -> ChunkTextOutput:
     settings = get_settings()
 
     document_id = input.document_id
-    strategy = input.strategy
-    overlap = input.chunk_overlap
+    # Resolve chunking config HERE (not in @workflow.run, a Temporal determinism
+    # anti-pattern, #38). Per-document overrides on the input win; otherwise fall
+    # back to settings. The activity already reads settings for the token budget.
+    strategy = input.strategy or settings.chunking_strategy
+    overlap = input.chunk_overlap if input.chunk_overlap is not None else settings.chunk_overlap
+    requested_max = (
+        input.max_chunk_size if input.max_chunk_size is not None else settings.max_chunk_size
+    )
 
     # Model-aware sizing: never let a single chunk exceed the embedding
     # model's token budget. We translate embedding_max_tokens into a character
@@ -118,14 +124,14 @@ async def _chunk_text_inner(input: ChunkTextInput) -> ChunkTextOutput:
     # to it, so estimated tokens stay under the budget instead of relying on
     # TEI's silent server-side truncation.
     char_cap = _token_budget_char_cap(settings.embedding_max_tokens)
-    max_size = min(input.max_chunk_size, char_cap)
+    max_size = min(requested_max, char_cap)
 
     logger.info(
         "Chunking text",
         document_id=document_id,
         strategy=strategy,
         text_length=len(text),
-        requested_max_chunk_size=input.max_chunk_size,
+        requested_max_chunk_size=requested_max,
         effective_max_chunk_size=max_size,
         embedding_max_tokens=settings.embedding_max_tokens,
     )

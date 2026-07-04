@@ -177,9 +177,11 @@ class ChunkTextInput:
 
     workflow_run_id: str
     document_id: str
-    strategy: Literal["tokens", "sentences", "paragraphs"]
-    max_chunk_size: int
-    chunk_overlap: int
+    # Nullable overrides — the chunk_text activity resolves None from settings
+    # (config is resolved in the activity, not the workflow, #38).
+    strategy: Literal["tokens", "sentences", "paragraphs"] | None = None
+    max_chunk_size: int | None = None
+    chunk_overlap: int | None = None
     workspace_id: str | None = None
 
 
