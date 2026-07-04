@@ -7,6 +7,19 @@ import sys
 import structlog
 
 
+# Real service modes — any of these means a running deployment, so logs should
+# be JSON. The prod default is 'worker', which was previously (wrongly) excluded
+# and emitted console output, breaking Loki/Promtail field queries (#40).
+_PRODUCTION_SERVICE_MODES = frozenset({"standalone", "api", "worker", "migrate"})
+
+
+def _is_production_env() -> bool:
+    """Whether to emit JSON logs (production) vs human console (development)."""
+    if os.getenv("NODE_ENV", "").lower() == "production":
+        return True
+    return os.getenv("SERVICE_MODE", "") in _PRODUCTION_SERVICE_MODES
+
+
 def setup_logging(level: str = "INFO") -> None:
     """Setup structured logging.
 
@@ -14,9 +27,7 @@ def setup_logging(level: str = "INFO") -> None:
     human-readable console output in development.
     """
     log_level = getattr(logging, level.upper(), logging.INFO)
-    is_production = os.getenv("NODE_ENV", "").lower() == "production" or os.getenv(
-        "SERVICE_MODE", ""
-    ) in ("standalone", "api")
+    is_production = _is_production_env()
 
     # Configure standard library logging
     logging.basicConfig(
