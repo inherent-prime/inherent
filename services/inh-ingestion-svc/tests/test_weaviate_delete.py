@@ -15,7 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.config.settings import Settings
-from src.services.weaviate import WeaviateService
+from src.services.weaviate import WeaviateService, get_user_tenant_name
 
 # ---------------------------------------------------------------------------
 # Override conftest autouse fixtures -- these tests don't need PostgreSQL
@@ -75,7 +75,7 @@ class TestDeleteDocumentChunksGraceful:
 
         assert success is True
         assert count == 3
-        mock_collection.with_tenant.assert_called_with("User_usertest")
+        mock_collection.with_tenant.assert_called_with(get_user_tenant_name("user_test"))
         mock_tenant_collection.data.delete_many.assert_called_once()
 
     async def test_client_not_connected(self, weaviate_service):

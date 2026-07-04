@@ -6,7 +6,16 @@ import pytest
 from weaviate.classes.tenants import TenantActivityStatus
 
 from src.config.settings import Settings
-from src.services.weaviate import WeaviateService
+from src.services.weaviate import (
+    WeaviateService,
+    get_user_tenant_name,
+    get_workspace_collection_name,
+)
+
+# Derive expected names via the contract function so these tests stay correct
+# across any change to the (injective) name encoding (#1).
+WS1 = get_workspace_collection_name("ws1")
+U1 = get_user_tenant_name("u1")
 
 
 class TestWeaviateLogic:
@@ -32,17 +41,17 @@ class TestWeaviateLogic:
 
         result = await weaviate_service.ensure_workspace_collection("ws1")
 
-        assert result == "Workspace_ws1"
-        assert "Workspace_ws1" in weaviate_service._collection_cache
+        assert result == WS1
+        assert WS1 in weaviate_service._collection_cache
 
     @pytest.mark.asyncio
     async def test_ensure_user_tenant_cached(self, weaviate_service):
         """Test tenant retrieval from cache."""
-        weaviate_service._tenant_cache["Workspace_ws1"] = {"User_u1"}
+        weaviate_service._tenant_cache[WS1] = {U1}
 
         result = await weaviate_service.ensure_user_tenant("ws1", "u1")
 
-        assert result == "User_u1"
+        assert result == U1
         weaviate_service.client.collections.get.assert_not_called()
 
     @pytest.mark.asyncio
@@ -52,13 +61,13 @@ class TestWeaviateLogic:
         weaviate_service.client.collections.get.return_value = mock_collection
 
         mock_tenant = MagicMock()
-        mock_tenant.name = "User_u1"
+        mock_tenant.name = U1
         mock_tenant.activity_status = TenantActivityStatus.ACTIVE
-        mock_collection.tenants.get.return_value = {"User_u1": mock_tenant}
+        mock_collection.tenants.get.return_value = {U1: mock_tenant}
 
         result = await weaviate_service.ensure_user_tenant("ws1", "u1")
 
-        assert result == "User_u1"
+        assert result == U1
         mock_collection.tenants.update.assert_not_called()
         mock_collection.tenants.create.assert_not_called()
 
@@ -69,13 +78,13 @@ class TestWeaviateLogic:
         weaviate_service.client.collections.get.return_value = mock_collection
 
         mock_tenant = MagicMock()
-        mock_tenant.name = "User_u1"
+        mock_tenant.name = U1
         mock_tenant.activity_status = TenantActivityStatus.INACTIVE
-        mock_collection.tenants.get.return_value = {"User_u1": mock_tenant}
+        mock_collection.tenants.get.return_value = {U1: mock_tenant}
 
         result = await weaviate_service.ensure_user_tenant("ws1", "u1")
 
-        assert result == "User_u1"
+        assert result == U1
         mock_collection.tenants.update.assert_called_once()
 
     @pytest.mark.asyncio
@@ -90,8 +99,8 @@ class TestWeaviateLogic:
 
         result = await weaviate_service.ensure_user_tenant("ws1", "u1")
 
-        assert result == "User_u1"
-        assert "User_u1" in weaviate_service._tenant_cache["Workspace_ws1"]
+        assert result == U1
+        assert U1 in weaviate_service._tenant_cache[WS1]
 
     def test_list_workspace_collections_error(self, weaviate_service):
         """Test error handling in list_workspace_collections."""

@@ -29,43 +29,42 @@ def stub_embed_query(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+import re as _re
+
+_COLLECTION_RE = _re.compile(r"^Workspace_[A-Z2-7]*$")  # prefix + base32 charset
+_TENANT_RE = _re.compile(r"^User_[A-Z2-7]*$")
+
+
 class TestGetWorkspaceCollectionName:
-    """Tests for _get_workspace_collection_name()."""
+    """The derivation must be injective (distinct ids -> distinct collections)
+    and stay within Weaviate's charset. It no longer strips punctuation — that
+    was the cross-tenant collision bug (#1)."""
 
-    def test_simple_id(self):
-        assert _get_workspace_collection_name("abc123") == "Workspace_abc123"
+    def test_prefixed_and_valid_charset(self):
+        for raw in ("abc123", "ws-abc-123", "ws@foo.bar/baz", "ws_abc_123"):
+            assert _COLLECTION_RE.match(_get_workspace_collection_name(raw))
 
-    def test_hex_id(self):
-        assert (
-            _get_workspace_collection_name("69c7e8b4587daa4c20d7fc12")
-            == "Workspace_69c7e8b4587daa4c20d7fc12"
-        )
+    def test_punctuation_variants_do_not_collide(self):
+        # These all collapsed onto one collection under the old strip.
+        variants = ["ws-abc-123", "ws_abc_123", "wsabc123", "ws.abc.123"]
+        names = {_get_workspace_collection_name(v) for v in variants}
+        assert len(names) == len(variants)
 
-    def test_id_with_hyphens(self):
-        assert _get_workspace_collection_name("ws-abc-123") == "Workspace_wsabc123"
-
-    def test_id_with_special_chars(self):
-        assert _get_workspace_collection_name("ws@foo.bar/baz") == "Workspace_wsfoobarbaz"
-
-    def test_id_with_underscores(self):
-        # Underscores are not alphanumeric, so they get stripped
-        assert _get_workspace_collection_name("ws_abc_123") == "Workspace_wsabc123"
+    def test_deterministic(self):
+        assert _get_workspace_collection_name("ws-1") == _get_workspace_collection_name("ws-1")
 
 
 class TestGetUserTenantName:
-    """Tests for _get_user_tenant_name()."""
+    """Same injectivity + charset guarantees for user tenant names."""
 
-    def test_simple_id(self):
-        assert _get_user_tenant_name("user123") == "User_user123"
+    def test_prefixed_and_valid_charset(self):
+        for raw in ("user123", "user@domain.com", "user_2abc123", "abc123def456"):
+            assert _TENANT_RE.match(_get_user_tenant_name(raw))
 
-    def test_id_with_special_chars(self):
-        assert _get_user_tenant_name("user@domain.com") == "User_userdomaincom"
-
-    def test_clerk_style_id(self):
-        assert _get_user_tenant_name("user_2abc123") == "User_user2abc123"
-
-    def test_hex_id(self):
-        assert _get_user_tenant_name("abc123def456") == "User_abc123def456"
+    def test_punctuation_variants_do_not_collide(self):
+        variants = ["user-1", "user_1", "user1", "user.1"]
+        names = {_get_user_tenant_name(v) for v in variants}
+        assert len(names) == len(variants)
 
 
 # ---------------------------------------------------------------------------

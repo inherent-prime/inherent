@@ -25,8 +25,8 @@ def cleanup_test_data():
 @pytest.mark.parametrize(
     ("workspace_id", "expected"),
     [
-        ("ws_local_001", "Workspace_wslocal001"),
-        ("ws-123", "Workspace_ws123"),
+        ("ws_local_001", "Workspace_O5ZV63DPMNQWYXZQGAYQ"),
+        ("ws-123", "Workspace_O5ZS2MJSGM"),
     ],
 )
 def test_workspace_collection_name_golden(workspace_id: str, expected: str):
@@ -36,8 +36,8 @@ def test_workspace_collection_name_golden(workspace_id: str, expected: str):
 @pytest.mark.parametrize(
     ("user_id", "expected"),
     [
-        ("local-dev-user", "User_localdevuser"),
-        ("user_001", "User_user001"),
+        ("local-dev-user", "User_NRXWGYLMFVSGK5RNOVZWK4Q"),
+        ("user_001", "User_OVZWK4S7GAYDC"),
     ],
 )
 def test_user_tenant_name_golden(user_id: str, expected: str):

@@ -17,6 +17,13 @@ and [ADR 0001](docs/adr/0001-agent-memory-substrate.md).
 
 A codescan-driven pass fixing correctness, isolation, and durability defects.
 
+- **⚠️ BREAKING (data) — collision-free Weaviate naming.** Workspace/user ids
+  are now base32-encoded into collection/tenant names instead of stripping
+  punctuation, which previously let ids differing only in punctuation
+  (`ws-123` / `ws_123` / `ws123`) collapse onto one tenant — a cross-tenant
+  leak (#1). Derivation is now injective. **Existing Weaviate collections use
+  the old names and must be re-indexed** (drop + re-ingest) to migrate; Postgres
+  is unaffected.
 - **Auth** — a workspace-scoped API key can no longer be used against a
   different workspace via the `X-Workspace-Id` header, even one its owner also
   owns; the key's binding is authoritative.

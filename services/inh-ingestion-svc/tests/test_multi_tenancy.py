@@ -14,32 +14,25 @@ from src.services.weaviate import (
 
 
 class TestWeaviateNaming:
-    """Tests for Weaviate naming conventions."""
+    """Naming must be injective (distinct ids -> distinct names). The previous
+    strip-based derivation collapsed punctuation variants onto one name — a
+    cross-tenant leak (#1). Golden values live in the contract test."""
 
-    def test_workspace_collection_name(self):
-        """Test workspace collection name generation."""
-        # Standard MongoDB ObjectId
-        workspace_id = "6953c161551d723ca3e9a107"
-        result = get_workspace_collection_name(workspace_id)
-        assert result == "Workspace_6953c161551d723ca3e9a107"
+    def test_names_are_prefixed(self):
+        assert get_workspace_collection_name("6953c161551d723ca3e9a107").startswith(
+            "Workspace_"
+        )
+        assert get_user_tenant_name("6952cca0ac4118d38ab723c3").startswith("User_")
 
-    def test_workspace_collection_name_with_special_chars(self):
-        """Test that special characters are removed."""
-        workspace_id = "test-workspace_123"
-        result = get_workspace_collection_name(workspace_id)
-        assert result == "Workspace_testworkspace123"
+    def test_workspace_punctuation_variants_do_not_collide(self):
+        variants = ["test-workspace_123", "test_workspace-123", "testworkspace123"]
+        names = {get_workspace_collection_name(v) for v in variants}
+        assert len(names) == len(variants)
 
-    def test_user_tenant_name(self):
-        """Test user tenant name generation."""
-        user_id = "6952cca0ac4118d38ab723c3"
-        result = get_user_tenant_name(user_id)
-        assert result == "User_6952cca0ac4118d38ab723c3"
-
-    def test_user_tenant_name_with_special_chars(self):
-        """Test that special characters are removed from tenant name."""
-        user_id = "user@example.com"
-        result = get_user_tenant_name(user_id)
-        assert result == "User_userexamplecom"
+    def test_user_punctuation_variants_do_not_collide(self):
+        variants = ["user@example.com", "userexamplecom", "user.example.com"]
+        names = {get_user_tenant_name(v) for v in variants}
+        assert len(names) == len(variants)
 
 
 class TestWeaviateServiceMultiTenancy:
@@ -72,7 +65,7 @@ class TestWeaviateServiceMultiTenancy:
 
         result = await weaviate_service.ensure_workspace_collection(workspace_id)
 
-        assert result == "Workspace_testworkspace123"
+        assert result == get_workspace_collection_name(workspace_id)
         weaviate_service.client.collections.create.assert_called_once()
 
     @pytest.mark.asyncio

@@ -16,7 +16,11 @@ import httpx
 import pytest
 
 from src.models.search import SearchRequest
-from src.services.search import SearchService
+from src.services.search import (
+    SearchService,
+    _get_user_tenant_name,
+    _get_workspace_collection_name,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -54,7 +58,7 @@ def _service_returning(
 
 
 def test_is_missing_collection_discriminates_class_vs_property():
-    coll = "Workspace_ws1"
+    coll = _get_workspace_collection_name("ws1")
     assert SearchService._is_missing_collection(
         f'Cannot query field "{coll}" on type "GetObjectsObj"', coll
     )
@@ -65,7 +69,7 @@ def test_is_missing_collection_discriminates_class_vs_property():
 
 
 async def test_graphql_missing_collection_returns_empty():
-    coll = "Workspace_ws1"
+    coll = _get_workspace_collection_name("ws1")
     svc = _service_returning(
         gql={"errors": [{"message": f'Cannot query field "{coll}" on type "GetObjectsObj"'}]}
     )
@@ -74,7 +78,7 @@ async def test_graphql_missing_collection_returns_empty():
 
 
 async def test_http_422_missing_collection_returns_empty():
-    coll = "Workspace_ws1"
+    coll = _get_workspace_collection_name("ws1")
     svc = _service_returning(http_422_body=f'Cannot query field "{coll}" on type "GetObjectsObj"')
     out = await svc._search_weaviate("ws1", "u1", SearchRequest(query="hi"))
     assert out == []
@@ -89,13 +93,13 @@ async def test_any_http_422_returns_empty():
 
 
 async def test_tenant_not_found_returns_empty():
-    svc = _service_returning(gql={"errors": [{"message": 'tenant not found: "User_u1"'}]})
+    svc = _service_returning(gql={"errors": [{"message": 'tenant not found: _get_user_tenant_name("u1")'}]})
     out = await svc._search_weaviate("ws1", "u1", SearchRequest(query="hi"))
     assert out == []
 
 
 async def test_missing_property_still_raises():
-    coll = "Workspace_ws1"
+    coll = _get_workspace_collection_name("ws1")
     svc = _service_returning(
         gql={"errors": [{"message": f'Cannot query field "content_hash" on type "{coll}"'}]}
     )

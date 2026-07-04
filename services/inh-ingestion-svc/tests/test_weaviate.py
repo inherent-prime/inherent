@@ -6,7 +6,15 @@ import pytest
 from weaviate.classes.tenants import TenantActivityStatus
 
 from src.config.settings import Settings
-from src.services.weaviate import WeaviateService
+from src.services.weaviate import (
+    WeaviateService,
+    get_user_tenant_name,
+    get_workspace_collection_name,
+)
+
+# Derive expected names via the (injective) contract fn so tests are drift-proof (#1).
+WS1 = get_workspace_collection_name("ws1")
+U_USER1 = get_user_tenant_name("user1")
 
 
 class TestWeaviateService:
@@ -67,7 +75,7 @@ class TestWeaviateService:
         mock_collection.tenants.update.assert_called_once()
         # Verify call args
         args = mock_collection.tenants.update.call_args[0][0]
-        assert args[0].name == "User_user1"
+        assert args[0].name == U_USER1
         assert args[0].activity_status == TenantActivityStatus.INACTIVE
 
     @pytest.mark.asyncio
@@ -81,7 +89,7 @@ class TestWeaviateService:
         result = await weaviate_service.delete_workspace_collection(workspace_id)
 
         assert result is True
-        weaviate_service.client.collections.delete.assert_called_with("Workspace_ws1")
+        weaviate_service.client.collections.delete.assert_called_with(WS1)
 
     @pytest.mark.asyncio
     async def test_delete_document_chunks_with_tenant(self, weaviate_service):
@@ -104,7 +112,7 @@ class TestWeaviateService:
         )
 
         assert count == 5
-        mock_collection.with_tenant.assert_called_with("User_user1")
+        mock_collection.with_tenant.assert_called_with(U_USER1)
         mock_tenant_collection.data.delete_many.assert_called_once()
 
     @pytest.mark.asyncio
@@ -175,26 +183,26 @@ class TestWeaviateService:
         # Mock tenants
         mock_tenant = MagicMock()
         mock_tenant.activity_status.name = "ACTIVE"
-        mock_collection.tenants.get.return_value = {"User_user1": mock_tenant}
+        mock_collection.tenants.get.return_value = {U_USER1: mock_tenant}
 
         stats = await weaviate_service.get_tenant_stats(workspace_id)
 
         assert stats["workspace_id"] == workspace_id
         assert stats["tenant_count"] == 1
-        assert stats["tenants"][0]["name"] == "User_user1"
+        assert stats["tenants"][0]["name"] == U_USER1
         assert stats["tenants"][0]["status"] == "ACTIVE"
 
     def test_list_workspace_collections(self, weaviate_service):
         """Test listing workspace collections."""
         weaviate_service.client.collections.list_all.return_value = {
-            "Workspace_ws1": {},
+            WS1: {},
             "Other_collection": {},
         }
 
         collections = weaviate_service.list_workspace_collections()
 
         assert len(collections) == 1
-        assert collections[0] == "Workspace_ws1"
+        assert collections[0] == WS1
 
     @pytest.mark.asyncio
     async def test_store_chunks_with_tenant_failure(self, weaviate_service):
