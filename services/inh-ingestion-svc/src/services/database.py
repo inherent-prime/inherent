@@ -349,6 +349,14 @@ class DatabaseService:
             Index("idx_dead_letter_jobs_document_id", "document_id"),
             Index("idx_dead_letter_jobs_workspace_id", "workspace_id"),
             Index("idx_dead_letter_jobs_status", "status"),
+            # Dedup record-retries per run (#24). NULL workflow_run_id rows stay
+            # distinct in Postgres, so pre-workflow failures aren't deduped.
+            Index(
+                "ux_dead_letter_jobs_document_run",
+                "document_id",
+                "workflow_run_id",
+                unique=True,
+            ),
         )
 
     def connect(self) -> None:
@@ -1327,8 +1335,13 @@ class DatabaseService:
 
         with self.get_session() as session:
             now = datetime.now(UTC)
+            # Upsert-do-nothing on (document_id, workflow_run_id): a record-retry
+            # (insert commits then loses its ack) must not create a duplicate
+            # dead-letter row, which the retry API could otherwise re-ingest twice
+            # (#24). NULL workflow_run_id rows are distinct in Postgres, so
+            # pre-workflow failures aren't deduped (correct — no run to key on).
             result = session.execute(
-                self.dead_letter_jobs.insert()
+                pg_insert(self.dead_letter_jobs)
                 .values(
                     document_id=document_id,
                     workspace_id=workspace_id,
@@ -1342,9 +1355,21 @@ class DatabaseService:
                     created_at=now,
                     updated_at=now,
                 )
+                .on_conflict_do_nothing(index_elements=["document_id", "workflow_run_id"])
                 .returning(self.dead_letter_jobs.c.id)
             )
-            job_id: int = result.scalar_one()  # type: ignore[assignment]
+            job_id = result.scalar_one_or_none()
+            if job_id is None:
+                # Row already existed for this run — return its id (idempotent).
+                job_id = session.execute(
+                    self.dead_letter_jobs.select()
+                    .with_only_columns(self.dead_letter_jobs.c.id)
+                    .where(
+                        self.dead_letter_jobs.c.document_id == document_id,
+                        self.dead_letter_jobs.c.workflow_run_id == workflow_run_id,
+                    )
+                    .limit(1)
+                ).scalar_one_or_none()
 
             logger.info(
                 "Added dead-letter job",

@@ -1,7 +1,10 @@
 """Multi-backend storage service for fetching documents."""
 
+import ipaddress
+import socket
 from abc import ABC, abstractmethod
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 import structlog
@@ -9,6 +12,50 @@ import structlog
 from src.config.settings import Settings
 
 logger = structlog.get_logger(__name__)
+
+_BLOCKED_HOSTNAMES = {"localhost", "metadata", "metadata.google.internal"}
+
+
+def _is_internal_ip(candidate: str) -> bool:
+    """True if ``candidate`` is a literal IP in a private/loopback/link-local/reserved range."""
+    try:
+        ip = ipaddress.ip_address(candidate)
+    except ValueError:
+        return False
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    )
+
+
+def _validate_fetch_url(url: str) -> None:
+    """Reject URLs that could be an SSRF vector (#34).
+
+    Only http/https to a non-internal address is allowed; cloud-metadata,
+    loopback, and RFC1918 targets are blocked. Hostnames are resolved
+    best-effort and rejected if they map to an internal address.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise PermissionError(f"URL scheme not allowed for fetch: {parsed.scheme!r}")
+
+    host = (parsed.hostname or "").strip("[]")
+    if not host or host.lower() in _BLOCKED_HOSTNAMES:
+        raise PermissionError(f"Blocked host for fetch: {host!r}")
+    if _is_internal_ip(host):
+        raise PermissionError(f"Blocked internal address for fetch: {host!r}")
+
+    # Best-effort DNS: reject a hostname that resolves to an internal address.
+    try:
+        for info in socket.getaddrinfo(host, None):
+            if _is_internal_ip(info[4][0]):
+                raise PermissionError(f"Host resolves to internal address: {host!r}")
+    except socket.gaierror:
+        pass  # let the HTTP client surface an unresolved-host error
 
 
 class BaseStorageBackend(ABC):
@@ -248,9 +295,12 @@ class StorageService:
         return storage_backend.read_file(path, bucket)
 
     def read_file_from_url(self, url: str) -> bytes:
-        """Read a file directly from a URL."""
+        """Read a file directly from a URL (validated against SSRF, #34)."""
+        _validate_fetch_url(url)
         logger.info("Fetching file from URL", url=url)
-        with httpx.Client(timeout=60.0, follow_redirects=True) as client:
+        # follow_redirects=False: a redirect could point at an internal host that
+        # bypasses the pre-fetch validation.
+        with httpx.Client(timeout=60.0, follow_redirects=False) as client:
             response = client.get(url)
             response.raise_for_status()
             return response.content
