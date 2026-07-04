@@ -32,10 +32,11 @@ AUTH_FAILURES = Counter(
 )
 
 # Rate limiting metrics
+# No per-key label: key_id is unbounded and would create one series per key
+# that Prometheus never frees (#20). Track key identity in logs/audit instead.
 RATE_LIMIT_EXCEEDED = Counter(
     "rate_limit_exceeded_total",
     "Total number of rate limit exceeded events",
-    ["key_id"],
 )
 
 # Database metrics
@@ -65,10 +66,12 @@ SEARCH_RESULTS = Histogram(
     buckets=[0, 1, 5, 10, 25, 50, 100],
 )
 
+# Labeled by mode only: workspace_id is unbounded and would leak a series per
+# tenant (#20). Per-tenant search volume belongs in logs, not metric labels.
 search_requests_total = Counter(
     "search_requests_total",
     "Number of /v1/search requests by mode",
-    ["mode", "workspace_id"],
+    ["mode"],
 )
 
 search_context_requests_total = Counter(
@@ -121,9 +124,9 @@ def record_auth_failure(reason: str) -> None:
     AUTH_FAILURES.labels(reason=reason).inc()
 
 
-def record_rate_limit_exceeded(key_id: str) -> None:
+def record_rate_limit_exceeded() -> None:
     """Record a rate limit exceeded event."""
-    RATE_LIMIT_EXCEEDED.labels(key_id=key_id).inc()
+    RATE_LIMIT_EXCEEDED.inc()
 
 
 def observe_database_latency(query_type: str, duration_seconds: float) -> None:
@@ -146,9 +149,9 @@ def observe_search_results(count: int) -> None:
     SEARCH_RESULTS.observe(count)
 
 
-def record_search_request(mode: str, workspace_id: str) -> None:
-    """Record a search request by mode and workspace."""
-    search_requests_total.labels(mode=mode, workspace_id=workspace_id).inc()
+def record_search_request(mode: str) -> None:
+    """Record a search request by mode."""
+    search_requests_total.labels(mode=mode).inc()
 
 
 def record_search_context_request(k: int) -> None:

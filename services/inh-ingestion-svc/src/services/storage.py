@@ -34,6 +34,14 @@ class BaseStorageBackend(ABC):
         """Check if a file exists."""
         pass
 
+    def get_size(self, path: str, bucket: str | None = None) -> int:
+        """Return the file size in bytes.
+
+        Default reads the file; backends should override with a stat/HEAD that
+        avoids downloading the content (#22).
+        """
+        return len(self.read_file(path, bucket))
+
 
 class S3StorageBackend(BaseStorageBackend):
     """S3-compatible storage backend (Hetzner Object Storage, AWS S3, MinIO)."""
@@ -93,6 +101,16 @@ class S3StorageBackend(BaseStorageBackend):
             return True
         except Exception:
             return False
+
+    def get_size(self, path: str, bucket: str | None = None) -> int:
+        """Return object size via a HEAD request — no content download (#22)."""
+        if not self.client:
+            raise RuntimeError("S3 client not connected")
+        target_bucket = bucket or self.default_bucket
+        if not target_bucket:
+            raise RuntimeError("No S3 bucket configured")
+        resp = self.client.head_object(Bucket=target_bucket, Key=path)
+        return int(resp["ContentLength"])
 
 
 class LocalStorageBackend(BaseStorageBackend):
@@ -165,6 +183,10 @@ class LocalStorageBackend(BaseStorageBackend):
             return self._resolve(path, bucket).is_file()
         except (PermissionError, ValueError):
             return False
+
+    def get_size(self, path: str, bucket: str | None = None) -> int:
+        """Return file size via stat — no content read (#22)."""
+        return self._resolve(path, bucket).stat().st_size
 
 
 class StorageService:

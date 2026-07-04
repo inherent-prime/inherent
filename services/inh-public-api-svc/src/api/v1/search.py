@@ -77,10 +77,7 @@ def _record_search_metrics(request: SearchRequest, workspace_id: str | None) -> 
     try:
         from src.services.metrics import record_search_context_request, record_search_request
 
-        record_search_request(
-            mode=request.search_mode,
-            workspace_id=workspace_id if workspace_id else "multi",
-        )
+        record_search_request(mode=request.search_mode)
         if request.include_context:
             record_search_context_request(k=request.context_window)
     except Exception as exc:

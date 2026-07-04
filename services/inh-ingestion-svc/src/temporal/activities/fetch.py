@@ -62,19 +62,10 @@ async def fetch_document(input: FetchDocumentInput) -> FetchDocumentOutput:
                     f"{input.storage_path}"
                 )
 
-            # For local files, get size without reading; for GCS/S3, read to get size
-            if input.storage_backend == "local":
-                import os
-
-                from src.services.storage import LocalStorageBackend
-
-                assert isinstance(backend, LocalStorageBackend)
-                resolved = backend._resolve(input.storage_path, input.storage_bucket)
-                size_bytes = os.path.getsize(resolved)
-            else:
-                # GCS and S3: read to get size
-                content = backend.read_file(input.storage_path, input.storage_bucket)
-                size_bytes = len(content)
+            # Stat/HEAD-based size — never downloads the content. extract_text
+            # reads the bytes immediately after, so a full read here just
+            # doubled egress on remote (S3/GCS) objects (#22).
+            size_bytes = backend.get_size(input.storage_path, input.storage_bucket)
 
         elif input.storage_backend == "azure":
             if not input.storage_url:
