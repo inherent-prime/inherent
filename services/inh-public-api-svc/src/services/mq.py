@@ -28,7 +28,7 @@ class MQService:
         """Verify Redis connectivity."""
         if self._connected:
             return
-        await self._redis.ping()
+        await self._redis.ping()  # type: ignore[misc]  # redis-py stubs union return
         self._connected = True
         safe_url = (
             settings.mq_redis_url.split("@")[-1]

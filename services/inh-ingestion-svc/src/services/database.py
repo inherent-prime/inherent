@@ -958,23 +958,27 @@ class DatabaseService:
 
         with self.get_session() as session:
             now = datetime.now(UTC)
-            stmt = pg_insert(self.processed_documents).values(
-                document_id=document_id,
-                workspace_id=workspace_id,
-                user_id=user_id,
-                filename=filename,
-                original_filename=original_filename,
-                content_type=content_type,
-                size_bytes=size_bytes,
-                storage_backend=storage_backend,
-                storage_path=storage_path,
-                storage_bucket=storage_bucket,
-                storage_url=storage_url,
-                status=DocumentStatus.PROCESSING.value,
-                chunk_count=0,
-                created_at=now,
-                updated_at=now,
-            ).on_conflict_do_nothing(index_elements=["document_id"])
+            stmt = (
+                pg_insert(self.processed_documents)
+                .values(
+                    document_id=document_id,
+                    workspace_id=workspace_id,
+                    user_id=user_id,
+                    filename=filename,
+                    original_filename=original_filename,
+                    content_type=content_type,
+                    size_bytes=size_bytes,
+                    storage_backend=storage_backend,
+                    storage_path=storage_path,
+                    storage_bucket=storage_bucket,
+                    storage_url=storage_url,
+                    status=DocumentStatus.PROCESSING.value,
+                    chunk_count=0,
+                    created_at=now,
+                    updated_at=now,
+                )
+                .on_conflict_do_nothing(index_elements=["document_id"])
+            )
             result = session.execute(stmt)
             return bool(result.rowcount and result.rowcount > 0)
 

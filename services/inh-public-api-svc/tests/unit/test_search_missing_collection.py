@@ -18,7 +18,6 @@ import pytest
 from src.models.search import SearchRequest
 from src.services.search import (
     SearchService,
-    _get_user_tenant_name,
     _get_workspace_collection_name,
 )
 
@@ -93,7 +92,9 @@ async def test_any_http_422_returns_empty():
 
 
 async def test_tenant_not_found_returns_empty():
-    svc = _service_returning(gql={"errors": [{"message": 'tenant not found: _get_user_tenant_name("u1")'}]})
+    svc = _service_returning(
+        gql={"errors": [{"message": 'tenant not found: _get_user_tenant_name("u1")'}]}
+    )
     out = await svc._search_weaviate("ws1", "u1", SearchRequest(query="hi"))
     assert out == []
 

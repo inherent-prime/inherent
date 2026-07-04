@@ -495,9 +495,7 @@ class TestStoreAndTenantRaiseOnFailure:
     @patch("src.temporal.shared_services.get_db_service")
     @patch("src.temporal.shared_services.get_staging_service")
     @pytest.mark.asyncio
-    async def test_store_in_postgresql_raises_on_db_failure(
-        self, mock_get_staging, mock_get_db
-    ):
+    async def test_store_in_postgresql_raises_on_db_failure(self, mock_get_staging, mock_get_db):
         from src.temporal.activities.store import store_in_postgresql
 
         mock_staging = MagicMock()
@@ -533,9 +531,7 @@ class TestStoreAndTenantRaiseOnFailure:
         weaviate = MagicMock()
         weaviate.is_connected.return_value = True
         weaviate.delete_document_chunks_graceful = AsyncMock(return_value=(True, 0))
-        weaviate.store_chunks_with_tenant = AsyncMock(
-            side_effect=RuntimeError("weaviate 503")
-        )
+        weaviate.store_chunks_with_tenant = AsyncMock(side_effect=RuntimeError("weaviate 503"))
         mock_get_weaviate.return_value = weaviate
 
         mock_db = MagicMock()
@@ -548,9 +544,7 @@ class TestStoreAndTenantRaiseOnFailure:
     @patch("src.temporal.shared_services.get_db_service")
     @patch("src.temporal.shared_services.get_weaviate_service")
     @pytest.mark.asyncio
-    async def test_ensure_tenant_ready_raises_on_failure(
-        self, mock_get_weaviate, mock_get_db
-    ):
+    async def test_ensure_tenant_ready_raises_on_failure(self, mock_get_weaviate, mock_get_db):
         from src.temporal.activities.tenant import ensure_tenant_ready
         from src.temporal.models import EnsureTenantInput
 

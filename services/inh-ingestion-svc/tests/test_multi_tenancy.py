@@ -19,9 +19,7 @@ class TestWeaviateNaming:
     cross-tenant leak (#1). Golden values live in the contract test."""
 
     def test_names_are_prefixed(self):
-        assert get_workspace_collection_name("6953c161551d723ca3e9a107").startswith(
-            "Workspace_"
-        )
+        assert get_workspace_collection_name("6953c161551d723ca3e9a107").startswith("Workspace_")
         assert get_user_tenant_name("6952cca0ac4118d38ab723c3").startswith("User_")
 
     def test_workspace_punctuation_variants_do_not_collide(self):

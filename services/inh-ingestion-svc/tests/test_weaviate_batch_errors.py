@@ -43,7 +43,9 @@ def _wire_batch(svc, failed_objects):
 
 
 def _chunk(i: int) -> DocumentChunk:
-    return DocumentChunk(document_id="d", content=f"chunk {i}", chunk_index=i, start_char=0, end_char=5)
+    return DocumentChunk(
+        document_id="d", content=f"chunk {i}", chunk_index=i, start_char=0, end_char=5
+    )
 
 
 @pytest.mark.asyncio

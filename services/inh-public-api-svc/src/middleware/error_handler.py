@@ -20,6 +20,19 @@ from src.utils import get_logger
 
 logger = get_logger(__name__)
 
+# Map raw HTTP status codes to problem-detail error keys so a plain
+# ``fastapi.HTTPException(404/403/...)`` renders as problem+json, consistent with
+# InherentAPIError, instead of FastAPI's default ``{"detail": ...}`` (#12).
+_STATUS_ERROR_KEYS = {
+    400: "bad_request",
+    401: "authentication_failed",
+    403: "authorization_failed",
+    404: "resource_not_found",
+    422: "validation_error",
+    429: "rate_limit_exceeded",
+    503: "service_unavailable",
+}
+
 
 class ErrorHandlerMiddleware(BaseHTTPMiddleware):
     """Middleware that catches exceptions and returns Problem Details responses."""
@@ -191,24 +204,8 @@ def setup_exception_handlers(app):
 
     from starlette.exceptions import HTTPException as StarletteHTTPException
 
-    # Map raw HTTP status codes to problem-detail error keys so a plain
-    # ``fastapi.HTTPException(404/403/...)`` still renders as problem+json,
-    # consistent with InherentAPIError, instead of FastAPI's default
-    # ``{"detail": ...}`` application/json (#12).
-    _STATUS_ERROR_KEYS = {
-        400: "bad_request",
-        401: "authentication_failed",
-        403: "authorization_failed",
-        404: "resource_not_found",
-        422: "validation_error",
-        429: "rate_limit_exceeded",
-        503: "service_unavailable",
-    }
-
     @app.exception_handler(StarletteHTTPException)
-    async def http_exception_handler(
-        request: Request, exc: StarletteHTTPException
-    ) -> JSONResponse:
+    async def http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
         ctx = get_request_context()
         trace_id = ctx.request_id if ctx else None
 

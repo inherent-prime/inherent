@@ -97,9 +97,7 @@ async def run_worker(settings: Settings) -> None:
     # it, _record_dead_letter is a silent no-op.
     from src.temporal.shared_services import get_db_service
 
-    trigger = get_workflow_trigger(
-        settings, mq_service=mq_service, db_service=get_db_service()
-    )
+    trigger = get_workflow_trigger(settings, mq_service=mq_service, db_service=get_db_service())
     await trigger.initialize()
     logger.info("Temporal trigger initialized")
 

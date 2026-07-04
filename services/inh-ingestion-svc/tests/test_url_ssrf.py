@@ -35,5 +35,8 @@ def test_blocks_internal_and_bad_schemes(url):
 
 def test_allows_public_https_host():
     # Patch resolution so we don't hit the network; a public IP is allowed.
-    with patch("src.services.storage.socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 0))]):
+    with patch(
+        "src.services.storage.socket.getaddrinfo",
+        return_value=[(2, 1, 6, "", ("93.184.216.34", 0))],
+    ):
         _validate_fetch_url("https://example.com/doc.pdf")  # must not raise

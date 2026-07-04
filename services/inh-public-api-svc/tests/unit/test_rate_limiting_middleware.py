@@ -30,7 +30,9 @@ def _request(path: str = "/v1/search", host: str = "1.2.3.4") -> SimpleNamespace
 
 
 def _limiter(allowed: bool):
-    info = RateLimitInfo(limit=30, remaining=0 if not allowed else 29, reset_at=0, window_seconds=60)
+    info = RateLimitInfo(
+        limit=30, remaining=0 if not allowed else 29, reset_at=0, window_seconds=60
+    )
     limiter = MagicMock()
     limiter.check_rate_limit = AsyncMock(return_value=RateLimitResult(allowed=allowed, info=info))
     return limiter

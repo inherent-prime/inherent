@@ -2,10 +2,9 @@
 
 import asyncio
 import time
+from unittest.mock import patch
 
 import pytest
-
-from unittest.mock import patch
 
 from src.core.rate_limiter import (
     InMemoryBackend,
@@ -183,7 +182,9 @@ class TestRedisBackend:
     @pytest.mark.asyncio
     async def test_allows_up_to_limit_then_blocks(self):
         backend = RedisBackend(_FakeAsyncRedis())
-        results = [await backend.check_and_consume("k", limit=3, window_seconds=60) for _ in range(4)]
+        results = [
+            await backend.check_and_consume("k", limit=3, window_seconds=60) for _ in range(4)
+        ]
         assert [r.allowed for r in results] == [True, True, True, False]
         assert results[-1].info.remaining == 0
 

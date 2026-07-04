@@ -7,7 +7,7 @@ Supports per-key rate limiting with configurable limits and windows.
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 from src.utils import get_logger
 
@@ -204,7 +204,7 @@ class RedisBackend:
     a key that counts forever.
     """
 
-    def __init__(self, redis_client: object, key_prefix: str = "ratelimit:") -> None:
+    def __init__(self, redis_client: Any, key_prefix: str = "ratelimit:") -> None:
         self._redis = redis_client
         self._prefix = key_prefix
 

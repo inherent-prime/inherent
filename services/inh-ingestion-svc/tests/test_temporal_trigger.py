@@ -162,9 +162,7 @@ class TestTriggerFailurePathRobustness:
         trigger._initialized = True
         trigger._mq_service = AsyncMock()
 
-        with patch(
-            "src.temporal.trigger.DocumentUploadMessage", side_effect=TypeError("boom")
-        ):
+        with patch("src.temporal.trigger.DocumentUploadMessage", side_effect=TypeError("boom")):
             result = await trigger.trigger_workflow({"document_id": "d1"})
 
         # Clean failure result carrying the real error, not an UnboundLocalError.
@@ -209,9 +207,7 @@ class TestAsyncTriggerPoisonHandling:
         db.add_dead_letter_job = AsyncMock()
         trigger = self._ready_trigger(db)
         # Valid message, but Temporal is transiently unavailable.
-        trigger._client.start_workflow = AsyncMock(
-            side_effect=RuntimeError("temporal unavailable")
-        )
+        trigger._client.start_workflow = AsyncMock(side_effect=RuntimeError("temporal unavailable"))
 
         with pytest.raises(RuntimeError, match="temporal unavailable"):
             await trigger.trigger_workflow_async(sample_upload_message)

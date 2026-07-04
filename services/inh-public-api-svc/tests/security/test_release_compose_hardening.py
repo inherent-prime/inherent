@@ -39,22 +39,22 @@ _DATASTORE_HOST_PORTS = {
 
 def test_no_default_postgres_password() -> None:
     """The DB password must not default to 'postgres'; unset must fail-fast."""
-    assert "POSTGRES_PASSWORD:-postgres" not in COMPOSE, (
-        "release compose still ships a default Postgres password"
-    )
-    assert "POSTGRES_PASSWORD:?" in COMPOSE, (
-        "POSTGRES_PASSWORD must use ':?' so an unset value refuses to start"
-    )
+    assert (
+        "POSTGRES_PASSWORD:-postgres" not in COMPOSE
+    ), "release compose still ships a default Postgres password"
+    assert (
+        "POSTGRES_PASSWORD:?" in COMPOSE
+    ), "POSTGRES_PASSWORD must use ':?' so an unset value refuses to start"
 
 
 def test_no_default_ingestion_api_key() -> None:
     """The ingestion API key must not default to a shipped literal."""
-    assert "dev-ingestion-key" not in COMPOSE, (
-        "release compose still ships the known 'dev-ingestion-key' default"
-    )
-    assert "INGESTION_API_KEY:?" in COMPOSE, (
-        "INGESTION_API_KEY must use ':?' so an unset value refuses to start"
-    )
+    assert (
+        "dev-ingestion-key" not in COMPOSE
+    ), "release compose still ships the known 'dev-ingestion-key' default"
+    assert (
+        "INGESTION_API_KEY:?" in COMPOSE
+    ), "INGESTION_API_KEY must use ':?' so an unset value refuses to start"
 
 
 @pytest.mark.parametrize("name,host_port", _DATASTORE_HOST_PORTS.items())

@@ -6,7 +6,6 @@ import sys
 
 import structlog
 
-
 # Real service modes — any of these means a running deployment, so logs should
 # be JSON. The prod default is 'worker', which was previously (wrongly) excluded
 # and emitted console output, breaking Loki/Promtail field queries (#40).

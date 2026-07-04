@@ -1,5 +1,6 @@
 """Tests for search service — BM25, workspace collections, tenant scoping."""
 
+import re
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -29,10 +30,8 @@ def stub_embed_query(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-import re as _re
-
-_COLLECTION_RE = _re.compile(r"^Workspace_[A-Z2-7]*$")  # prefix + base32 charset
-_TENANT_RE = _re.compile(r"^User_[A-Z2-7]*$")
+_COLLECTION_RE = re.compile(r"^Workspace_[A-Z2-7]*$")  # prefix + base32 charset
+_TENANT_RE = re.compile(r"^User_[A-Z2-7]*$")
 
 
 class TestGetWorkspaceCollectionName:
