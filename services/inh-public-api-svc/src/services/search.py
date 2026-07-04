@@ -22,6 +22,17 @@ from src.utils import get_logger
 
 logger = get_logger(__name__)
 
+
+def _require_safe_name(name: str, kind: str) -> None:
+    """Reject a collection/tenant name that isn't safe to interpolate into GraphQL.
+
+    An explicit raise (not ``assert``) so the guard survives ``python -O`` (#33).
+    Names are ``<Prefix>_<base32>`` — alphanumerics plus the prefix underscore.
+    """
+    if not name.replace("_", "").isalnum():
+        raise ValueError(f"Unsafe {kind} name: {name}")
+
+
 # Re-exported for backward compatibility (the WORKSPACE_COLLECTION_PREFIX
 # constant and the naming helpers now live in the shared contracts package).
 __all__ = [
@@ -342,10 +353,8 @@ class SearchService:
         collection_name = _get_workspace_collection_name(workspace_id)
         tenant_name = _get_user_tenant_name(user_id)
 
-        assert collection_name.replace(
-            "_", ""
-        ).isalnum(), f"Unsafe collection name: {collection_name}"
-        assert tenant_name.replace("_", "").isalnum(), f"Unsafe tenant name: {tenant_name}"
+        _require_safe_name(collection_name, "collection")
+        _require_safe_name(tenant_name, "tenant")
 
         graphql_query = self._build_graphql(collection_name, tenant_name, request, query_vector)
 
@@ -619,53 +628,6 @@ class SearchService:
         }}
         """
         return {"query": gql}
-
-    async def _fallback_search(
-        self,
-        workspace_id: str,
-        request: SearchRequest,
-    ) -> list[SearchResult]:
-        """Fallback to PostgreSQL full-text search when Weaviate is unavailable."""
-        logger.warning("Using PostgreSQL fallback for search", workspace_id=workspace_id)
-
-        async with self.database.session() as session:
-            from sqlalchemy import text
-
-            # Simple LIKE search as fallback
-            query = text(
-                """
-                SELECT c.id as chunk_id, c.document_id,
-                       d.original_filename as document_name,
-                       c.content, 1.0 as score
-                FROM document_chunks c
-                JOIN processed_documents d ON c.document_id = d.document_id
-                WHERE d.workspace_id = :workspace_id
-                  AND c.content ILIKE :search_pattern
-                ORDER BY c.chunk_index
-                LIMIT :limit
-            """
-            )
-
-            result = await session.execute(
-                query,
-                {
-                    "workspace_id": workspace_id,
-                    "search_pattern": f"%{request.query}%",
-                    "limit": request.limit,
-                },
-            )
-            rows = result.fetchall()
-
-            return [
-                SearchResult(
-                    chunk_id=str(row.chunk_id),
-                    document_id=str(row.document_id),
-                    document_name=row.document_name,
-                    content=row.content,
-                    score=row.score,
-                )
-                for row in rows
-            ]
 
     def _format_where(self, filter_dict: dict) -> str:
         """Format a where filter dict as Weaviate GraphQL syntax."""
