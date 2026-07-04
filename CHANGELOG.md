@@ -13,6 +13,25 @@ of the already-merged M0–M2 #62/#63/#64). See
 [docs/maintainers/org-readiness-requirements.md](docs/maintainers/org-readiness-requirements.md)
 and [ADR 0001](docs/adr/0001-agent-memory-substrate.md).
 
+### Defect-register remediation (in progress)
+
+A codescan-driven pass fixing correctness, isolation, and durability defects.
+
+- **Auth** — a workspace-scoped API key can no longer be used against a
+  different workspace via the `X-Workspace-Id` header, even one its owner also
+  owns; the key's binding is authoritative.
+- **Durable ingestion** — the `store_in_postgresql`, `store_in_weaviate`, and
+  `ensure_tenant_ready` Temporal activities now re-raise on failure so the
+  configured `RetryPolicy` actually fires (they previously swallowed errors
+  into a success return → no retry, instant dead-letter, and NULL-tenant docs).
+- **⚠️ BREAKING (deploy) — release Compose hardening.** `docker-compose.release.yml`
+  now **refuses to start** unless `POSTGRES_PASSWORD` and `INGESTION_API_KEY`
+  are set (no more shipped `postgres` / `dev-ingestion-key` defaults), and all
+  backing datastores (Postgres, Mongo, Weaviate, Valkey, S3) publish their
+  ports on `127.0.0.1` only. Set both variables (see `.env.example`) before
+  `docker compose up`. Weaviate still runs anonymous — the loopback bind is its
+  isolation boundary; enabling `AUTHENTICATION_APIKEY_*` is a tracked follow-up.
+
 ### M0–M2 (merged: #62, #63, #64)
 - **Boundary** — agent-memory-substrate ADR + org-readiness plan (#46).
 - **Foundation** — one-command `make quickstart`; OSS bootstrap creating the
