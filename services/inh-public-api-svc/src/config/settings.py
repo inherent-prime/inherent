@@ -15,6 +15,9 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        # Tests construct Settings by field name (e.g. eval_capture_disabled_workspaces=...);
+        # env loading still resolves via aliases. Without this, extra="ignore"
+        # silently drops by-name kwargs for aliased fields instead of erroring.
         populate_by_name=True,
     )
 
