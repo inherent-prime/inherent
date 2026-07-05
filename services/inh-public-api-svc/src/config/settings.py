@@ -15,6 +15,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        populate_by_name=True,
     )
 
     # Service configuration
@@ -224,6 +225,45 @@ class Settings(BaseSettings):
             "before it may default on. See docs/advanced-indexes.md."
         ),
     )
+
+    # Evals v1 — traffic-mined retrieval evals (design spec: evals-v1).
+    # Capture is ON by default (opt-out model): every search is recorded to
+    # eval_query_events by a fire-and-forget background task. Raw events are
+    # purged after eval_retention_days; promoted eval_cases persist.
+    eval_capture_enabled: bool = Field(
+        default=True,
+        alias="EVAL_CAPTURE_ENABLED",
+        description="Record search query events for evals (opt-out).",
+    )
+    eval_retention_days: int = Field(
+        default=30,
+        alias="EVAL_RETENTION_DAYS",
+        description="Days to keep raw eval_query_events rows before purge.",
+    )
+    eval_min_sample_size: int = Field(
+        default=50,
+        alias="EVAL_MIN_SAMPLE_SIZE",
+        description="Labeled-case count under which the scorecard flags low confidence.",
+    )
+    eval_run_concurrency: int = Field(
+        default=4,
+        alias="EVAL_RUN_CONCURRENCY",
+        description="Max concurrent replay searches during an eval run.",
+    )
+    eval_run_k: int = Field(
+        default=5,
+        alias="EVAL_RUN_K",
+        description="Ranking-metric cutoff k for eval runs (recall@k, nDCG@k).",
+    )
+    eval_capture_disabled_workspaces: str = Field(
+        default="",
+        alias="EVAL_CAPTURE_DISABLED_WORKSPACES",
+        description="Comma-separated workspace ids excluded from eval capture.",
+    )
+
+    def eval_capture_optout_set(self) -> set[str]:
+        """Parse the opt-out CSV into a set (whitespace/empty entries dropped)."""
+        return {w.strip() for w in self.eval_capture_disabled_workspaces.split(",") if w.strip()}
 
     # Health Checks
     health_check_timeout_seconds: float = 5.0
