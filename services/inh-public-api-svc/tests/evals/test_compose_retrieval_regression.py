@@ -19,7 +19,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from tests.evals.metrics import mrr, ndcg_at_k, recall_at_k
+from src.services.ranking_metrics import mrr, ndcg_at_k, recall_at_k
 
 pytestmark = [pytest.mark.retrieval_eval, pytest.mark.compose]
 
