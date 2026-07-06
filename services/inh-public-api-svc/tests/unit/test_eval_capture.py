@@ -37,10 +37,11 @@ def test_capture_enabled_honors_optout():
 @pytest.mark.asyncio
 async def test_record_query_event_writes_and_purges():
     db = AsyncMock()
-    await eval_capture.record_query_event(
-        db, event_id="ev_x", workspace_id="ws-1", user_id="u-1",
-        request=SearchRequest(query="q", search_mode="hybrid"), response=_response(2),
-    )
+    with patch("src.services.eval_capture.get_database", new=AsyncMock(return_value=db)):
+        await eval_capture.record_query_event(
+            event_id="ev_x", workspace_id="ws-1", user_id="u-1",
+            request=SearchRequest(query="q", search_mode="hybrid"), response=_response(2),
+        )
     kwargs = db.insert_eval_event.call_args.kwargs
     assert kwargs["result_doc_ids"] == ["d0", "d1"]
     assert kwargs["result_chunk_ids"] == ["c0", "c1"]
@@ -53,7 +54,22 @@ async def test_record_query_event_never_raises():
     db = AsyncMock()
     db.insert_eval_event.side_effect = RuntimeError("db down")
     # Must swallow: capture failure can never surface into the search path.
-    await eval_capture.record_query_event(
-        db, event_id="ev_x", workspace_id="ws-1", user_id=None,
-        request=SearchRequest(query="q"), response=_response(0),
-    )
+    with patch("src.services.eval_capture.get_database", new=AsyncMock(return_value=db)):
+        await eval_capture.record_query_event(
+            event_id="ev_x", workspace_id="ws-1", user_id=None,
+            request=SearchRequest(query="q"), response=_response(0),
+        )
+
+
+@pytest.mark.asyncio
+async def test_record_query_event_swallows_db_resolution_failure():
+    # Even resolving the database handle (cold/failed init) must not propagate:
+    # the handle is acquired inside the task's try block, off the request path.
+    with patch(
+        "src.services.eval_capture.get_database",
+        new=AsyncMock(side_effect=RuntimeError("db init failed")),
+    ):
+        await eval_capture.record_query_event(
+            event_id="ev_x", workspace_id="ws-1", user_id=None,
+            request=SearchRequest(query="q"), response=_response(1),
+        )

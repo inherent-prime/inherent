@@ -3,8 +3,11 @@
 Records every single-workspace search into eval_query_events so agent feedback
 can label it later. Runs as a FastAPI BackgroundTasks job scheduled by the
 search handler (same fire-and-forget pattern as audit publishing): it must
-NEVER raise into, or add latency to, the serving path. The retention purge
-piggybacks on capture so no scheduler is needed at trial scale.
+NEVER raise into, or add latency to, the serving path. To keep that guarantee,
+ALL database work — including resolving the database handle itself — happens
+inside record_query_event's try block, so a cold or failed DB init can never
+surface as a search error. The retention purge piggybacks on capture so no
+scheduler is needed at trial scale.
 """
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ import uuid
 
 from src.config.settings import settings
 from src.models.search import SearchRequest, SearchResponse
+from src.services.database import get_database
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -31,7 +35,6 @@ def capture_enabled(workspace_id: str) -> bool:
 
 
 async def record_query_event(
-    db,
     *,
     event_id: str,
     workspace_id: str,
@@ -39,8 +42,13 @@ async def record_query_event(
     request: SearchRequest,
     response: SearchResponse,
 ) -> None:
-    """Persist one search event, then opportunistically purge expired rows."""
+    """Persist one search event, then opportunistically purge expired rows.
+
+    Resolves the database handle here (not in the search handler) so even a
+    failed DB init stays inside this try block, off the request path.
+    """
     try:
+        db = await get_database()
         await db.insert_eval_event(
             event_id=event_id,
             workspace_id=workspace_id,

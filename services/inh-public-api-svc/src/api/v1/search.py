@@ -357,13 +357,13 @@ async def search_documents(
         # Evals v1: mint the capture event id and schedule the write-behind.
         # Fire-and-forget like audit; the response carries event_id so agents
         # can report feedback (POST /v1/evals/feedback) on exactly this search.
+        # No awaits here: the task resolves the database itself, so capture can
+        # never fail or slow the serving path (not even on a cold DB init).
         if capture_enabled(workspace_id):
             event_id = new_event_id()
             response.event_id = event_id
-            database = await get_database()
             background_tasks.add_task(
                 record_query_event,
-                database,
                 event_id=event_id,
                 workspace_id=workspace_id,
                 user_id=auth.key_info.user_id,
