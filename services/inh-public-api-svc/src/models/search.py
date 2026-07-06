@@ -175,6 +175,12 @@ class SearchResponse(BaseModel):
     performed_fallback: bool = False
     fallback_strategy: str | None = None
 
+    # Evals v1 — optional, backward-compatible. The capture event id for this
+    # search; the handle for POST /v1/evals/feedback and the join key for
+    # external (answer-level) eval stacks. None when capture is disabled or
+    # the search was multi-workspace.
+    event_id: str | None = None
+
 
 # Resolve the forward reference to Citation (#39). Imported here (not at module
 # top) to avoid a circular import: citation.py imports ScoreSource from this
