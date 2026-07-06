@@ -62,6 +62,32 @@ async def test_partial_without_chunks_does_not_promote():
 
 
 @pytest.mark.asyncio
+async def test_partial_with_chunks_promotes_grade_one():
+    db = _db()
+    resp = await submit_feedback(
+        db, workspace_ids=["ws-1"],
+        req=FeedbackRequest(event_id="ev_1", verdict="partial", useful_chunk_ids=["c1"]),
+    )
+    assert resp.promoted and resp.case_id == "case_1"
+    kwargs = db.upsert_eval_case.call_args.kwargs
+    assert kwargs["relevance_grade"] == 1            # partial promotes at grade 1, not 2
+    assert kwargs["expected_doc_ids"] == ["d1"]      # only the doc of chunk c1
+
+
+@pytest.mark.asyncio
+async def test_unmatched_chunk_ids_record_only():
+    db = _db()
+    resp = await submit_feedback(
+        db, workspace_ids=["ws-1"],
+        req=FeedbackRequest(event_id="ev_1", verdict="answered",
+                            useful_chunk_ids=["c_nonexistent"]),
+    )
+    assert not resp.promoted and resp.case_id is None
+    db.upsert_eval_feedback.assert_awaited_once()   # feedback still recorded
+    db.upsert_eval_case.assert_not_awaited()        # but no garbage case promoted
+
+
+@pytest.mark.asyncio
 async def test_not_relevant_records_but_never_promotes():
     db = _db()
     resp = await submit_feedback(db, workspace_ids=["ws-1"],
