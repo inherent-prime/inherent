@@ -8,6 +8,7 @@ The connection mode is determined by the USE_CLOUD_SQL_CONNECTOR setting.
 """
 
 import hashlib
+import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, AsyncGenerator
@@ -947,6 +948,393 @@ class DatabaseService:
             )
             for row in rows
         ]
+
+    # ------------------------------------------------------------------
+    # Evals v1 (design spec: evals-v1) — capture, feedback, cases, runs.
+    # Raw SQL like the rest of this service; every statement filters
+    # workspace scope (tenancy) and is safe under concurrent writers.
+    # ------------------------------------------------------------------
+
+    async def insert_eval_event(
+        self, *, event_id: str, workspace_id: str, user_id: str | None,
+        query_text: str, search_mode: str, result_doc_ids: list[str],
+        result_chunk_ids: list[str], top_score: float | None,
+        quality_verdict: str | None, latency_ms: float,
+    ) -> None:
+        """Record one captured search event (called from the capture background task)."""
+        async with self.session() as session:
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO eval_query_events (
+                        event_id, workspace_id, user_id, query_text, search_mode,
+                        result_doc_ids, result_chunk_ids, top_score, quality_verdict, latency_ms
+                    ) VALUES (
+                        :event_id, :workspace_id, :user_id, :query_text, :search_mode,
+                        CAST(:result_doc_ids AS jsonb), CAST(:result_chunk_ids AS jsonb),
+                        :top_score, :quality_verdict, :latency_ms
+                    ) ON CONFLICT (event_id) DO NOTHING
+                    """
+                ),
+                {
+                    "event_id": event_id, "workspace_id": workspace_id, "user_id": user_id,
+                    "query_text": query_text, "search_mode": search_mode,
+                    "result_doc_ids": json.dumps(result_doc_ids),
+                    "result_chunk_ids": json.dumps(result_chunk_ids),
+                    "top_score": top_score, "quality_verdict": quality_verdict,
+                    "latency_ms": latency_ms,
+                },
+            )
+            await session.commit()
+
+    async def purge_expired_eval_events(self, *, workspace_id: str, retention_days: int) -> int:
+        """Delete raw events past the retention window; returns rows deleted."""
+        async with self.session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    DELETE FROM eval_query_events
+                    WHERE workspace_id = :workspace_id
+                      AND created_at < NOW() - make_interval(days => :days)
+                    """
+                ),
+                {"workspace_id": workspace_id, "days": retention_days},
+            )
+            await session.commit()
+            return result.rowcount or 0
+
+    async def delete_eval_events(self, *, workspace_id: str) -> int:
+        """Delete all captured events for a workspace (DELETE /v1/evals/events); returns rows deleted."""
+        async with self.session() as session:
+            result = await session.execute(
+                text("DELETE FROM eval_query_events WHERE workspace_id = :workspace_id"),
+                {"workspace_id": workspace_id},
+            )
+            await session.commit()
+            return result.rowcount or 0
+
+    async def get_eval_event(self, *, event_id: str, workspace_ids: list[str]) -> dict | None:
+        """Fetch one captured event, scoped to the caller's workspaces.
+
+        Returns None when the event does not exist or belongs to a foreign
+        workspace, so callers can 404 without leaking cross-workspace existence.
+        """
+        async with self.session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT event_id, workspace_id, query_text, search_mode,
+                           result_doc_ids, result_chunk_ids
+                    FROM eval_query_events
+                    WHERE event_id = :event_id AND workspace_id = ANY(:workspace_ids)
+                    """
+                ),
+                {"event_id": event_id, "workspace_ids": workspace_ids},
+            )
+            row = result.fetchone()
+            if not row:
+                return None
+            data = dict(row._mapping)
+            # asyncpg/SQLAlchemy returns JSONB as Python lists already; normalize
+            # defensively in case the driver ever hands back a different type.
+            data["result_doc_ids"] = list(data["result_doc_ids"])
+            data["result_chunk_ids"] = list(data["result_chunk_ids"])
+            return data
+
+    async def upsert_eval_feedback(
+        self, *, event_id: str, workspace_id: str, verdict: str,
+        useful_chunk_ids: list[str], query_text: str, note: str | None,
+    ) -> None:
+        """Record (or replace) the verdict on one event; one verdict per event, last write wins."""
+        async with self.session() as session:
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO eval_feedback (
+                        event_id, workspace_id, verdict, useful_chunk_ids, query_text, note
+                    ) VALUES (
+                        :event_id, :workspace_id, :verdict,
+                        CAST(:useful_chunk_ids AS jsonb), :query_text, :note
+                    )
+                    ON CONFLICT (event_id) DO UPDATE SET
+                        verdict = EXCLUDED.verdict,
+                        useful_chunk_ids = EXCLUDED.useful_chunk_ids,
+                        note = EXCLUDED.note,
+                        updated_at = NOW()
+                    """
+                ),
+                {
+                    "event_id": event_id, "workspace_id": workspace_id, "verdict": verdict,
+                    "useful_chunk_ids": json.dumps(useful_chunk_ids),
+                    "query_text": query_text, "note": note,
+                },
+            )
+            await session.commit()
+
+    async def upsert_eval_case(
+        self, *, case_id: str, workspace_id: str, query_text: str,
+        expected_doc_ids: list[str], relevance_grade: int, source_event_id: str,
+    ) -> str:
+        """Insert or update the case for this (workspace, normalized query).
+
+        Re-feedback on the same query merges evidence: expected ids are unioned
+        and the grade takes the max, so a later 'partial' can't downgrade an
+        'answered'. Returns the surviving case_id (existing row wins).
+        """
+        async with self.session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    INSERT INTO eval_cases (
+                        case_id, workspace_id, query_text, expected_doc_ids,
+                        relevance_grade, source_event_id
+                    ) VALUES (
+                        :case_id, :workspace_id, :query_text,
+                        CAST(:expected_doc_ids AS jsonb), :relevance_grade, :source_event_id
+                    )
+                    ON CONFLICT (workspace_id, md5(lower(query_text))) DO UPDATE SET
+                        expected_doc_ids = (
+                            SELECT jsonb_agg(DISTINCT x) FROM jsonb_array_elements_text(
+                                eval_cases.expected_doc_ids || EXCLUDED.expected_doc_ids
+                            ) AS t(x)
+                        ),
+                        relevance_grade = GREATEST(eval_cases.relevance_grade, EXCLUDED.relevance_grade),
+                        active = TRUE,
+                        updated_at = NOW()
+                    RETURNING case_id
+                    """
+                ),
+                {
+                    "case_id": case_id, "workspace_id": workspace_id, "query_text": query_text,
+                    "expected_doc_ids": json.dumps(expected_doc_ids),
+                    "relevance_grade": relevance_grade, "source_event_id": source_event_id,
+                },
+            )
+            await session.commit()
+            return result.scalar_one()
+
+    async def list_eval_cases(self, *, workspace_id: str, limit: int, offset: int) -> list[dict]:
+        """Page through all eval cases (active and inactive) for a workspace, newest first."""
+        async with self.session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT * FROM eval_cases
+                    WHERE workspace_id = :workspace_id
+                    ORDER BY created_at DESC
+                    LIMIT :limit OFFSET :offset
+                    """
+                ),
+                {"workspace_id": workspace_id, "limit": limit, "offset": offset},
+            )
+            rows = result.fetchall()
+            return [dict(row._mapping) for row in rows]
+
+    async def set_eval_case_active(self, *, workspace_id: str, case_id: str, active: bool) -> bool:
+        """Enable/disable a case (soft delete); returns True if a row was updated."""
+        async with self.session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    UPDATE eval_cases SET active = :active, updated_at = NOW()
+                    WHERE workspace_id = :workspace_id AND case_id = :case_id
+                    """
+                ),
+                {"workspace_id": workspace_id, "case_id": case_id, "active": active},
+            )
+            await session.commit()
+            return result.rowcount > 0
+
+    async def get_active_eval_cases(self, *, workspace_id: str) -> list[dict]:
+        """Fetch the active cases used as the replay set for eval runs."""
+        async with self.session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT case_id, query_text, expected_doc_ids, relevance_grade
+                    FROM eval_cases
+                    WHERE workspace_id = :workspace_id AND active
+                    ORDER BY created_at
+                    """
+                ),
+                {"workspace_id": workspace_id},
+            )
+            rows = result.fetchall()
+            return [dict(row._mapping) for row in rows]
+
+    async def eval_scorecard_counts(self, *, workspace_id: str, window_days: int) -> dict:
+        """Assemble the raw counts behind the operator scorecard for the trailing window."""
+        async with self.session() as session:
+            events_result = await session.execute(
+                text(
+                    """
+                    SELECT COUNT(*) AS count, quality_verdict
+                    FROM eval_query_events
+                    WHERE workspace_id = :workspace_id
+                      AND created_at > NOW() - make_interval(days => :days)
+                    GROUP BY quality_verdict
+                    """
+                ),
+                {"workspace_id": workspace_id, "days": window_days},
+            )
+            events_rows = events_result.fetchall()
+
+            feedback_result = await session.execute(
+                text(
+                    """
+                    SELECT COUNT(*) AS count, verdict
+                    FROM eval_feedback
+                    WHERE workspace_id = :workspace_id
+                      AND created_at > NOW() - make_interval(days => :days)
+                    GROUP BY verdict
+                    """
+                ),
+                {"workspace_id": workspace_id, "days": window_days},
+            )
+            feedback_rows = feedback_result.fetchall()
+
+            case_count_result = await session.execute(
+                text(
+                    "SELECT COUNT(*) FROM eval_cases WHERE workspace_id = :workspace_id AND active"
+                ),
+                {"workspace_id": workspace_id},
+            )
+            eval_case_count = case_count_result.scalar_one()
+
+            gaps_result = await session.execute(
+                text(
+                    """
+                    SELECT query_text FROM eval_feedback
+                    WHERE workspace_id = :workspace_id AND verdict = 'not_relevant'
+                    ORDER BY created_at DESC LIMIT 5
+                    """
+                ),
+                {"workspace_id": workspace_id},
+            )
+            corpus_gaps = [row.query_text for row in gaps_result.fetchall()]
+
+        captured_events = sum(row.count for row in events_rows)
+        return {
+            "captured_events": captured_events,
+            "verdict_distribution": {
+                row.quality_verdict: row.count for row in events_rows if row.quality_verdict is not None
+            },
+            "feedback_distribution": {row.verdict: row.count for row in feedback_rows},
+            "eval_case_count": eval_case_count,
+            "corpus_gaps": corpus_gaps,
+        }
+
+    async def insert_eval_run(self, *, run_id: str, workspace_id: str, case_count: int, k: int) -> None:
+        """Create the run row (status='running' by default) before replaying cases."""
+        async with self.session() as session:
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO eval_runs (run_id, workspace_id, case_count, k)
+                    VALUES (:run_id, :workspace_id, :case_count, :k)
+                    """
+                ),
+                {"run_id": run_id, "workspace_id": workspace_id, "case_count": case_count, "k": k},
+            )
+            await session.commit()
+
+    async def finish_eval_run(
+        self, *, run_id: str, status: str, aggregates: dict, error: str | None
+    ) -> None:
+        """Mark a run completed/failed and store its aggregate metrics."""
+        async with self.session() as session:
+            await session.execute(
+                text(
+                    """
+                    UPDATE eval_runs
+                    SET status = :status, aggregates = CAST(:aggregates AS jsonb),
+                        error = :error, finished_at = NOW()
+                    WHERE run_id = :run_id
+                    """
+                ),
+                {
+                    "run_id": run_id, "status": status,
+                    "aggregates": json.dumps(aggregates), "error": error,
+                },
+            )
+            await session.commit()
+
+    async def insert_eval_run_results(self, *, run_id: str, rows: list[dict]) -> None:
+        """Bulk-insert per-case, per-mode metrics for a run."""
+        async with self.session() as session:
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO eval_run_results (
+                        run_id, case_id, query_text, mode, recall_at_k, mrr, ndcg_at_k
+                    ) VALUES (
+                        :run_id, :case_id, :query_text, :mode, :recall_at_k, :mrr, :ndcg_at_k
+                    )
+                    """
+                ),
+                [
+                    {
+                        "run_id": run_id,
+                        "case_id": row["case_id"],
+                        "query_text": row["query_text"],
+                        "mode": row["mode"],
+                        "recall_at_k": row["recall_at_k"],
+                        "mrr": row["mrr"],
+                        "ndcg_at_k": row["ndcg_at_k"],
+                    }
+                    for row in rows
+                ],
+            )
+            await session.commit()
+
+    async def get_eval_run(self, *, workspace_id: str, run_id: str) -> dict | None:
+        """Fetch one run's metadata + aggregates, scoped to the workspace."""
+        async with self.session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT * FROM eval_runs
+                    WHERE run_id = :run_id AND workspace_id = :workspace_id
+                    """
+                ),
+                {"run_id": run_id, "workspace_id": workspace_id},
+            )
+            row = result.fetchone()
+            return dict(row._mapping) if row else None
+
+    async def get_eval_run_results(self, *, run_id: str) -> list[dict]:
+        """Fetch per-case, per-mode results for a run (no workspace filter: the
+        run_id already resolved through get_eval_run, which is workspace-scoped).
+        """
+        async with self.session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT * FROM eval_run_results
+                    WHERE run_id = :run_id
+                    ORDER BY case_id, mode
+                    """
+                ),
+                {"run_id": run_id},
+            )
+            rows = result.fetchall()
+            return [dict(row._mapping) for row in rows]
+
+    async def get_last_eval_run(self, *, workspace_id: str) -> dict | None:
+        """Fetch the most recent run for a workspace (used by the scorecard)."""
+        async with self.session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT * FROM eval_runs
+                    WHERE workspace_id = :workspace_id
+                    ORDER BY created_at DESC LIMIT 1
+                    """
+                ),
+                {"workspace_id": workspace_id},
+            )
+            row = result.fetchone()
+            return dict(row._mapping) if row else None
 
 
 # Singleton instance management
