@@ -21,6 +21,7 @@ from src.services.audit_publisher import (
 )
 from src.services.auth import ResolvedAuth, resolve_workspace_search
 from src.services.database import get_database
+from src.services.eval_capture import capture_enabled, new_event_id, record_query_event
 from src.services.quality_gate import evaluate as evaluate_quality
 from src.services.search import SearchService, get_search_service
 from src.utils import get_logger
@@ -352,6 +353,23 @@ async def search_documents(
             source=source,
             workspace_id=workspace_id,
         )
+
+        # Evals v1: mint the capture event id and schedule the write-behind.
+        # Fire-and-forget like audit; the response carries event_id so agents
+        # can report feedback (POST /v1/evals/feedback) on exactly this search.
+        if capture_enabled(workspace_id):
+            event_id = new_event_id()
+            response.event_id = event_id
+            database = await get_database()
+            background_tasks.add_task(
+                record_query_event,
+                database,
+                event_id=event_id,
+                workspace_id=workspace_id,
+                user_id=auth.key_info.user_id,
+                request=request,
+                response=response,
+            )
         return response
 
     # Multi-workspace: search across all user workspaces, merge results
