@@ -19,7 +19,7 @@ tests/security/test_mcp_workspace_boundaries.py.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import mcp.types as mcp_types
 import pytest
@@ -44,6 +44,7 @@ TOOL_SPEC: dict[str, dict] = {
     "verify_claim": {"required": ["api_key", "claim"]},
     "explain_lineage": {"required": ["api_key", "document_id"]},
     "refresh_stale_source": {"required": ["api_key", "document_id"]},
+    "delete_document": {"required": ["api_key", "document_id"]},
 }
 
 # Permission each tool requires (mirrors src/mcp_server/server._TOOL_PERMISSIONS).
@@ -56,6 +57,7 @@ _PERMISSION: dict[str, str] = {
     "verify_claim": "read",
     "explain_lineage": "read",
     "refresh_stale_source": "write",
+    "delete_document": "write",
 }
 
 # A key that LACKS the tool's required permission (so the denied path triggers).
@@ -76,6 +78,7 @@ _TOOL_ARGS: dict[str, dict] = {
     "verify_claim": {"claim": "the sky is blue", "evidence": ["the sky is blue"]},
     "explain_lineage": {"document_id": "doc-1"},
     "refresh_stale_source": {"document_id": "doc-1"},
+    "delete_document": {"document_id": "doc-1"},
 }
 
 ALL_TOOLS = list(_PERMISSION)
@@ -195,6 +198,9 @@ class TestToolOutputType:
             }
         )
         db.create_or_reset_pending_document = AsyncMock(return_value=None)
+        db.delete_document = AsyncMock(
+            return_value={"document_id": "doc-1", "chunk_count": 3, "size_bytes": 2048}
+        )
 
         from src.models.search import SearchResponse
 
@@ -208,8 +214,11 @@ class TestToolOutputType:
                 search_mode="semantic",
             )
         )
+        search.delete_document_vectors = AsyncMock(return_value=3)
         mq = AsyncMock()
         mq.publish = AsyncMock(return_value=None)
+        storage = MagicMock()
+        storage.delete_file = AsyncMock(return_value=None)
 
         args = {"api_key": "x", **_TOOL_ARGS[name]}
         with (
@@ -218,6 +227,16 @@ class TestToolOutputType:
             patch(
                 "src.services.mq.get_mq_service",
                 new=AsyncMock(return_value=mq),
+            ),
+            # delete_document reaches the vector/object stores through the
+            # deletion orchestrator, which resolves its own services.
+            patch(
+                "src.services.deletion.get_search_service",
+                new=AsyncMock(return_value=search),
+            ),
+            patch(
+                "src.services.deletion.get_storage_service",
+                new=MagicMock(return_value=storage),
             ),
         ):
             content = await _call_tool(name, args)

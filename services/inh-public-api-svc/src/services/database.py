@@ -603,6 +603,83 @@ class DatabaseService:
                 return None
             return dict(row._mapping)
 
+    async def delete_document(self, document_id: str, workspace_id: str) -> dict | None:
+        """Delete a document row and its chunks, workspace-scoped (#87).
+
+        Transactional: chunks, the document row, and the workspace stat
+        decrement commit together (or not at all). Keyed on ``(document_id,
+        workspace_id)`` so a caller can never delete another workspace's
+        document — a cross-workspace id reads as not-found.
+
+        Returns the deleted row's ``{document_id, chunk_count, size_bytes}``
+        for reporting, or ``None`` when the document is not visible in this
+        workspace. Vector-store / object-storage cleanup is the caller's job
+        (see ``src/services/deletion.py``).
+        """
+        async with self.session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT document_id, chunk_count, size_bytes
+                    FROM processed_documents
+                    WHERE document_id = :document_id AND workspace_id = :workspace_id
+                """
+                ),
+                {"document_id": document_id, "workspace_id": workspace_id},
+            )
+            row = result.fetchone()
+            if not row:
+                return None
+
+            chunk_count = row.chunk_count or 0
+            size_bytes = row.size_bytes or 0
+
+            await session.execute(
+                text("DELETE FROM document_chunks WHERE document_id = :document_id"),
+                {"document_id": document_id},
+            )
+            await session.execute(
+                text(
+                    """
+                    DELETE FROM processed_documents
+                    WHERE document_id = :document_id AND workspace_id = :workspace_id
+                """
+                ),
+                {"document_id": document_id, "workspace_id": workspace_id},
+            )
+            # Keep the workspace counters truthful (ingestion incremented them);
+            # clamp at zero so a drifted counter can't go negative.
+            await session.execute(
+                text(
+                    """
+                    UPDATE workspace_metadata
+                    SET document_count = GREATEST(document_count - 1, 0),
+                        chunk_count = GREATEST(chunk_count - :chunk_count, 0),
+                        total_size_bytes = GREATEST(total_size_bytes - :size_bytes, 0),
+                        updated_at = NOW()
+                    WHERE workspace_id = :workspace_id
+                """
+                ),
+                {
+                    "chunk_count": chunk_count,
+                    "size_bytes": size_bytes,
+                    "workspace_id": workspace_id,
+                },
+            )
+            await session.commit()
+
+            logger.info(
+                "Document deleted from database",
+                document_id=document_id,
+                workspace_id=workspace_id,
+                chunks_deleted=chunk_count,
+            )
+            return {
+                "document_id": document_id,
+                "chunk_count": chunk_count,
+                "size_bytes": size_bytes,
+            }
+
     async def get_document_chunks(self, document_id: str, workspace_id: str) -> list[DocumentChunk]:
         """Get all chunks for a document."""
         async with self.session() as session:

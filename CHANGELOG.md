@@ -13,6 +13,18 @@ of the already-merged M0–M2 #62/#63/#64). See
 [docs/maintainers/org-readiness-requirements.md](docs/maintainers/org-readiness-requirements.md)
 and [ADR 0001](docs/adr/0001-agent-memory-substrate.md).
 
+### Added
+
+- **Document delete — REST + MCP (#87 P1).** An agent can finally retract
+  knowledge: `DELETE /v1/documents/{id}` and the MCP `delete_document` tool
+  remove a document's Weaviate objects (tenant-scoped), its PostgreSQL row +
+  chunks (transactional, with workspace stat decrement), and best-effort the
+  stored S3 bytes. Both surfaces share one deletion orchestrator; vectors are
+  deleted before the database row so a mid-flight failure stays retryable
+  instead of leaving orphaned vectors in search. Requires **write** permission
+  and is workspace-scoped — cross-workspace documents read as not-found. The
+  `Readme.md` REST/MCP tables were refreshed to match the implemented surface.
+
 ### Defect-register remediation (in progress)
 
 A codescan-driven pass fixing correctness, isolation, and durability defects.
