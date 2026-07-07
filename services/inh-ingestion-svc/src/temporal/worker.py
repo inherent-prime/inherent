@@ -24,6 +24,7 @@ from src.temporal.activities import (
     ensure_tenant_ready,
     extract_text,
     fetch_document,
+    publish_completion,
     record_dead_letter,
     set_document_status,
     store_in_postgresql,
@@ -63,6 +64,7 @@ _ALL_ACTIVITIES: list[Callable[..., Any]] = [
     update_chunk_postgresql,
     update_chunk_weaviate,
     record_dead_letter,
+    publish_completion,
 ]
 
 # All workflows registered with the ingestion worker

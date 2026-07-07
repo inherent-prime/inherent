@@ -17,6 +17,26 @@ and [ADR 0001](docs/adr/0001-agent-memory-substrate.md).
 
 A codescan-driven pass fixing correctness, isolation, and durability defects.
 
+- **Completion contract restored in worker mode (#88)** — the
+  `document.processed` / `document.failed` event is now published from inside
+  `DocumentIngestionWorkflow` as a final Temporal activity, so fire-and-forget
+  workflow starts still notify `core.document.processed.v1` (the switch to
+  `trigger_workflow_async` had silently dropped it). The now-dead publish in
+  the synchronous trigger path was removed so the contract has one owner.
+- **Lineage table ships with migrations (#89)** — new migration
+  `014_ingestion_events.sql` creates the `ingestion_events` table that
+  `lineage.py` writes and the public API's lineage endpoint reads; previously
+  every pipeline step warned with `UndefinedTable` and lineage was never
+  recorded. Migration 013 was also amended to create `dead_letter_jobs`
+  first — no migration created it either, so 013 failed outright on a fresh
+  migration-provisioned database.
+- **Idle Redis polls are silent (#90)** — redis-py ≥ 8 raises `TimeoutError`
+  when a blocking `XREADGROUP` expires with no messages; the subscriber now
+  treats that as the normal empty poll (no error log, no 1s penalty sleep)
+  instead of ~20 error lines/minute per idle deployment, and the client is
+  created with explicit `socket_timeout` / `health_check_interval` so blocking
+  reads can't race the socket timeout.
+
 - **⚠️ BREAKING (data) — collision-free Weaviate naming.** Workspace/user ids
   are now base32-encoded into collection/tenant names instead of stripping
   punctuation, which previously let ids differing only in punctuation

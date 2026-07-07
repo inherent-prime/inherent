@@ -23,6 +23,38 @@ logger = structlog.get_logger(__name__)
 MessageHandler = Callable[[dict], Awaitable[None]]
 
 
+def build_completion_message(
+    result: ProcessingResult,
+    upload_message: DocumentUploadMessage,
+) -> dict:
+    """Build the DocumentCompletionMessage payload from a processing outcome.
+
+    Single owner of the completion-event shape (#88): used by
+    BaseMQService.publish_completion (legacy sync paths) and by the
+    publish_completion Temporal activity (worker mode).
+    """
+    return {
+        "event_type": "document.processed" if result.success else "document.failed",
+        "document_id": result.document_id,
+        "workspace_id": upload_message.workspace_id,
+        "user_id": upload_message.user_id,
+        "original_filename": upload_message.original_filename,
+        "success": result.success,
+        "status": "ready" if result.success else "failed",
+        "chunks_created": result.chunks_created,
+        "processing_time_ms": result.processing_time_ms,
+        "error": result.error,
+        "timestamp": datetime.now(UTC).isoformat(),
+        # Storage metadata for intg-svc document creation
+        "content_type": upload_message.content_type,
+        "size_bytes": upload_message.size_bytes,
+        "storage_backend": upload_message.storage_backend,
+        "storage_path": upload_message.storage_path or upload_message.filename,
+        "storage_bucket": upload_message.storage_bucket,
+        "storage_url": upload_message.storage_url,
+    }
+
+
 class BaseMQService(abc.ABC):
     """Abstract base class for message queue backends.
 
@@ -102,26 +134,7 @@ class BaseMQService(abc.ABC):
             )
             return
 
-        completion_message = {
-            "event_type": "document.processed" if result.success else "document.failed",
-            "document_id": result.document_id,
-            "workspace_id": upload_message.workspace_id,
-            "user_id": upload_message.user_id,
-            "original_filename": upload_message.original_filename,
-            "success": result.success,
-            "status": "ready" if result.success else "failed",
-            "chunks_created": result.chunks_created,
-            "processing_time_ms": result.processing_time_ms,
-            "error": result.error,
-            "timestamp": datetime.now(UTC).isoformat(),
-            # Storage metadata for intg-svc document creation
-            "content_type": upload_message.content_type,
-            "size_bytes": upload_message.size_bytes,
-            "storage_backend": upload_message.storage_backend,
-            "storage_path": upload_message.storage_path or upload_message.filename,
-            "storage_bucket": upload_message.storage_bucket,
-            "storage_url": upload_message.storage_url,
-        }
+        completion_message = build_completion_message(result, upload_message)
 
         try:
             await self.publish(topic, completion_message)

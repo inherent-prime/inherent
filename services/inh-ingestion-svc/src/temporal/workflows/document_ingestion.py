@@ -7,7 +7,8 @@ This workflow coordinates the following steps:
 4. Chunk text (reads from staging, writes to staging)
 5. Store in PostgreSQL and Weaviate (reads from staging, parallel)
 6. Update workspace statistics
-7. Clean up staging data
+7. Publish document.processed / document.failed completion event (#88)
+8. Clean up staging data
 """
 
 import asyncio
@@ -23,6 +24,7 @@ from temporalio.common import RetryPolicy
 with workflow.unsafe.imports_passed_through():
     from src.temporal.activities.chunk import chunk_text
     from src.temporal.activities.cleanup import cleanup_staging
+    from src.temporal.activities.completion import publish_completion
     from src.temporal.activities.dead_letter import record_dead_letter
     from src.temporal.activities.extract import extract_text
     from src.temporal.activities.fetch import fetch_document
@@ -37,6 +39,7 @@ with workflow.unsafe.imports_passed_through():
         EnsureTenantInput,
         ExtractTextInput,
         FetchDocumentInput,
+        PublishCompletionInput,
         RecordDeadLetterInput,
         SetDocumentStatusInput,
         StoreDocumentInput,
@@ -187,6 +190,56 @@ class DocumentIngestionWorkflow:
             )
         except Exception:
             workflow.logger.warning("Failed to record dead-letter job (non-fatal)")
+
+    async def _publish_completion_best_effort(
+        self,
+        input: DocumentIngestionInput,
+        *,
+        success: bool,
+        chunks_created: int = 0,
+        error: str | None = None,
+        processing_time_ms: int = 0,
+    ) -> None:
+        """Publish the document.processed/document.failed completion event (#88).
+
+        Worker mode starts this workflow fire-and-forget, so the workflow itself
+        owns the completion contract (DocumentCompletionMessage on
+        core.document.processed.v1) — downstream services build their document
+        records from it. Transient MQ failures are retried by Temporal; if the
+        policy is exhausted, the failure is logged but must not flip an
+        otherwise-complete ingestion to failed.
+        """
+        try:
+            await workflow.execute_activity(
+                publish_completion,
+                PublishCompletionInput(
+                    document_id=input.document_id,
+                    workspace_id=input.workspace_id,
+                    user_id=input.user_id,
+                    filename=input.filename,
+                    original_filename=input.original_filename,
+                    content_type=input.content_type,
+                    size_bytes=input.size_bytes,
+                    storage_backend=input.storage_backend,
+                    storage_path=input.storage_path,
+                    storage_bucket=input.storage_bucket,
+                    storage_url=input.storage_url,
+                    timestamp=input.timestamp,
+                    success=success,
+                    chunks_created=chunks_created,
+                    error=error,
+                    processing_time_ms=processing_time_ms,
+                ),
+                start_to_close_timeout=timedelta(seconds=15),
+                retry_policy=RetryPolicy(
+                    maximum_attempts=3,
+                    initial_interval=timedelta(seconds=1),
+                    maximum_interval=timedelta(seconds=10),
+                    backoff_coefficient=2.0,
+                ),
+            )
+        except Exception:
+            workflow.logger.warning("Failed to publish completion event (non-fatal)")
 
     @workflow.run
     async def run(self, input: DocumentIngestionInput) -> WorkflowResult:
@@ -411,6 +464,12 @@ class DocumentIngestionWorkflow:
                     workflow_run_id=workflow_run_id,
                     error_message=pg_error,
                 )
+                await self._publish_completion_best_effort(
+                    input,
+                    success=False,
+                    error=pg_error,
+                    processing_time_ms=processing_time_ms,
+                )
                 return WorkflowResult(
                     document_id=input.document_id,
                     success=False,
@@ -441,6 +500,12 @@ class DocumentIngestionWorkflow:
                     input=input,
                     workflow_run_id=workflow_run_id,
                     error_message=wv_error,
+                )
+                await self._publish_completion_best_effort(
+                    input,
+                    success=False,
+                    error=wv_error,
+                    processing_time_ms=processing_time_ms,
                 )
                 return WorkflowResult(
                     document_id=input.document_id,
@@ -477,6 +542,15 @@ class DocumentIngestionWorkflow:
             # Calculate final processing time
             final_processing_time_ms = int((workflow.now() - start_time).total_seconds() * 1000)
 
+            # Tell the platform the document is ready (#88) — downstream
+            # consumers finalize their document records from this event.
+            await self._publish_completion_best_effort(
+                input,
+                success=True,
+                chunks_created=chunk_output.chunk_count,
+                processing_time_ms=final_processing_time_ms,
+            )
+
             return WorkflowResult(
                 document_id=input.document_id,
                 success=True,
@@ -507,6 +581,14 @@ class DocumentIngestionWorkflow:
                 input=input,
                 workflow_run_id=workflow_run_id,
                 error_message=str(e),
+            )
+
+            # Tell the platform the document failed (#88).
+            await self._publish_completion_best_effort(
+                input,
+                success=False,
+                error=str(e),
+                processing_time_ms=processing_time_ms,
             )
 
             return WorkflowResult(
