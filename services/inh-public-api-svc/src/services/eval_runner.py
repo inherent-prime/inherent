@@ -84,7 +84,12 @@ async def execute_run(db, search_service, *, run_id: str, workspace_id: str, use
         await db.finish_eval_run(run_id=run_id, status="completed", aggregates=aggregates, error=None)
     except Exception as exc:  # noqa: BLE001 — background task: record, never raise
         logger.error("eval_run_failed", run_id=run_id, error=str(exc))
-        await db.finish_eval_run(run_id=run_id, status="failed", aggregates={}, error=str(exc))
+        # The failure-path write itself can fail (DB down for both writes); it
+        # must not propagate out of the background task either.
+        try:
+            await db.finish_eval_run(run_id=run_id, status="failed", aggregates={}, error=str(exc))
+        except Exception as inner:  # noqa: BLE001 — failure path must not raise either
+            logger.error("eval_run_finish_failed", run_id=run_id, error=str(inner))
 
 
 async def get_run_report(db, *, workspace_id: str, run_id: str) -> EvalRunReport | None:

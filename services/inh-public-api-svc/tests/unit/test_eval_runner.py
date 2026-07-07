@@ -56,3 +56,13 @@ async def test_execute_run_marks_failed_on_error():
     svc.search.side_effect = RuntimeError("weaviate down")
     await execute_run(db, svc, run_id="run_1", workspace_id="ws-1", user_id="u1")
     assert db.finish_eval_run.call_args.kwargs["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_execute_run_never_raises_even_if_finish_fails():
+    # Both finish_eval_run calls raise (DB down for both writes): the background
+    # task must still swallow. The test completing without raising IS the assertion.
+    db = AsyncMock()
+    db.get_active_eval_cases.return_value = CASES
+    db.finish_eval_run.side_effect = RuntimeError("db down")
+    await execute_run(db, _search_service(), run_id="run_1", workspace_id="ws-1", user_id="u1")
