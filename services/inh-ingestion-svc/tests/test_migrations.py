@@ -180,6 +180,57 @@ def test_pretracking_db_backfills_without_rerunning(tmp_path, monkeypatch):
     assert _applied_files(state) == []
 
 
+def test_ingestion_events_migration_ships_with_service():
+    """#89: lineage writes every pipeline step into ingestion_events, so a
+    shipped migration must create that table — otherwise every activity warns
+    with UndefinedTable and lineage data is silently never recorded.
+
+    Reads the REAL migrations directory (no MIGRATIONS_DIR override) and pins
+    the table plus the columns/indexes that DatabaseService.record_ingestion_event
+    and the lineage API depend on.
+    """
+    sql_files = sorted(migrations._migrations_dir().glob("*.sql"))
+    combined = "\n".join(p.read_text() for p in sql_files)
+
+    assert "CREATE TABLE IF NOT EXISTS ingestion_events" in combined
+
+    # Isolate the migration that creates the table and verify its shape.
+    creating = [
+        p for p in sql_files if "CREATE TABLE IF NOT EXISTS ingestion_events" in p.read_text()
+    ]
+    assert len(creating) == 1
+    sql = creating[0].read_text()
+    for column in (
+        "workflow_run_id",
+        "document_id",
+        "workspace_id",
+        "event_type",
+        "status",
+        "duration_ms",
+        "metadata",
+        "created_at",
+    ):
+        assert column in sql, f"ingestion_events migration missing column {column}"
+    # The lineage API queries by document_id; step lookups go by workflow_run_id.
+    assert "idx_ingestion_events_document_id" in sql
+    assert "idx_ingestion_events_workflow_run_id" in sql
+
+
+def test_dead_letter_jobs_created_by_a_migration():
+    """Same defect class as #89: 013 indexes dead_letter_jobs, but only
+    ensure_schema()/create_all ever created the table — so migrations failed
+    outright on a fresh database. A shipped migration must create it before
+    (or in) 013.
+    """
+    sql_files = sorted(migrations._migrations_dir().glob("*.sql"))
+    creating = [
+        p for p in sql_files if "CREATE TABLE IF NOT EXISTS dead_letter_jobs" in p.read_text()
+    ]
+    assert len(creating) == 1
+    # Must sort at or before 013, which creates the unique dedup index on it.
+    assert creating[0].name <= "013_dead_letter_dedup.sql"
+
+
 def test_missing_directory_raises(tmp_path, monkeypatch):
     monkeypatch.setenv("MIGRATIONS_DIR", str(tmp_path / "does-not-exist"))
     with pytest.raises(RuntimeError, match="Migrations directory not found"):
