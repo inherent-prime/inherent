@@ -44,6 +44,8 @@ TOOL_SPEC: dict[str, dict] = {
     "verify_claim": {"required": ["api_key", "claim"]},
     "explain_lineage": {"required": ["api_key", "document_id"]},
     "refresh_stale_source": {"required": ["api_key", "document_id"]},
+    "report_feedback": {"required": ["api_key", "event_id", "verdict"]},
+    "get_retrieval_health": {"required": ["api_key", "workspace_id"]},
 }
 
 # Permission each tool requires (mirrors src/mcp_server/server._TOOL_PERMISSIONS).
@@ -56,6 +58,8 @@ _PERMISSION: dict[str, str] = {
     "verify_claim": "read",
     "explain_lineage": "read",
     "refresh_stale_source": "write",
+    "report_feedback": "search",
+    "get_retrieval_health": "search",
 }
 
 # A key that LACKS the tool's required permission (so the denied path triggers).
@@ -76,6 +80,8 @@ _TOOL_ARGS: dict[str, dict] = {
     "verify_claim": {"claim": "the sky is blue", "evidence": ["the sky is blue"]},
     "explain_lineage": {"document_id": "doc-1"},
     "refresh_stale_source": {"document_id": "doc-1"},
+    "report_feedback": {"event_id": "ev_1", "verdict": "answered"},
+    "get_retrieval_health": {"workspace_id": "ws-1"},
 }
 
 ALL_TOOLS = list(_PERMISSION)
@@ -195,6 +201,28 @@ class TestToolOutputType:
             }
         )
         db.create_or_reset_pending_document = AsyncMock(return_value=None)
+        db.get_eval_event = AsyncMock(
+            return_value={
+                "event_id": "ev_1",
+                "workspace_id": "ws-1",
+                "query_text": "refund policy",
+                "search_mode": "hybrid",
+                "result_doc_ids": ["doc-1"],
+                "result_chunk_ids": ["chunk-1"],
+            }
+        )
+        db.upsert_eval_feedback = AsyncMock(return_value=None)
+        db.upsert_eval_case = AsyncMock(return_value="case_1")
+        db.eval_scorecard_counts = AsyncMock(
+            return_value={
+                "captured_events": 10,
+                "verdict_distribution": {},
+                "feedback_distribution": {},
+                "eval_case_count": 0,
+                "corpus_gaps": [],
+            }
+        )
+        db.get_last_eval_run = AsyncMock(return_value=None)
 
         from src.models.search import SearchResponse
 
@@ -299,3 +327,125 @@ class TestToolAuthentication:
             content = await _call_tool("search_documents", {"api_key": "bad", "query": "q"})
         assert content[0].text == "Error: Invalid or expired API key"
         search.search.assert_not_called()
+
+
+# =========================================================================== #
+# evals v1: report_feedback / get_retrieval_health (Task 10)
+# =========================================================================== #
+class TestEvalsMcpTools:
+    """report_feedback and get_retrieval_health wrap submit_feedback /
+    build_scorecard (evals v1) and go through the same permission-check path
+    as every other tool (permission parity is covered generically above via
+    ALL_TOOLS)."""
+
+    def _key(self, permissions: list[str] = ("search",)) -> APIKeyInfo:
+        return APIKeyInfo(
+            key_id="key-1",
+            user_id="user-1",
+            workspace_id=None,
+            permissions=list(permissions),  # type: ignore[arg-type]
+            rate_limit=100,
+            expires_at=None,
+            status="active",
+        )
+
+    async def test_report_feedback_promotes_and_returns_case_id(self):
+        db = AsyncMock()
+        db.validate_api_key = AsyncMock(return_value=self._key())
+        db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
+        db.get_eval_event = AsyncMock(
+            return_value={
+                "event_id": "ev_1",
+                "workspace_id": "ws-1",
+                "query_text": "refund policy",
+                "search_mode": "hybrid",
+                "result_doc_ids": ["doc-1"],
+                "result_chunk_ids": ["chunk-1"],
+            }
+        )
+        db.upsert_eval_feedback = AsyncMock(return_value=None)
+        db.upsert_eval_case = AsyncMock(return_value="case_1")
+
+        with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)):
+            content = await _call_tool(
+                "report_feedback",
+                {"api_key": "x", "event_id": "ev_1", "verdict": "answered"},
+            )
+
+        assert isinstance(content[0], TextContent)
+        assert '"promoted"' in content[0].text
+        assert '"case_1"' in content[0].text
+        db.upsert_eval_feedback.assert_awaited_once()
+        db.upsert_eval_case.assert_awaited_once()
+
+    async def test_report_feedback_denied_without_search_permission(self):
+        """A key lacking 'search' gets the standard permission error and the
+        feedback service is never reached."""
+        db = AsyncMock()
+        db.validate_api_key = AsyncMock(return_value=self._key(["read"]))
+        db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
+        db.get_eval_event = AsyncMock()
+
+        with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)):
+            content = await _call_tool(
+                "report_feedback",
+                {"api_key": "x", "event_id": "ev_1", "verdict": "answered"},
+            )
+
+        assert content[0].text == "Error: API key does not have 'search' permission"
+        db.get_eval_event.assert_not_called()
+
+    async def test_report_feedback_unknown_event_names_event_id_in_error(self):
+        db = AsyncMock()
+        db.validate_api_key = AsyncMock(return_value=self._key())
+        db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
+        db.get_eval_event = AsyncMock(return_value=None)
+
+        with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)):
+            content = await _call_tool(
+                "report_feedback",
+                {"api_key": "x", "event_id": "ev_missing", "verdict": "answered"},
+            )
+
+        assert "ev_missing" in content[0].text
+        assert content[0].text.startswith("Error:")
+
+    async def test_get_retrieval_health_returns_scorecard_json(self):
+        db = AsyncMock()
+        db.validate_api_key = AsyncMock(return_value=self._key())
+        db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
+        db.eval_scorecard_counts = AsyncMock(
+            return_value={
+                "captured_events": 10,
+                "verdict_distribution": {},
+                "feedback_distribution": {"answered": 2},
+                "eval_case_count": 3,
+                "corpus_gaps": [],
+            }
+        )
+        db.get_last_eval_run = AsyncMock(return_value=None)
+
+        with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)):
+            content = await _call_tool(
+                "get_retrieval_health", {"api_key": "x", "workspace_id": "ws-1"}
+            )
+
+        assert isinstance(content[0], TextContent)
+        assert '"summary"' in content[0].text
+        assert '"workspace_id":"ws-1"' in content[0].text or '"workspace_id": "ws-1"' in content[0].text
+
+    async def test_get_retrieval_health_rejects_foreign_workspace(self):
+        """A workspace_id the key does not own is rejected before build_scorecard runs."""
+        db = AsyncMock()
+        db.validate_api_key = AsyncMock(return_value=self._key())
+        db.get_user_workspace_ids = AsyncMock(return_value=["ws-owned"])
+        db.eval_scorecard_counts = AsyncMock()
+
+        with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)):
+            content = await _call_tool(
+                "get_retrieval_health", {"api_key": "x", "workspace_id": "ws-foreign"}
+            )
+
+        assert content[0].text.startswith("Error:")
+        assert "not accessible" in content[0].text
+        db.eval_scorecard_counts.assert_not_called()
