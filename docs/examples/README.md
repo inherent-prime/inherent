@@ -860,6 +860,20 @@ curl -s -X POST "$INGEST_BASE/dead-letter/1/abandon" \
 
 ---
 
+## Eval feedback examples
+
+`eval_trial.py` — interactive retrieval-quality labeling. Ask questions about
+your corpus, mark which results were relevant, and each answer is filed as real
+eval feedback. Twenty questions gives you enough labeled cases for a first
+eval run. Requires `API_BASE`, `API_KEY`, `WORKSPACE_ID` env vars.
+
+`langgraph_feedback_agent.py` — the same feedback loop from a real agent:
+LangGraph tool wrappers that search Inherent and auto-report which chunks
+answered the question. Requires `langgraph`/`langchain-core` in your own
+environment (not a repo dependency).
+
+---
+
 ## Postman Collection
 
 Same endpoints as a Postman collection, for GUI-based testing.
