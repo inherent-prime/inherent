@@ -13,6 +13,7 @@ import socket
 from typing import TYPE_CHECKING
 
 import structlog
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from .base import BaseMQService, MessageHandler
 
@@ -46,6 +47,10 @@ class RedisMQService(BaseMQService):
         # Drop as poison after this many delivery attempts (feeds the warn/drop
         # path so one bad message can't loop forever).
         self._max_deliveries = 5
+        # How long a live XREADGROUP blocks waiting for new entries (ms). The
+        # client's socket_timeout is derived from this so an idle blocking read
+        # never races the socket timeout (#90).
+        self._block_ms = 5000
 
     @staticmethod
     def _resolve_concurrency_limit(settings: Settings) -> int:
@@ -72,7 +77,17 @@ class RedisMQService(BaseMQService):
         from redis.asyncio import from_url
 
         url = self.settings.redis_url
-        self._redis = from_url(url, decode_responses=True)
+        # Explicit socket options (#90): socket_timeout must comfortably exceed
+        # the XREADGROUP block window, otherwise every idle blocking read races
+        # the client-side timeout. health_check_interval revalidates connections
+        # that sat idle between polls instead of failing the next command.
+        self._redis = from_url(
+            url,
+            decode_responses=True,
+            socket_timeout=(self._block_ms / 1000) + 5.0,
+            socket_connect_timeout=5.0,
+            health_check_interval=30,
+        )
 
         # Verify connectivity
         await self._redis.ping()  # type: ignore[misc]
@@ -181,13 +196,22 @@ class RedisMQService(BaseMQService):
         # Phase 2: Poll for new messages
         while self._running:
             try:
-                results = await self._redis.xreadgroup(
-                    groupname=group,
-                    consumername=consumer,
-                    streams={stream: ">"},
-                    block=5000,
-                    count=10,
-                )
+                try:
+                    results = await self._redis.xreadgroup(
+                        groupname=group,
+                        consumername=consumer,
+                        streams={stream: ">"},
+                        block=self._block_ms,
+                        count=10,
+                    )
+                except (RedisTimeoutError, TimeoutError):
+                    # Idle block expiry. redis-py >= 8 raises TimeoutError when
+                    # the block window elapses with no messages, where older
+                    # versions returned []. Either way this is the normal quiet
+                    # steady state — poll again immediately, no error log and no
+                    # penalty sleep (#90). (builtin TimeoutError also covers
+                    # asyncio.TimeoutError on Python 3.11+.)
+                    continue
 
                 if not results:
                     continue
