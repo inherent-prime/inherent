@@ -164,6 +164,44 @@ curl -s "$API_BASE/v1/chunks/$DOC_ID/context" \
   | jq .
 ```
 
+## 6. Judge Retrieval Quality (Evals)
+
+Every search response includes an `event_id`. Report whether the results
+answered the question, and Inherent turns your real queries into a labeled
+eval set — no golden-set authoring needed.
+
+Label a few queries interactively (you judge, the script files real feedback):
+
+```bash
+python3 docs/examples/eval_trial.py
+```
+
+Check the scorecard (answer rate, corpus gaps, labeled-case count):
+
+```bash
+curl -s "$API_BASE/v1/evals/scorecard" \
+  -H "X-API-Key: $API_KEY" \
+  -H "X-Workspace-Id: $WORKSPACE_ID" | jq .summary
+```
+
+Run a mode comparison (recall@5 / MRR / nDCG@5 for keyword vs semantic vs
+hybrid, on YOUR corpus):
+
+```bash
+RUN_ID=$(curl -s -X POST "$API_BASE/v1/evals/runs" \
+  -H "X-API-Key: $API_KEY" \
+  -H "X-Workspace-Id: $WORKSPACE_ID" | jq -r .run_id)
+curl -s "$API_BASE/v1/evals/runs/$RUN_ID" \
+  -H "X-API-Key: $API_KEY" \
+  -H "X-Workspace-Id: $WORKSPACE_ID" | jq .run.aggregates
+```
+
+Notes: capture is on by default and raw query events are kept for 30 days
+(`EVAL_RETENTION_DAYS`); disable per workspace with
+`EVAL_CAPTURE_DISABLED_WORKSPACES` or purge with `DELETE /v1/evals/events`.
+Promoted eval cases persist until you disable them via
+`PATCH /v1/evals/cases/{case_id}`.
+
 ## Common Commands
 
 | Command | Purpose |
