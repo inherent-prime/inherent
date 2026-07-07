@@ -16,6 +16,7 @@ Usage:
 import json
 import os
 import sys
+import urllib.error
 import urllib.request
 
 API_BASE = os.environ.get("API_BASE", "http://localhost:18000")
@@ -23,7 +24,12 @@ API_KEY = os.environ.get("API_KEY", "")
 WORKSPACE_ID = os.environ.get("WORKSPACE_ID", "")
 
 
-def _post(path: str, body: dict) -> dict:
+# This is an interactive human session: one transient failure (stale key 401,
+# expired event 404, rate limit 429, backend 503) should log a single line and
+# let the evaluator keep labeling — never crash mid-session with a traceback.
+# So _post returns None on HTTP error (the loop skips that query) and _get
+# returns {} (the final scorecard line degrades to "unavailable"). No retries.
+def _post(path: str, body: dict) -> dict | None:
     req = urllib.request.Request(
         API_BASE + path,
         data=json.dumps(body).encode(),
@@ -34,8 +40,12 @@ def _post(path: str, body: dict) -> dict:
         },
         method="POST",
     )
-    with urllib.request.urlopen(req) as resp:
-        return json.load(resp)
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as exc:
+        print(f"Request to {path} failed: HTTP {exc.code} {exc.reason}", file=sys.stderr)
+        return None
 
 
 def _get(path: str) -> dict:
@@ -43,8 +53,12 @@ def _get(path: str) -> dict:
         API_BASE + path,
         headers={"X-API-Key": API_KEY, "X-Workspace-Id": WORKSPACE_ID},
     )
-    with urllib.request.urlopen(req) as resp:
-        return json.load(resp)
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as exc:
+        print(f"Request to {path} failed: HTTP {exc.code} {exc.reason}", file=sys.stderr)
+        return {}
 
 
 def main() -> int:
@@ -58,13 +72,17 @@ def main() -> int:
         if not query:
             break
         search = _post("/v1/search", {"query": query, "limit": 5, "search_mode": "hybrid"})
+        if search is None:
+            print("  skipped (request failed)\n")
+            continue
         event_id = search.get("event_id")
         results = search.get("results", [])
         if not results:
             print("  (no results)")
             if event_id:
-                _post("/v1/evals/feedback", {"event_id": event_id, "verdict": "not_relevant"})
-                labeled += 1
+                fb = _post("/v1/evals/feedback", {"event_id": event_id, "verdict": "not_relevant"})
+                if fb is not None:
+                    labeled += 1
             continue
         useful = []
         for i, r in enumerate(results, 1):
@@ -78,12 +96,15 @@ def main() -> int:
         verdict = "answered" if useful else "not_relevant"
         fb = _post("/v1/evals/feedback",
                    {"event_id": event_id, "verdict": verdict, "useful_chunk_ids": useful})
+        if fb is None:
+            print("  skipped (feedback request failed)\n")
+            continue
         labeled += 1
         print(f"  -> feedback filed ({verdict}); promoted={fb.get('promoted')}\n")
 
     print(f"\nLabeled {labeled} queries.")
     scorecard = _get("/v1/evals/scorecard")
-    print("Scorecard:", scorecard.get("summary"))
+    print("Scorecard:", scorecard.get("summary") or "unavailable")
     print("\nNext: trigger a mode-comparison run:")
     print(f'  curl -s -X POST "{API_BASE}/v1/evals/runs" -H "X-API-Key: $API_KEY" '
           f'-H "X-Workspace-Id: $WORKSPACE_ID" | jq .')
