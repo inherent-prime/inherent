@@ -432,7 +432,10 @@ class TestEvalsMcpTools:
 
         assert isinstance(content[0], TextContent)
         assert '"summary"' in content[0].text
-        assert '"workspace_id":"ws-1"' in content[0].text or '"workspace_id": "ws-1"' in content[0].text
+        assert (
+            '"workspace_id":"ws-1"' in content[0].text
+            or '"workspace_id": "ws-1"' in content[0].text
+        )
 
     async def test_get_retrieval_health_rejects_foreign_workspace(self):
         """A workspace_id the key does not own is rejected before build_scorecard runs."""

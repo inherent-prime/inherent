@@ -19,7 +19,9 @@ def _summarize(sc: ScorecardResponse) -> str:
             "labeling script in docs/examples/eval_trial.py) to start building "
             "your eval set."
         )
-    parts = [f"Captured {sc.captured_events} searches in the last {settings.eval_retention_days} days."]
+    parts = [
+        f"Captured {sc.captured_events} searches in the last {settings.eval_retention_days} days."
+    ]
     if sc.answer_rate is not None:
         parts.append(
             f"Agents reported feedback on {sc.feedback_count} of them "
@@ -32,7 +34,9 @@ def _summarize(sc: ScorecardResponse) -> str:
             "low-confidence until more feedback accumulates."
         )
     if sc.corpus_gaps:
-        parts.append(f"Possible corpus gaps (queries judged not relevant): {', '.join(sc.corpus_gaps)}.")
+        parts.append(
+            f"Possible corpus gaps (queries judged not relevant): {', '.join(sc.corpus_gaps)}."
+        )
     return " ".join(parts)
 
 
@@ -43,17 +47,21 @@ async def build_scorecard(db, *, workspace_id: str) -> ScorecardResponse:
     )
     feedback_count = sum(counts["feedback_distribution"].values())
     captured = counts["captured_events"]
-    positive = (counts["feedback_distribution"].get("answered", 0)
-                + counts["feedback_distribution"].get("partial", 0))
+    positive = counts["feedback_distribution"].get("answered", 0) + counts[
+        "feedback_distribution"
+    ].get("partial", 0)
 
     last_run_row = await db.get_last_eval_run(workspace_id=workspace_id)
     last_run = None
     if last_run_row:
         last_run = RunSummary(
-            run_id=last_run_row["run_id"], status=last_run_row["status"],
-            case_count=last_run_row["case_count"], k=last_run_row["k"],
+            run_id=last_run_row["run_id"],
+            status=last_run_row["status"],
+            case_count=last_run_row["case_count"],
+            k=last_run_row["k"],
             aggregates={m: ModeMetrics(**v) for m, v in (last_run_row["aggregates"] or {}).items()},
-            created_at=last_run_row["created_at"], finished_at=last_run_row["finished_at"],
+            created_at=last_run_row["created_at"],
+            finished_at=last_run_row["finished_at"],
             error=last_run_row["error"],
         )
 

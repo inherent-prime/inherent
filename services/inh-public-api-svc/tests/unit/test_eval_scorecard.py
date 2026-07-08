@@ -31,15 +31,20 @@ async def test_scorecard_rates_and_low_confidence_flag():
     assert sc.feedback_count == 25
     assert sc.feedback_rate == pytest.approx(0.25)
     assert sc.answer_rate == pytest.approx((18 + 4) / 25)
-    assert sc.low_confidence is True          # 20 cases < 50 threshold
+    assert sc.low_confidence is True  # 20 cases < 50 threshold
     assert sc.corpus_gaps == ["how do i cancel", "sso setup"]
-    assert "20" in sc.summary                  # summary mentions the sample size
+    assert "20" in sc.summary  # summary mentions the sample size
 
 
 @pytest.mark.asyncio
 async def test_scorecard_empty_workspace():
-    empty = {"captured_events": 0, "verdict_distribution": {}, "feedback_distribution": {},
-             "eval_case_count": 0, "corpus_gaps": []}
+    empty = {
+        "captured_events": 0,
+        "verdict_distribution": {},
+        "feedback_distribution": {},
+        "eval_case_count": 0,
+        "corpus_gaps": [],
+    }
     with patch("src.services.eval_scorecard.settings") as s:
         s.eval_min_sample_size = 50
         s.eval_retention_days = 30

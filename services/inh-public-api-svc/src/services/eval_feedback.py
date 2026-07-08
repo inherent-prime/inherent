@@ -59,7 +59,8 @@ async def submit_feedback(
     if req.useful_chunk_ids:
         chunk_set = set(req.useful_chunk_ids)
         expected = [
-            doc for doc, chunk in zip(event["result_doc_ids"], event["result_chunk_ids"])
+            doc
+            for doc, chunk in zip(event["result_doc_ids"], event["result_chunk_ids"])
             if chunk in chunk_set
         ]
         # De-dupe while preserving rank order.

@@ -9,11 +9,21 @@ import inspect
 from src.services.database import DatabaseService
 
 EVAL_METHODS = [
-    "insert_eval_event", "purge_expired_eval_events", "delete_eval_events",
-    "get_eval_event", "upsert_eval_feedback", "upsert_eval_case",
-    "list_eval_cases", "set_eval_case_active", "get_active_eval_cases",
-    "eval_scorecard_counts", "insert_eval_run", "finish_eval_run",
-    "insert_eval_run_results", "get_eval_run", "get_eval_run_results",
+    "insert_eval_event",
+    "purge_expired_eval_events",
+    "delete_eval_events",
+    "get_eval_event",
+    "upsert_eval_feedback",
+    "upsert_eval_case",
+    "list_eval_cases",
+    "set_eval_case_active",
+    "get_active_eval_cases",
+    "eval_scorecard_counts",
+    "insert_eval_run",
+    "finish_eval_run",
+    "insert_eval_run_results",
+    "get_eval_run",
+    "get_eval_run_results",
     "get_last_eval_run",
 ]
 

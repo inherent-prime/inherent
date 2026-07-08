@@ -126,7 +126,9 @@ def test_flywheel_capture_to_replay(client):
     # readable summary, low_confidence True (tiny sample vs min_sample_size),
     # and at least one recorded feedback event.
     scorecard = client.get(f"{API_URL}/v1/evals/scorecard", headers=HEADERS)
-    assert scorecard.status_code == 200, f"scorecard failed: {scorecard.status_code} {scorecard.text}"
+    assert (
+        scorecard.status_code == 200
+    ), f"scorecard failed: {scorecard.status_code} {scorecard.text}"
     sc_body = scorecard.json()
     assert sc_body["eval_case_count"] >= 1, sc_body
     assert sc_body["summary"], "expected a non-empty human-readable summary"
@@ -136,7 +138,9 @@ def test_flywheel_capture_to_replay(client):
     # 5. POST /v1/evals/runs -> 202 with a run_id (replay executes as a
     # background task).
     run_start = client.post(f"{API_URL}/v1/evals/runs", headers=HEADERS)
-    assert run_start.status_code == 202, f"start run failed: {run_start.status_code} {run_start.text}"
+    assert (
+        run_start.status_code == 202
+    ), f"start run failed: {run_start.status_code} {run_start.text}"
     run_id = run_start.json()["run_id"]
     assert run_id
 
@@ -145,7 +149,9 @@ def test_flywheel_capture_to_replay(client):
     report = None
     while time.monotonic() < deadline:
         run_resp = client.get(f"{API_URL}/v1/evals/runs/{run_id}", headers=HEADERS)
-        assert run_resp.status_code == 200, f"get run failed: {run_resp.status_code} {run_resp.text}"
+        assert (
+            run_resp.status_code == 200
+        ), f"get run failed: {run_resp.status_code} {run_resp.text}"
         report = run_resp.json()
         status = report["run"]["status"]
         if status == "completed":
@@ -170,9 +176,9 @@ def test_flywheel_capture_to_replay(client):
         assert row["query_text"] == QUERY, row
 
     # 8. The promoted case's expected doc must be findable: hybrid recall > 0.
-    assert aggregates["hybrid"]["recall_at_k"] > 0, (
-        f"expected hybrid recall_at_k > 0 for the promoted case, got: {aggregates}"
-    )
+    assert (
+        aggregates["hybrid"]["recall_at_k"] > 0
+    ), f"expected hybrid recall_at_k > 0 for the promoted case, got: {aggregates}"
 
     # 9. DELETE /v1/evals/events -> 200; scorecard's captured_events drops to
     # 0 while eval_case_count stays >= 1 (labeled cases survive the purge —

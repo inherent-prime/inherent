@@ -24,10 +24,19 @@ def test_search_response_has_optional_event_id():
 
 def test_scorecard_minimal():
     sc = ScorecardResponse(
-        workspace_id="ws-1", captured_events=0, feedback_count=0, feedback_rate=0.0,
-        answer_rate=None, verdict_distribution={}, feedback_distribution={},
-        corpus_gaps=[], eval_case_count=0, low_confidence=True, min_sample_size=50,
-        last_run=None, summary="No data yet.",
+        workspace_id="ws-1",
+        captured_events=0,
+        feedback_count=0,
+        feedback_rate=0.0,
+        answer_rate=None,
+        verdict_distribution={},
+        feedback_distribution={},
+        corpus_gaps=[],
+        eval_case_count=0,
+        low_confidence=True,
+        min_sample_size=50,
+        last_run=None,
+        summary="No data yet.",
     )
     assert sc.low_confidence is True
     assert ModeMetrics(recall_at_k=1.0, mrr=1.0, ndcg_at_k=1.0).recall_at_k == 1.0

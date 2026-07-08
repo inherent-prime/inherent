@@ -30,8 +30,10 @@ async def start_run(db, *, workspace_id: str) -> str | None:
         return None
     run_id = "run_" + uuid.uuid4().hex
     await db.insert_eval_run(
-        run_id=run_id, workspace_id=workspace_id,
-        case_count=len(cases), k=settings.eval_run_k,
+        run_id=run_id,
+        workspace_id=workspace_id,
+        case_count=len(cases),
+        k=settings.eval_run_k,
     )
     return run_id
 
@@ -48,7 +50,9 @@ async def _score_case_mode(semaphore, search_service, *, workspace_id, user_id, 
     expected = list(case["expected_doc_ids"])
     grades = {doc: float(case["relevance_grade"]) for doc in expected}
     return {
-        "case_id": case["case_id"], "query_text": case["query_text"], "mode": mode,
+        "case_id": case["case_id"],
+        "query_text": case["query_text"],
+        "mode": mode,
         "recall_at_k": recall_at_k(ranked, expected, k),
         "mrr": mrr(ranked, expected),
         "ndcg_at_k": ndcg_at_k(ranked, grades, k),
@@ -65,11 +69,21 @@ async def execute_run(db, search_service, *, run_id: str, workspace_id: str, use
     try:
         cases = await db.get_active_eval_cases(workspace_id=workspace_id)
         semaphore = asyncio.Semaphore(settings.eval_run_concurrency)
-        rows = await asyncio.gather(*[
-            _score_case_mode(semaphore, search_service, workspace_id=workspace_id,
-                             user_id=user_id, case=case, mode=mode, k=k)
-            for case in cases for mode in MODES
-        ])
+        rows = await asyncio.gather(
+            *[
+                _score_case_mode(
+                    semaphore,
+                    search_service,
+                    workspace_id=workspace_id,
+                    user_id=user_id,
+                    case=case,
+                    mode=mode,
+                    k=k,
+                )
+                for case in cases
+                for mode in MODES
+            ]
+        )
         await db.insert_eval_run_results(run_id=run_id, rows=list(rows))
 
         aggregates = {}
@@ -81,7 +95,9 @@ async def execute_run(db, search_service, *, run_id: str, workspace_id: str, use
                 "mrr": sum(r["mrr"] for r in mode_rows) / n,
                 "ndcg_at_k": sum(r["ndcg_at_k"] for r in mode_rows) / n,
             }
-        await db.finish_eval_run(run_id=run_id, status="completed", aggregates=aggregates, error=None)
+        await db.finish_eval_run(
+            run_id=run_id, status="completed", aggregates=aggregates, error=None
+        )
     except Exception as exc:  # noqa: BLE001 — background task: record, never raise
         logger.error("eval_run_failed", run_id=run_id, error=str(exc))
         # The failure-path write itself can fail (DB down for both writes); it
@@ -99,9 +115,13 @@ async def get_run_report(db, *, workspace_id: str, run_id: str) -> EvalRunReport
         return None
     result_rows = await db.get_eval_run_results(run_id=run_id)
     run = RunSummary(
-        run_id=run_row["run_id"], status=run_row["status"], case_count=run_row["case_count"],
+        run_id=run_row["run_id"],
+        status=run_row["status"],
+        case_count=run_row["case_count"],
         k=run_row["k"],
         aggregates={m: ModeMetrics(**v) for m, v in (run_row["aggregates"] or {}).items()},
-        created_at=run_row["created_at"], finished_at=run_row["finished_at"], error=run_row["error"],
+        created_at=run_row["created_at"],
+        finished_at=run_row["finished_at"],
+        error=run_row["error"],
     )
     return EvalRunReport(run=run, per_case=[CaseModeResult(**r) for r in result_rows])

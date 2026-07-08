@@ -956,10 +956,18 @@ class DatabaseService:
     # ------------------------------------------------------------------
 
     async def insert_eval_event(
-        self, *, event_id: str, workspace_id: str, user_id: str | None,
-        query_text: str, search_mode: str, result_doc_ids: list[str],
-        result_chunk_ids: list[str], top_score: float | None,
-        quality_verdict: str | None, latency_ms: float,
+        self,
+        *,
+        event_id: str,
+        workspace_id: str,
+        user_id: str | None,
+        query_text: str,
+        search_mode: str,
+        result_doc_ids: list[str],
+        result_chunk_ids: list[str],
+        top_score: float | None,
+        quality_verdict: str | None,
+        latency_ms: float,
     ) -> None:
         """Record one captured search event (called from the capture background task)."""
         async with self.session() as session:
@@ -977,11 +985,15 @@ class DatabaseService:
                     """
                 ),
                 {
-                    "event_id": event_id, "workspace_id": workspace_id, "user_id": user_id,
-                    "query_text": query_text, "search_mode": search_mode,
+                    "event_id": event_id,
+                    "workspace_id": workspace_id,
+                    "user_id": user_id,
+                    "query_text": query_text,
+                    "search_mode": search_mode,
                     "result_doc_ids": json.dumps(result_doc_ids),
                     "result_chunk_ids": json.dumps(result_chunk_ids),
-                    "top_score": top_score, "quality_verdict": quality_verdict,
+                    "top_score": top_score,
+                    "quality_verdict": quality_verdict,
                     "latency_ms": latency_ms,
                 },
             )
@@ -1042,8 +1054,14 @@ class DatabaseService:
             return data
 
     async def upsert_eval_feedback(
-        self, *, event_id: str, workspace_id: str, verdict: str,
-        useful_chunk_ids: list[str], query_text: str, note: str | None,
+        self,
+        *,
+        event_id: str,
+        workspace_id: str,
+        verdict: str,
+        useful_chunk_ids: list[str],
+        query_text: str,
+        note: str | None,
     ) -> None:
         """Record (or replace) the verdict on one event; one verdict per event, last write wins."""
         async with self.session() as session:
@@ -1064,16 +1082,25 @@ class DatabaseService:
                     """
                 ),
                 {
-                    "event_id": event_id, "workspace_id": workspace_id, "verdict": verdict,
+                    "event_id": event_id,
+                    "workspace_id": workspace_id,
+                    "verdict": verdict,
                     "useful_chunk_ids": json.dumps(useful_chunk_ids),
-                    "query_text": query_text, "note": note,
+                    "query_text": query_text,
+                    "note": note,
                 },
             )
             await session.commit()
 
     async def upsert_eval_case(
-        self, *, case_id: str, workspace_id: str, query_text: str,
-        expected_doc_ids: list[str], relevance_grade: int, source_event_id: str,
+        self,
+        *,
+        case_id: str,
+        workspace_id: str,
+        query_text: str,
+        expected_doc_ids: list[str],
+        relevance_grade: int,
+        source_event_id: str,
     ) -> str:
         """Insert or update the case for this (workspace, normalized query).
 
@@ -1105,9 +1132,12 @@ class DatabaseService:
                     """
                 ),
                 {
-                    "case_id": case_id, "workspace_id": workspace_id, "query_text": query_text,
+                    "case_id": case_id,
+                    "workspace_id": workspace_id,
+                    "query_text": query_text,
                     "expected_doc_ids": json.dumps(expected_doc_ids),
-                    "relevance_grade": relevance_grade, "source_event_id": source_event_id,
+                    "relevance_grade": relevance_grade,
+                    "source_event_id": source_event_id,
                 },
             )
             await session.commit()
@@ -1217,14 +1247,18 @@ class DatabaseService:
         return {
             "captured_events": captured_events,
             "verdict_distribution": {
-                row.quality_verdict: row.count for row in events_rows if row.quality_verdict is not None
+                row.quality_verdict: row.count
+                for row in events_rows
+                if row.quality_verdict is not None
             },
             "feedback_distribution": {row.verdict: row.count for row in feedback_rows},
             "eval_case_count": eval_case_count,
             "corpus_gaps": corpus_gaps,
         }
 
-    async def insert_eval_run(self, *, run_id: str, workspace_id: str, case_count: int, k: int) -> None:
+    async def insert_eval_run(
+        self, *, run_id: str, workspace_id: str, case_count: int, k: int
+    ) -> None:
         """Create the run row (status='running' by default) before replaying cases."""
         async with self.session() as session:
             await session.execute(
@@ -1253,8 +1287,10 @@ class DatabaseService:
                     """
                 ),
                 {
-                    "run_id": run_id, "status": status,
-                    "aggregates": json.dumps(aggregates), "error": error,
+                    "run_id": run_id,
+                    "status": status,
+                    "aggregates": json.dumps(aggregates),
+                    "error": error,
                 },
             )
             await session.commit()

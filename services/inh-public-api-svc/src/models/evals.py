@@ -23,7 +23,8 @@ class FeedbackRequest(BaseModel):
     event_id: str = Field(..., min_length=1, max_length=100)
     verdict: FeedbackVerdict
     useful_chunk_ids: list[str] | None = Field(
-        default=None, description="Chunk ids from the search results that actually answered the query"
+        default=None,
+        description="Chunk ids from the search results that actually answered the query",
     )
     note: str | None = Field(default=None, max_length=2000)
 

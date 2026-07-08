@@ -218,9 +218,7 @@ class TestFeedbackShape:
     # 3. POST feedback — read-only key -> 403 (needs search)
     # ----------------------------------------------------------------- #
     async def test_feedback_requires_search_permission(self, read_key, evals_db):
-        app = _build_app(
-            key=read_key, db=evals_db, override_permissions=False
-        )
+        app = _build_app(key=read_key, db=evals_db, override_permissions=False)
         async with _client(app) as c:
             r = await c.post(
                 "/v1/evals/feedback",
@@ -276,30 +274,22 @@ class TestCasesListShape:
 class TestPatchCase:
     async def test_patch_case_requires_write_permission(self, search_only_key, evals_db):
         """A search-only key (no 'write') cannot patch a case -> 403."""
-        app = _build_app(
-            key=search_only_key, db=evals_db, override_permissions=False
-        )
+        app = _build_app(key=search_only_key, db=evals_db, override_permissions=False)
         async with _client(app) as c:
-            r = await c.patch(
-                "/v1/evals/cases/case_1", json={"active": False}, headers=_HDR
-            )
+            r = await c.patch("/v1/evals/cases/case_1", json={"active": False}, headers=_HDR)
         assert r.status_code == 403
 
     async def test_patch_case_with_write_key_returns_200(self, write_key, evals_db):
         app = _build_app(key=write_key, db=evals_db, workspace_id="ws-1")
         async with _client(app) as c:
-            r = await c.patch(
-                "/v1/evals/cases/case_1", json={"active": False}, headers=_HDR
-            )
+            r = await c.patch("/v1/evals/cases/case_1", json={"active": False}, headers=_HDR)
         assert r.status_code == 200
 
     async def test_patch_case_not_found_returns_404(self, write_key, evals_db):
         evals_db.set_eval_case_active = AsyncMock(return_value=False)
         app = _build_app(key=write_key, db=evals_db, workspace_id="ws-1")
         async with _client(app) as c:
-            r = await c.patch(
-                "/v1/evals/cases/case_missing", json={"active": False}, headers=_HDR
-            )
+            r = await c.patch("/v1/evals/cases/case_missing", json={"active": False}, headers=_HDR)
         assert r.status_code == 404
 
 
@@ -322,9 +312,7 @@ class TestStartRun:
         detail_lower = body["detail"].lower()
         assert "quickstart" in detail_lower or "local.md" in detail_lower
 
-    async def test_start_run_with_cases_returns_202(
-        self, write_key, evals_db, mock_search_service
-    ):
+    async def test_start_run_with_cases_returns_202(self, write_key, evals_db, mock_search_service):
         evals_db.get_active_eval_cases = AsyncMock(
             return_value=[
                 {
@@ -393,9 +381,7 @@ class TestDeleteEvents:
         assert r.json() == {"deleted": 5}
 
     async def test_delete_events_requires_write_permission(self, search_only_key, evals_db):
-        app = _build_app(
-            key=search_only_key, db=evals_db, override_permissions=False
-        )
+        app = _build_app(key=search_only_key, db=evals_db, override_permissions=False)
         async with _client(app) as c:
             r = await c.delete("/v1/evals/events", headers=_HDR)
         assert r.status_code == 403
@@ -430,9 +416,7 @@ class TestMultiWorkspaceRequires400:
     async def test_patch_case_multi_workspace_returns_400(self, write_key, evals_db):
         app = _build_app(key=write_key, db=evals_db, workspace_id=None)
         async with _client(app) as c:
-            r = await c.patch(
-                "/v1/evals/cases/case_1", json={"active": False}, headers=_HDR
-            )
+            r = await c.patch("/v1/evals/cases/case_1", json={"active": False}, headers=_HDR)
         assert r.status_code == 400
 
     async def test_start_run_multi_workspace_returns_400(
