@@ -138,7 +138,11 @@ class TemporalWorkflowTrigger:
         1. Validates the incoming message
         2. Converts it to workflow input
         3. Starts a Temporal workflow
-        4. Waits for completion and publishes result to MQ
+        4. Waits for completion and returns the result
+
+        Note: the completion event (document.processed / document.failed) is
+        published by the WORKFLOW itself as a final activity (#88) — the
+        contract has one owner, so this path must not publish it too.
 
         Args:
             message: Raw message dictionary from MQ
@@ -150,9 +154,6 @@ class TemporalWorkflowTrigger:
             await self.initialize()
 
         document_id = message.get("document_id", "unknown")
-        # Bind up front so the failure path can't hit an UnboundLocalError if an
-        # unexpected (non-validation) error is raised before it is assigned (#39).
-        upload_message = None
 
         try:
             # Validate message schema
@@ -228,24 +229,14 @@ class TemporalWorkflowTrigger:
                 processing_time_ms=result.processing_time_ms,
             )
 
-            processing_result = ProcessingResult(
+            # Completion event is published by the workflow itself (#88).
+            return ProcessingResult(
                 document_id=result.document_id,
                 success=result.success,
                 chunks_created=result.chunks_created,
                 error=result.error,
                 processing_time_ms=result.processing_time_ms,
             )
-
-            # Publish completion notification
-            if self._mq_service:
-                try:
-                    await self._mq_service.publish_completion(processing_result, upload_message)
-                except Exception as e:
-                    logger.error(
-                        "Failed to publish completion", document_id=document_id, error=str(e)
-                    )
-
-            return processing_result
 
         except Exception as e:
             logger.error(
@@ -255,24 +246,15 @@ class TemporalWorkflowTrigger:
                 exc_info=True,
             )
 
-            failure_result = ProcessingResult(
+            # No completion publish here: for pre-workflow failures there is no
+            # workflow outcome to report (a poison message is dead-lettered by
+            # the async path), and workflow failures publish document.failed
+            # from inside the workflow (#88).
+            return ProcessingResult(
                 document_id=document_id,
                 success=False,
                 error=str(e),
             )
-
-            # Publish completion notification for failure. Skip if the message
-            # never parsed (upload_message is None) — there's nothing to notify
-            # against, and this avoids a masking UnboundLocalError (#39).
-            if self._mq_service and upload_message is not None:
-                try:
-                    await self._mq_service.publish_completion(failure_result, upload_message)
-                except Exception as pub_e:
-                    logger.error(
-                        "Failed to publish completion", document_id=document_id, error=str(pub_e)
-                    )
-
-            return failure_result
 
     async def trigger_workflow_async(self, message: dict) -> str:
         """Trigger a workflow without waiting for completion.

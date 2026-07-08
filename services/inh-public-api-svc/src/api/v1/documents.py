@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 
 from src.config import settings
 from src.config.constants import ALLOWED_MIME_TYPES, MAX_UPLOAD_SIZE_BYTES
@@ -13,6 +13,7 @@ from src.core.exceptions import BadRequestError, ServiceUnavailableError
 from src.models.document import Document, DocumentListResponse, DocumentUploadResponse
 from src.services.auth import ResolvedAuth, resolve_workspace_read, resolve_workspace_write
 from src.services.database import DatabaseService, get_database
+from src.services.deletion import delete_document_everywhere
 from src.services.lineage import LineageResponse, build_lineage
 from src.services.mq import get_mq_service
 from src.services.storage import get_storage_service
@@ -301,6 +302,63 @@ async def get_document(
         raise HTTPException(status_code=404, detail="Document not found")
 
     return document
+
+
+@router.delete("/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_document(
+    document_id: str,
+    auth: Annotated[ResolvedAuth, Depends(resolve_workspace_write)] = ...,  # type: ignore[assignment]
+    database: Annotated[DatabaseService, Depends(get_database)] = ...,  # type: ignore[assignment]
+) -> Response:
+    """
+    Delete a document and all of its derived data (#87).
+
+    Removes the document's Weaviate objects (tenant-scoped), its PostgreSQL
+    row + chunks (transactional), and best-effort the stored S3 bytes. The
+    lookup is workspace-scoped, so a document in a workspace the caller
+    can't see returns ``404`` — existence never leaks across workspaces.
+
+    Returns ``204`` on success. Repeating the delete returns ``404`` (the
+    document is already gone). A vector-store outage returns ``503`` and
+    leaves the document intact — safe to retry.
+
+    Requires an API key with **write** permission.
+    Workspace can be specified via ``X-Workspace-Id`` header.
+    """
+    workspace_id = auth.workspace_id
+    # resolve_workspace_write guarantees workspace_id is set, but guard anyway
+    if not workspace_id:
+        raise BadRequestError(
+            detail="Workspace ID required. Provide X-Workspace-Id header.",
+        )
+
+    try:
+        outcome = await delete_document_everywhere(database, document_id, workspace_id)
+    except Exception as exc:
+        # Vectors (or the row) survived — nothing user-visible was half-deleted,
+        # so surface a retryable failure instead of a silent partial delete.
+        logger.error(
+            "Document deletion failed; document left intact",
+            document_id=document_id,
+            workspace_id=workspace_id,
+            error=str(exc),
+        )
+        raise ServiceUnavailableError(
+            service_name="deletion",
+            detail="Failed to delete the document. Please try again later.",
+        ) from exc
+
+    if not outcome.found:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    logger.info(
+        "Document deletion accepted",
+        document_id=document_id,
+        workspace_id=workspace_id,
+        chunks_deleted=outcome.chunks_deleted,
+        vectors_deleted=outcome.vectors_deleted,
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/documents/{document_id}/lineage", response_model=LineageResponse)

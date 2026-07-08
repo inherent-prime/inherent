@@ -64,6 +64,16 @@ class StorageService:
         )
         return key
 
+    async def delete_file(self, key: str) -> None:
+        """Delete the object stored under *key* (#87 document delete).
+
+        S3 DeleteObject is idempotent: deleting a missing key succeeds, so
+        callers don't need an existence check first.
+        """
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._delete_object, key)
+        logger.info("File deleted from S3", bucket=self._bucket, key=key)
+
     def generate_key(self, workspace_id: str, filename: str) -> str:
         """Generate a deterministic-format S3 object key.
 
@@ -89,6 +99,10 @@ class StorageService:
             Body=body,
             ContentType=content_type,
         )
+
+    def _delete_object(self, key: str) -> None:
+        """Synchronous S3 DeleteObject (called inside run_in_executor)."""
+        self._client.delete_object(Bucket=self._bucket, Key=key)
 
     @staticmethod
     def _sanitize_filename(filename: str) -> str:

@@ -1,4 +1,4 @@
--- Migration 014: Evals v1 — traffic-mined retrieval evals (design spec: evals-v1).
+-- Migration 015: Evals v1 — traffic-mined retrieval evals (design spec: evals-v1).
 --
 -- Five tenant-scoped tables:
 --   eval_query_events — raw search capture. Short-lived: purged after the

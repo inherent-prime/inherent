@@ -12,6 +12,7 @@ Connection health: All SQLAlchemy engines use pool_pre_ping=True, which
 automatically replaces stale connections before use.
 """
 
+import asyncio
 import threading
 
 import structlog
@@ -29,6 +30,14 @@ _db_service = None
 _staging_service = None
 _storage_service = None
 _weaviate_service = None
+# MQ service used by the publish_completion activity (#88). Either registered
+# by main.py (worker mode reuses its already-connected service) or lazily
+# created here. _mq_service_owned tracks whether this registry must
+# disconnect it on shutdown (externally registered services are the caller's
+# to close).
+_mq_service = None
+_mq_service_owned = False
+_mq_connect_lock = asyncio.Lock()
 
 
 def initialize(settings: Settings) -> None:
@@ -42,6 +51,7 @@ def shutdown() -> None:
     """Disconnect all shared services. Called on worker shutdown."""
     global _db_service, _staging_service
     global _storage_service, _weaviate_service, _settings
+    global _mq_service, _mq_service_owned
 
     services = [
         ("db", _db_service),
@@ -56,6 +66,17 @@ def shutdown() -> None:
                 svc.disconnect()
             except Exception as e:
                 logger.warning(f"Error disconnecting shared {name} service", error=str(e))
+
+    # MQ disconnect is async; this shutdown hook is sync. Best-effort schedule
+    # it when a loop is running, otherwise let process exit close the socket.
+    # Externally registered services (worker mode) are disconnected by main.py.
+    if _mq_service is not None and _mq_service_owned:
+        try:
+            asyncio.get_running_loop().create_task(_mq_service.disconnect())
+        except RuntimeError:
+            logger.debug("No running loop; shared MQ connection closes at process exit")
+    _mq_service = None
+    _mq_service_owned = False
 
     _db_service = None
     _staging_service = None
@@ -113,6 +134,39 @@ def get_storage_service():
                 _storage_service.connect()
                 logger.debug("Shared StorageService connected")
     return _storage_service
+
+
+def set_mq_service(mq_service) -> None:
+    """Register an externally-owned, already-connected MQ service.
+
+    Worker mode calls this so the publish_completion activity reuses the
+    subscriber's connection instead of opening a second one. The caller keeps
+    ownership: it disconnects the service itself.
+    """
+    global _mq_service, _mq_service_owned
+    _mq_service = mq_service
+    _mq_service_owned = False
+    logger.debug("Shared MQ service registered (externally owned)")
+
+
+async def get_mq_service():
+    """Get the shared MQ service, lazily creating + connecting one if needed.
+
+    Async (unlike the other getters) because MQ backends connect over the
+    network with async clients.
+    """
+    global _mq_service, _mq_service_owned
+    if _mq_service is None:
+        async with _mq_connect_lock:
+            if _mq_service is None:
+                from src.services.mq import create_mq_service
+
+                svc = create_mq_service(_get_settings())
+                await svc.connect()
+                _mq_service = svc
+                _mq_service_owned = True
+                logger.debug("Shared MQ service connected")
+    return _mq_service
 
 
 def get_weaviate_service():

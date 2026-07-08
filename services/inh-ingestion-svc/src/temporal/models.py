@@ -72,6 +72,33 @@ class RecordDeadLetterInput:
     error_type: str
 
 
+@dataclass
+class PublishCompletionInput:
+    """Input for the publish_completion activity (#88).
+
+    Carries the workflow outcome plus everything needed to rebuild the
+    DocumentCompletionMessage contract (upload metadata travels through so
+    downstream consumers can create/finalize their document records).
+    """
+
+    document_id: str
+    workspace_id: str
+    user_id: str
+    filename: str
+    original_filename: str
+    content_type: str
+    size_bytes: int
+    storage_backend: str
+    storage_path: str
+    success: bool
+    storage_bucket: str | None = None
+    storage_url: str | None = None
+    timestamp: str = ""
+    chunks_created: int = 0
+    error: str | None = None
+    processing_time_ms: int = 0
+
+
 # =============================================================================
 # Activity Input/Output Models
 # =============================================================================

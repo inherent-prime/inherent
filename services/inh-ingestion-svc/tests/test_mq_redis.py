@@ -11,6 +11,16 @@ from src.config.settings import Settings
 from src.services.mq.redis_mq import RedisMQService
 
 
+@pytest.fixture(autouse=True)
+def cleanup_test_data():
+    """No-op override of the package-level DB-dependent autouse fixture.
+
+    These are pure unit tests over a mocked Redis client — no PostgreSQL is
+    needed, so they must not skip when the DB is unavailable.
+    """
+    yield
+
+
 @pytest.fixture
 def mock_settings():
     """Create mock settings for RedisMQService."""
@@ -110,6 +120,121 @@ class TestRedisMQServicePublish:
         """Test that publish() raises RuntimeError when not connected."""
         with pytest.raises(RuntimeError, match="Redis MQ: not connected"):
             await service.publish("test-topic", {"key": "value"})
+
+
+class TestRedisMQServiceIdlePoll:
+    """Idle blocking reads must be silent (#90).
+
+    redis-py >= 8 raises redis.exceptions.TimeoutError when a blocking
+    XREADGROUP expires with no messages, where older versions returned [].
+    Both must be treated as the normal empty-poll case: no error log, no
+    1s penalty sleep — those are reserved for genuine failures.
+    """
+
+    def _install_xreadgroup(self, service, mock_redis_client, exc_factory, stop_after):
+        """Make xreadgroup return [] for the pending-recovery read (start id '0')
+        and raise exc_factory() for live ('>') reads, stopping the loop after
+        ``stop_after`` live polls so the test terminates.
+        """
+        live_polls = {"count": 0}
+
+        async def xreadgroup(*, groupname, consumername, streams, block=None, count=None):
+            if ">" not in streams.values():
+                return []  # Phase 1 pending-recovery read
+            live_polls["count"] += 1
+            if live_polls["count"] >= stop_after:
+                service._running = False
+            raise exc_factory()
+
+        mock_redis_client.xreadgroup = xreadgroup
+        return live_polls
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "exc_factory",
+        [
+            pytest.param(
+                lambda: __import__("redis").exceptions.TimeoutError(
+                    "Timeout reading from valkey:6379"
+                ),
+                id="redis-timeout",
+            ),
+            pytest.param(lambda: TimeoutError("timed out"), id="builtin-asyncio-timeout"),
+        ],
+    )
+    async def test_idle_block_expiry_is_silent(
+        self, service, mock_redis_client, monkeypatch, exc_factory
+    ):
+        """An idle blocking read expiring continues the loop: no error log, no sleep."""
+        from src.services.mq import redis_mq as redis_mq_module
+
+        service._redis = mock_redis_client
+        service._running = True
+        live_polls = self._install_xreadgroup(service, mock_redis_client, exc_factory, stop_after=3)
+
+        mock_logger = MagicMock()
+        monkeypatch.setattr(redis_mq_module, "logger", mock_logger)
+        sleep_calls: list[float] = []
+        real_sleep = asyncio.sleep
+
+        async def recording_sleep(delay, *args, **kwargs):
+            sleep_calls.append(delay)
+            await real_sleep(0)
+
+        monkeypatch.setattr(redis_mq_module.asyncio, "sleep", recording_sleep)
+
+        await service._poll_loop("core.document.uploaded.v1", "g", "c", AsyncMock())
+
+        # The loop kept polling (no crash) and treated every expiry as idle.
+        assert live_polls["count"] == 3
+        mock_logger.error.assert_not_called()
+        assert sleep_calls == []
+
+    @pytest.mark.asyncio
+    async def test_unexpected_error_still_logs_and_backs_off(
+        self, service, mock_redis_client, monkeypatch
+    ):
+        """Genuine failures keep the existing error-log + 1s retry behavior."""
+        from src.services.mq import redis_mq as redis_mq_module
+
+        service._redis = mock_redis_client
+        service._running = True
+        live_polls = self._install_xreadgroup(
+            service, mock_redis_client, lambda: ValueError("boom"), stop_after=2
+        )
+
+        mock_logger = MagicMock()
+        monkeypatch.setattr(redis_mq_module, "logger", mock_logger)
+        sleep_calls: list[float] = []
+        real_sleep = asyncio.sleep
+
+        async def recording_sleep(delay, *args, **kwargs):
+            sleep_calls.append(delay)
+            await real_sleep(0)
+
+        monkeypatch.setattr(redis_mq_module.asyncio, "sleep", recording_sleep)
+
+        await service._poll_loop("core.document.uploaded.v1", "g", "c", AsyncMock())
+
+        # Poll 1 fails and takes the log+backoff path; poll 2 stops the loop
+        # (the shutdown check runs before any further logging).
+        assert live_polls["count"] == 2
+        assert mock_logger.error.call_count == 1
+        assert sleep_calls == [1]
+
+    @pytest.mark.asyncio
+    async def test_connect_sets_explicit_socket_options(self, service, mock_redis_client):
+        """The client is created with socket options that outlast the block window,
+        so blocking reads don't race the socket timeout in the first place (#90).
+        """
+        with patch("redis.asyncio.from_url", return_value=mock_redis_client) as mock_from_url:
+            await service.connect()
+
+        kwargs = mock_from_url.call_args.kwargs
+        # Must comfortably exceed the 5s XREADGROUP block window.
+        assert kwargs["socket_timeout"] > 5
+        assert kwargs["socket_connect_timeout"] > 0
+        assert kwargs["health_check_interval"] > 0
 
 
 class TestRedisMQServiceSubscribe:

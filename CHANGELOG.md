@@ -13,9 +13,41 @@ of the already-merged M0–M2 #62/#63/#64). See
 [docs/maintainers/org-readiness-requirements.md](docs/maintainers/org-readiness-requirements.md)
 and [ADR 0001](docs/adr/0001-agent-memory-substrate.md).
 
+### Added
+
+- **Document delete — REST + MCP (#87 P1).** An agent can finally retract
+  knowledge: `DELETE /v1/documents/{id}` and the MCP `delete_document` tool
+  remove a document's Weaviate objects (tenant-scoped), its PostgreSQL row +
+  chunks (transactional, with workspace stat decrement), and best-effort the
+  stored S3 bytes. Both surfaces share one deletion orchestrator; vectors are
+  deleted before the database row so a mid-flight failure stays retryable
+  instead of leaving orphaned vectors in search. Requires **write** permission
+  and is workspace-scoped — cross-workspace documents read as not-found. The
+  `Readme.md` REST/MCP tables were refreshed to match the implemented surface.
+
 ### Defect-register remediation (in progress)
 
 A codescan-driven pass fixing correctness, isolation, and durability defects.
+
+- **Completion contract restored in worker mode (#88)** — the
+  `document.processed` / `document.failed` event is now published from inside
+  `DocumentIngestionWorkflow` as a final Temporal activity, so fire-and-forget
+  workflow starts still notify `core.document.processed.v1` (the switch to
+  `trigger_workflow_async` had silently dropped it). The now-dead publish in
+  the synchronous trigger path was removed so the contract has one owner.
+- **Lineage table ships with migrations (#89)** — new migration
+  `014_ingestion_events.sql` creates the `ingestion_events` table that
+  `lineage.py` writes and the public API's lineage endpoint reads; previously
+  every pipeline step warned with `UndefinedTable` and lineage was never
+  recorded. Migration 013 was also amended to create `dead_letter_jobs`
+  first — no migration created it either, so 013 failed outright on a fresh
+  migration-provisioned database.
+- **Idle Redis polls are silent (#90)** — redis-py ≥ 8 raises `TimeoutError`
+  when a blocking `XREADGROUP` expires with no messages; the subscriber now
+  treats that as the normal empty poll (no error log, no 1s penalty sleep)
+  instead of ~20 error lines/minute per idle deployment, and the client is
+  created with explicit `socket_timeout` / `health_check_interval` so blocking
+  reads can't race the socket timeout.
 
 - **⚠️ BREAKING (data) — collision-free Weaviate naming.** Workspace/user ids
   are now base32-encoded into collection/tenant names instead of stripping

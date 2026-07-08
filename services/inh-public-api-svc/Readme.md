@@ -70,10 +70,14 @@ The MCP server uses stdio rather than an HTTP transport in the current implement
 | --- | --- | --- |
 | `/health` | `GET` | Liveness check |
 | `/health/ready` | `GET` | Readiness check for backing services |
-| `/v1/search` | `POST` | Semantic search across indexed documents |
+| `/v1/search` | `POST` | Semantic, hybrid, or keyword search across indexed documents |
 | `/v1/documents` | `GET` | List documents in accessible workspaces |
 | `/v1/documents/{id}` | `GET` | Get document metadata |
 | `/v1/documents` | `POST` | Upload a document and enqueue ingestion |
+| `/v1/documents/{id}` | `DELETE` | Delete a document (vectors + chunks + stored bytes) |
+| `/v1/documents/{id}/refresh` | `POST` | Re-ingest an already-uploaded document (clear staleness) |
+| `/v1/documents/{id}/lineage` | `GET` | Explain a document's (or chunk's) provenance and freshness |
+| `/v1/verify-claim` | `POST` | Verify a claim against supplied evidence passages |
 | `/v1/chunks/{doc_id}` | `GET` | List chunks for a document |
 | `/v1/chunks/{doc_id}/context` | `GET` | Reconstruct document context from chunks |
 
@@ -81,9 +85,15 @@ The MCP server uses stdio rather than an HTTP transport in the current implement
 
 | Tool | Description |
 | --- | --- |
-| `search_documents` | Semantic search across one or more workspaces |
+| `search_documents` | Semantic, hybrid, or keyword search across one or more workspaces |
+| `search_memory` | Search-shaped memory primitive (same knobs as `search_documents`) |
+| `get_citations` | Retrieve citation objects for a query |
 | `get_document_context` | Retrieve the full content of a document |
 | `list_documents` | List accessible documents |
+| `verify_claim` | Verify a claim against supplied evidence passages |
+| `explain_lineage` | Explain a document's (or chunk's) provenance and freshness |
+| `refresh_stale_source` | Re-ingest an already-uploaded document (clear staleness) |
+| `delete_document` | Permanently delete a document (vectors + chunks + stored bytes) |
 
 ## Validation Commands
 

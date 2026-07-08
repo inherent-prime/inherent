@@ -7,6 +7,7 @@ processing workflow.
 from src.temporal.activities.chunk import chunk_text
 from src.temporal.activities.chunk_edit import update_chunk_postgresql, update_chunk_weaviate
 from src.temporal.activities.cleanup import cleanup_staging
+from src.temporal.activities.completion import publish_completion
 from src.temporal.activities.dead_letter import record_dead_letter
 from src.temporal.activities.extract import extract_text
 from src.temporal.activities.fetch import fetch_document
@@ -27,6 +28,7 @@ __all__ = [
     "update_workspace_stats",
     "cleanup_staging",
     "record_dead_letter",
+    "publish_completion",
     # Chunk edit activities
     "update_chunk_postgresql",
     "update_chunk_weaviate",

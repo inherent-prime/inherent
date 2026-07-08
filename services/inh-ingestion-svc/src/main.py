@@ -92,6 +92,12 @@ async def run_worker(settings: Settings) -> None:
     await mq_service.connect()
     logger.info("MQ connected", backend=mq_service.backend)
 
+    # Register the connection with the shared registry so the workflow's
+    # publish_completion activity (#88) reuses it instead of opening its own.
+    from src.temporal import shared_services
+
+    shared_services.set_mq_service(mq_service)
+
     # 2. Initialize workflow trigger (bridges MQ → Temporal → MQ). Pass the
     # shared db_service so poison messages can be dead-lettered (#6) — without
     # it, _record_dead_letter is a silent no-op.

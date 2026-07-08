@@ -195,6 +195,78 @@ class SearchService:
         except Exception:
             return False
 
+    async def delete_document_vectors(
+        self, workspace_id: str, user_id: str, document_id: str
+    ) -> int:
+        """Delete a document's objects from its workspace collection (#87).
+
+        Issues a tenant-scoped Weaviate batch delete matching
+        ``document_id == :document_id`` — the same scoping ingestion used to
+        write the objects, so a delete can never reach outside the tenant.
+        ``user_id`` must be the STORED document's uploader (vectors live in
+        that user's tenant), not necessarily the caller.
+
+        Returns the number of objects deleted. A collection that was never
+        created (workspace with nothing ingested) counts as already clean (0).
+        Any other Weaviate failure raises so the caller aborts BEFORE deleting
+        the database row — orphaned vectors must not survive a "deleted"
+        document.
+        """
+        collection_name = _get_workspace_collection_name(workspace_id)
+        tenant_name = _get_user_tenant_name(user_id)
+        _require_safe_name(collection_name, "collection")
+        _require_safe_name(tenant_name, "tenant")
+
+        client = await self._get_client()
+        response = await client.request(
+            "DELETE",
+            "/v1/batch/objects",
+            params={"tenant": tenant_name},
+            json={
+                "match": {
+                    "class": collection_name,
+                    "where": {
+                        "path": ["document_id"],
+                        "operator": "Equal",
+                        "valueText": document_id,
+                    },
+                },
+                "output": "minimal",
+            },
+        )
+
+        if response.status_code != 200:
+            body = response.text
+            # Nothing was ever ingested for this workspace → no collection to
+            # clean. Weaviate phrases this as "could not find class <name>".
+            if collection_name in body and "could not find class" in body.lower():
+                logger.info(
+                    "No Weaviate collection for workspace; nothing to delete",
+                    workspace_id=workspace_id,
+                    document_id=document_id,
+                )
+                return 0
+            raise RuntimeError(
+                f"Weaviate batch delete failed ({response.status_code}): {body[:500]}"
+            )
+
+        results = response.json().get("results", {}) or {}
+        deleted = int(results.get("successful", 0) or 0)
+        failed = int(results.get("failed", 0) or 0)
+        if failed:
+            # Partial cleanup is NOT success — surviving vectors would keep
+            # surfacing in search for a document about to be deleted.
+            raise RuntimeError(
+                f"Weaviate batch delete left {failed} objects for document {document_id}"
+            )
+        logger.info(
+            "Deleted document vectors from Weaviate",
+            document_id=document_id,
+            workspace_id=workspace_id,
+            deleted=deleted,
+        )
+        return deleted
+
     @staticmethod
     def _parse_ingested_at(value: object) -> datetime | None:
         """Parse a Weaviate DATE / ISO-8601 string into an aware datetime.

@@ -15,6 +15,7 @@ REST 403 path. Permission map:
     explain_lineage                     -> "read"
     refresh_stale_source                -> "write"
     report_feedback / get_retrieval_health -> "search"
+    delete_document                     -> "write"
 
 Search-feature parity (#14)
 ---------------------------
@@ -65,6 +66,7 @@ _TOOL_PERMISSIONS: dict[str, str] = {
     "refresh_stale_source": "write",
     "report_feedback": "search",
     "get_retrieval_health": "search",
+    "delete_document": "write",
 }
 
 # Schema shared by the two search-shaped tools so they stay identical (#14/#40).
@@ -293,6 +295,24 @@ def create_mcp_server() -> Server:
                 "'search' permission.",
                 inputSchema=_HEALTH_INPUT_SCHEMA,
             ),
+            Tool(
+                name="delete_document",
+                description="Memory primitive: permanently delete a document and all of its "
+                "derived data — vectors, chunks, and stored bytes (same logic as DELETE "
+                "/v1/documents/{id}). Use to retract knowledge that should no longer be "
+                "retrievable. Requires 'write' permission.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "api_key": {"type": "string", "description": "Your Inherent API key"},
+                        "document_id": {
+                            "type": "string",
+                            "description": "The document ID to delete",
+                        },
+                    },
+                    "required": ["api_key", "document_id"],
+                },
+            ),
         ]
 
     @server.call_tool()
@@ -341,6 +361,8 @@ def create_mcp_server() -> Server:
                 return await _handle_report_feedback(key_info, arguments)
             elif name == "get_retrieval_health":
                 return await _handle_get_retrieval_health(key_info, arguments)
+            elif name == "delete_document":
+                return await _handle_delete_document(key_info, arguments)
             else:  # pragma: no cover - guarded by _TOOL_PERMISSIONS above
                 return [TextContent(type="text", text=f"Error: Unknown tool '{name}'")]
 
@@ -778,6 +800,45 @@ async def _handle_get_retrieval_health(key_info: APIKeyInfo, arguments: dict) ->
         return [TextContent(type="text", text="Error: workspace not accessible with this key")]
     scorecard = await build_scorecard(database, workspace_id=workspace_id)
     return [TextContent(type="text", text=scorecard.model_dump_json())]
+
+
+async def _handle_delete_document(key_info: APIKeyInfo, arguments: dict) -> list[TextContent]:
+    """Handle delete_document: retract a document from every store (#87).
+
+    Mirrors DELETE /v1/documents/{id}: same access check as the other
+    document-scoped tools (the caller must own the document's workspace), then
+    the shared deletion orchestrator removes vectors, the database row +
+    chunks, and best-effort the stored bytes. A vector-store failure raises
+    into the dispatcher's error path, leaving the document intact (retryable).
+    """
+    document_id = arguments.get("document_id", "")
+    if not document_id:
+        return [TextContent(type="text", text="Error: Document ID is required")]
+
+    document, _, error = await _resolve_document_for_user(key_info, document_id)
+    if error:
+        return [TextContent(type="text", text=error)]
+
+    from src.services.deletion import delete_document_everywhere
+
+    database = await get_database()
+    outcome = await delete_document_everywhere(database, document_id, document.workspace_id)
+    if not outcome.found:
+        return [TextContent(type="text", text=f"Error: Document '{document_id}' not found")]
+
+    payload = {
+        "document_id": document_id,
+        "workspace_id": document.workspace_id,
+        "deleted": True,
+        "chunks_deleted": outcome.chunks_deleted,
+        "vectors_deleted": outcome.vectors_deleted,
+        "storage_deleted": outcome.storage_deleted,
+    }
+    return _structured(
+        f"Document '{document.name}' ({document_id}) permanently deleted "
+        f"({outcome.chunks_deleted} chunks, {outcome.vectors_deleted} vectors removed).",
+        payload,
+    )
 
 
 async def run_mcp_server() -> None:
