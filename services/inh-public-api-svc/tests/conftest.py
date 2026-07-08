@@ -24,6 +24,38 @@ def _reset_rate_limiter_singleton():
     rl._rate_limiter = None
 
 
+@pytest.fixture(autouse=True)
+def _reset_service_singletons():
+    """Isolate the process-wide service singletons between tests.
+
+    ``_mq_service`` / ``_database`` / ``_search_service`` / ``_storage_service``
+    are module-level globals that cache connections (redis, asyncpg) bound to the
+    event loop of whichever test first created them. pytest-asyncio gives each
+    test its own loop, so a singleton leaked from an earlier test carries a
+    connection tied to a now-closed loop. A later test's ``TestClient`` lifespan
+    *shutdown* calls ``close_*()`` on that stale singleton, which touches the dead
+    loop and raises ``RuntimeError: Event loop is closed`` at teardown.
+
+    Null the globals before and after each test so no test inherits another's
+    connections. Mirrors ``_reset_rate_limiter_singleton`` above. Each test that
+    legitimately builds a singleton does so on — and closes it on — its own loop.
+    """
+    import src.services.database as database
+    import src.services.mq as mq
+    import src.services.search as search
+    import src.services.storage as storage
+
+    def _clear() -> None:
+        mq._mq_service = None
+        database._database = None
+        search._search_service = None
+        storage._storage_service = None
+
+    _clear()
+    yield
+    _clear()
+
+
 @pytest.fixture
 def mock_api_key_info():
     """Create a mock API key info with full permissions."""
