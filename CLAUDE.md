@@ -9,11 +9,13 @@ Guidance for working in this repository.
 
 ## Coding Standards
 
+- Follow strict coding standard maximize for explanability to humans
+- While designing any solution think in SOLID, DRY, KISS and whatever applicable. 
 - Always write tests first and then do the development later
 - A feature is only complete when all tests are passed and you can provide proof of complete.
 - All the code must have comments, which humans can understand easily with the context of this repo.
 - Always keep the docs updated incase there are breaking changes highlight early
-- Incase of long tasks always use sub-agents to achieve the goal
+- Incase of long tasks always use sub-agents to achieve the goal.
 
 ## Writing Standards
 
