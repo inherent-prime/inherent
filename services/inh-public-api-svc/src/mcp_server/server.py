@@ -16,6 +16,7 @@ REST 403 path. Permission map:
     refresh_stale_source                -> "write"
     report_feedback / get_retrieval_health -> "search"
     delete_document                     -> "write"
+    get_document / list_chunks          -> "read"
 
 Search-feature parity (#14)
 ---------------------------
@@ -67,6 +68,8 @@ _TOOL_PERMISSIONS: dict[str, str] = {
     "report_feedback": "search",
     "get_retrieval_health": "search",
     "delete_document": "write",
+    "get_document": "read",
+    "list_chunks": "read",
 }
 
 # Schema shared by the two search-shaped tools so they stay identical (#14/#40).
@@ -313,6 +316,40 @@ def create_mcp_server() -> Server:
                     "required": ["api_key", "document_id"],
                 },
             ),
+            Tool(
+                name="get_document",
+                description="Get a single document's metadata (name, source_type, mime_type, "
+                "size, chunk_count, status, timestamps) — same data as GET "
+                "/v1/documents/{id}. Requires 'read' permission.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "api_key": {"type": "string", "description": "Your Inherent API key"},
+                        "document_id": {
+                            "type": "string",
+                            "description": "The document ID to retrieve",
+                        },
+                    },
+                    "required": ["api_key", "document_id"],
+                },
+            ),
+            Tool(
+                name="list_chunks",
+                description="List all chunks belonging to a document (id, content, chunk_index, "
+                "token_count) — same data as GET /v1/chunks/{document_id}. Requires 'read' "
+                "permission.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "api_key": {"type": "string", "description": "Your Inherent API key"},
+                        "document_id": {
+                            "type": "string",
+                            "description": "The document ID whose chunks to list",
+                        },
+                    },
+                    "required": ["api_key", "document_id"],
+                },
+            ),
         ]
 
     @server.call_tool()
@@ -363,6 +400,10 @@ def create_mcp_server() -> Server:
                 return await _handle_get_retrieval_health(key_info, arguments)
             elif name == "delete_document":
                 return await _handle_delete_document(key_info, arguments)
+            elif name == "get_document":
+                return await _handle_get_document(key_info, arguments)
+            elif name == "list_chunks":
+                return await _handle_list_chunks(key_info, arguments)
             else:  # pragma: no cover - guarded by _TOOL_PERMISSIONS above
                 return [TextContent(type="text", text=f"Error: Unknown tool '{name}'")]
 
@@ -839,6 +880,45 @@ async def _handle_delete_document(key_info: APIKeyInfo, arguments: dict) -> list
         f"({outcome.chunks_deleted} chunks, {outcome.vectors_deleted} vectors removed).",
         payload,
     )
+
+
+async def _handle_get_document(key_info: APIKeyInfo, arguments: dict) -> list[TextContent]:
+    """Handle get_document: return one document's metadata as JSON (#87 parity).
+
+    Same access check as ``_handle_get_context`` / ``_resolve_document_for_user``
+    (get_document_by_id then verify the caller owns the workspace) but skips
+    fetching chunks/full_text — this is the metadata-only counterpart of GET
+    /v1/documents/{id}.
+    """
+    document_id = arguments.get("document_id", "")
+    if not document_id:
+        return [TextContent(type="text", text="Error: Document ID is required")]
+
+    document, _, error = await _resolve_document_for_user(key_info, document_id)
+    if error:
+        return [TextContent(type="text", text=error)]
+
+    return [TextContent(type="text", text=document.model_dump_json())]
+
+
+async def _handle_list_chunks(key_info: APIKeyInfo, arguments: dict) -> list[TextContent]:
+    """Handle list_chunks: return a document's chunks as JSON (#87 parity).
+
+    Same access check as ``get_document`` (the caller must own the document's
+    workspace) — same data as GET /v1/chunks/{document_id}.
+    """
+    document_id = arguments.get("document_id", "")
+    if not document_id:
+        return [TextContent(type="text", text="Error: Document ID is required")]
+
+    document, _, error = await _resolve_document_for_user(key_info, document_id)
+    if error:
+        return [TextContent(type="text", text=error)]
+
+    database = await get_database()
+    chunks = await database.get_document_chunks_by_doc_id(document.id)
+    payload = [chunk.model_dump() for chunk in chunks]
+    return _structured(f"{len(chunks)} chunks for document '{document.id}'", payload)
 
 
 async def run_mcp_server() -> None:
