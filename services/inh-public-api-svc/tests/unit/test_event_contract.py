@@ -16,6 +16,7 @@ from httpx import ASGITransport, AsyncClient
 
 from src.main import create_app
 from src.models.api_key import APIKeyInfo
+from src.services import document_intake
 from src.services.auth import (
     ResolvedAuth,
     get_api_key_info,
@@ -108,9 +109,10 @@ async def _publish_upload_event(write_key, mock_db, mock_storage, mock_mq) -> di
     application.dependency_overrides[get_database] = lambda: mock_db
 
     with (
-        patch("src.api.v1.documents.get_storage_service", return_value=mock_storage),
-        patch(
-            "src.api.v1.documents.get_mq_service",
+        patch.object(document_intake, "get_storage_service", return_value=mock_storage),
+        patch.object(
+            document_intake,
+            "get_mq_service",
             new_callable=AsyncMock,
             return_value=mock_mq,
         ),

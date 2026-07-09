@@ -17,6 +17,7 @@ REST 403 path. Permission map:
     report_feedback / get_retrieval_health -> "search"
     delete_document                     -> "write"
     get_document / list_chunks          -> "read"
+    upload_document                     -> "write"
 
 Search-feature parity (#14)
 ---------------------------
@@ -30,6 +31,16 @@ Output convention (#40)
 Tools return ``list[TextContent]`` (existing convention). For the memory
 primitives the text payload embeds a JSON ``structured`` block so agents can
 parse the result deterministically while humans still get a readable summary.
+
+Upload parity (#87 Task 3)
+---------------------------
+``upload_document`` is the MCP counterpart of POST /v1/documents, but TEXT
+content only: the tool accepts ``content`` as a UTF-8 string (not raw bytes),
+so ``content_type`` must be a ``text/*`` MIME type (default
+``text/markdown``). Binary uploads (PDF, DOCX, PNG, ...) remain REST-only by
+design — the tool rejects a binary ``content_type`` with a message pointing
+the caller at POST /v1/documents. Both surfaces share the exact same
+validate/dedup/store/enqueue pipeline via ``src.services.document_intake``.
 """
 
 import json
@@ -42,6 +53,7 @@ from src.config.constants import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
 from src.models.api_key import APIKeyInfo
 from src.models.evals import FeedbackRequest
 from src.services.database import get_database
+from src.services.document_intake import intake_document
 from src.services.eval_feedback import EventNotFoundError, submit_feedback
 from src.services.eval_scorecard import build_scorecard
 from src.services.lineage import build_lineage
@@ -70,6 +82,7 @@ _TOOL_PERMISSIONS: dict[str, str] = {
     "delete_document": "write",
     "get_document": "read",
     "list_chunks": "read",
+    "upload_document": "write",
 }
 
 # Schema shared by the two search-shaped tools so they stay identical (#14/#40).
@@ -350,6 +363,40 @@ def create_mcp_server() -> Server:
                     "required": ["api_key", "document_id"],
                 },
             ),
+            Tool(
+                name="upload_document",
+                description="Upload TEXT content for ingestion (same pipeline as POST "
+                "/v1/documents, minus binary files — PDF/DOCX/PNG uploads are REST-only by "
+                "design). Content is UTF-8 text; content_type must be a text/* MIME type "
+                "(default text/markdown). Requires 'write' permission.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "api_key": {"type": "string", "description": "Your Inherent API key"},
+                        "filename": {
+                            "type": "string",
+                            "description": "Name to store the document under",
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "The document's text content (UTF-8)",
+                        },
+                        "content_type": {
+                            "type": "string",
+                            "description": "MIME type of the content; must be text/* "
+                            "(default text/markdown). Binary types are rejected — use "
+                            "POST /v1/documents for binary uploads.",
+                            "default": "text/markdown",
+                        },
+                        "workspace_id": {
+                            "type": "string",
+                            "description": "Optional: target workspace. Required if your key "
+                            "has access to more than one workspace.",
+                        },
+                    },
+                    "required": ["api_key", "filename", "content"],
+                },
+            ),
         ]
 
     @server.call_tool()
@@ -404,6 +451,8 @@ def create_mcp_server() -> Server:
                 return await _handle_get_document(key_info, arguments)
             elif name == "list_chunks":
                 return await _handle_list_chunks(key_info, arguments)
+            elif name == "upload_document":
+                return await _handle_upload_document(key_info, arguments)
             else:  # pragma: no cover - guarded by _TOOL_PERMISSIONS above
                 return [TextContent(type="text", text=f"Error: Unknown tool '{name}'")]
 
@@ -919,6 +968,95 @@ async def _handle_list_chunks(key_info: APIKeyInfo, arguments: dict) -> list[Tex
     chunks = await database.get_document_chunks_by_doc_id(document.id)
     payload = [chunk.model_dump() for chunk in chunks]
     return _structured(f"{len(chunks)} chunks for document '{document.id}'", payload)
+
+
+async def _resolve_single_workspace_for_upload(
+    key_info: APIKeyInfo, requested_workspace_id: str | None
+) -> tuple[str | None, str | None]:
+    """Resolve exactly one target workspace for an upload.
+
+    Unlike read/search tools (which fan out over every owned workspace) or
+    the document-scoped write tools (delete_document / refresh_stale_source,
+    which resolve their workspace FROM the existing document), upload has no
+    document yet and must write to exactly one workspace. So:
+
+    - ``requested_workspace_id`` given: validate ownership via the same
+      ``_get_workspace_ids`` check every other tool uses (tenant scoping),
+      then use it.
+    - omitted: the caller must own EXACTLY one workspace, or the call is
+      rejected asking them to disambiguate with ``workspace_id`` — silently
+      picking one of several owned workspaces would be a surprising place to
+      write data.
+
+    Returns (workspace_id, error_text); on error workspace_id is None.
+    """
+    if requested_workspace_id:
+        workspace_ids, error = await _get_workspace_ids(key_info, requested_workspace_id)
+        if error:
+            return None, error
+        return workspace_ids[0], None
+
+    database = await get_database()
+    owned = await database.get_user_workspace_ids(key_info.user_id)
+    if not owned:
+        return None, "Error: No workspaces found. Upload documents to create a workspace."
+    if len(owned) > 1:
+        return None, (
+            "Error: You have access to multiple workspaces; pass 'workspace_id' to "
+            "specify which one to upload to."
+        )
+    return owned[0], None
+
+
+async def _handle_upload_document(key_info: APIKeyInfo, arguments: dict) -> list[TextContent]:
+    """Handle upload_document: text-only counterpart of POST /v1/documents (#87).
+
+    Rejects empty content and non-``text/*`` content types up front (binary
+    uploads are REST-only by design — the tool has no way to accept raw
+    bytes). Resolves a single target workspace (see
+    ``_resolve_single_workspace_for_upload``) then UTF-8 encodes the text and
+    delegates validation/dedup/storage/enqueue to the shared
+    ``intake_document`` service — the exact same pipeline POST /v1/documents
+    uses, so the two surfaces cannot drift.
+    """
+    filename = arguments.get("filename", "")
+    content = arguments.get("content", "")
+    content_type = arguments.get("content_type") or "text/markdown"
+
+    if not filename:
+        return [TextContent(type="text", text="Error: filename is required")]
+    if not content:
+        return [TextContent(type="text", text="Error: content is required and cannot be empty")]
+
+    if not content_type.startswith("text/"):
+        return [
+            TextContent(
+                type="text",
+                text=(
+                    f"Error: upload_document only accepts text/* content (got "
+                    f"'{content_type}'). Binary uploads are REST-only by design — use "
+                    f"POST /v1/documents instead."
+                ),
+            )
+        ]
+
+    workspace_id, error = await _resolve_single_workspace_for_upload(
+        key_info, arguments.get("workspace_id")
+    )
+    if error:
+        return [TextContent(type="text", text=error)]
+    assert workspace_id is not None  # narrowed by the error check above
+
+    database = await get_database()
+    result = await intake_document(
+        database=database,
+        workspace_id=workspace_id,
+        user_id=key_info.user_id,
+        content_bytes=content.encode("utf-8"),
+        filename=filename,
+        content_type=content_type,
+    )
+    return [TextContent(type="text", text=result.model_dump_json())]
 
 
 async def run_mcp_server() -> None:

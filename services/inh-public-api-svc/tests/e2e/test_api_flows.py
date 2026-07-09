@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.models.document import Document, DocumentChunk
 from src.models.search import SearchResponse, SearchResult
+from src.services import document_intake
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -251,9 +252,10 @@ class TestUploadFlow:
 
     async def test_upload_full_flow(self, client):
         with (
-            patch("src.api.v1.documents.get_storage_service") as mock_storage_fn,
-            patch(
-                "src.api.v1.documents.get_mq_service",
+            patch.object(document_intake, "get_storage_service") as mock_storage_fn,
+            patch.object(
+                document_intake,
+                "get_mq_service",
                 new_callable=AsyncMock,
             ) as mock_mq_fn,
         ):

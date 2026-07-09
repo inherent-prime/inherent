@@ -12,6 +12,7 @@ from httpx import ASGITransport, AsyncClient
 
 from src.main import create_app
 from src.models.api_key import APIKeyInfo
+from src.services import document_intake
 from src.services.auth import (
     ResolvedAuth,
     get_api_key_info,
@@ -115,8 +116,10 @@ def app(write_key, mock_db, mock_storage, mock_mq, mock_resolved_auth_write):
     application.dependency_overrides[get_database] = lambda: mock_db
 
     with (
-        patch("src.api.v1.documents.get_storage_service", return_value=mock_storage),
-        patch("src.api.v1.documents.get_mq_service", new_callable=AsyncMock, return_value=mock_mq),
+        patch.object(document_intake, "get_storage_service", return_value=mock_storage),
+        patch.object(
+            document_intake, "get_mq_service", new_callable=AsyncMock, return_value=mock_mq
+        ),
     ):
         yield application
 
@@ -186,9 +189,10 @@ class TestUploadDocumentSuccess:
         application.dependency_overrides[get_database] = lambda: mock_db
 
         with (
-            patch("src.api.v1.documents.get_storage_service", return_value=mock_storage),
-            patch(
-                "src.api.v1.documents.get_mq_service",
+            patch.object(document_intake, "get_storage_service", return_value=mock_storage),
+            patch.object(
+                document_intake,
+                "get_mq_service",
                 new_callable=AsyncMock,
                 return_value=mock_mq,
             ),
@@ -217,9 +221,10 @@ class TestUploadDocumentSuccess:
         application.dependency_overrides[get_database] = lambda: mock_db
 
         with (
-            patch("src.api.v1.documents.get_storage_service", return_value=mock_storage),
-            patch(
-                "src.api.v1.documents.get_mq_service",
+            patch.object(document_intake, "get_storage_service", return_value=mock_storage),
+            patch.object(
+                document_intake,
+                "get_mq_service",
                 new_callable=AsyncMock,
                 return_value=mock_mq,
             ),
@@ -260,9 +265,10 @@ class TestUploadDocumentValidation:
         application.dependency_overrides[get_database] = lambda: mock_db
 
         with (
-            patch("src.api.v1.documents.get_storage_service", return_value=mock_storage),
-            patch(
-                "src.api.v1.documents.get_mq_service",
+            patch.object(document_intake, "get_storage_service", return_value=mock_storage),
+            patch.object(
+                document_intake,
+                "get_mq_service",
                 new_callable=AsyncMock,
                 return_value=mock_mq,
             ),
@@ -289,9 +295,10 @@ class TestUploadDocumentValidation:
         application.dependency_overrides[get_database] = lambda: mock_db
 
         with (
-            patch("src.api.v1.documents.get_storage_service", return_value=mock_storage),
-            patch(
-                "src.api.v1.documents.get_mq_service",
+            patch.object(document_intake, "get_storage_service", return_value=mock_storage),
+            patch.object(
+                document_intake,
+                "get_mq_service",
                 new_callable=AsyncMock,
                 return_value=mock_mq,
             ),
@@ -322,9 +329,10 @@ class TestUploadDocumentValidation:
         application.dependency_overrides[get_database] = lambda: mock_db
 
         with (
-            patch("src.api.v1.documents.get_storage_service", return_value=mock_storage),
-            patch(
-                "src.api.v1.documents.get_mq_service",
+            patch.object(document_intake, "get_storage_service", return_value=mock_storage),
+            patch.object(
+                document_intake,
+                "get_mq_service",
                 new_callable=AsyncMock,
                 return_value=mock_mq,
             ),
@@ -352,9 +360,10 @@ class TestUploadDocumentValidation:
         application.dependency_overrides[get_database] = lambda: mock_db
 
         with (
-            patch("src.api.v1.documents.get_storage_service", return_value=mock_storage),
-            patch(
-                "src.api.v1.documents.get_mq_service",
+            patch.object(document_intake, "get_storage_service", return_value=mock_storage),
+            patch.object(
+                document_intake,
+                "get_mq_service",
                 new_callable=AsyncMock,
                 return_value=mock_mq,
             ),
@@ -383,9 +392,10 @@ class TestUploadDocumentValidation:
 
         with (
             patch("src.services.auth.get_database", new_callable=AsyncMock, return_value=mock_db),
-            patch("src.api.v1.documents.get_storage_service", return_value=mock_storage),
-            patch(
-                "src.api.v1.documents.get_mq_service",
+            patch.object(document_intake, "get_storage_service", return_value=mock_storage),
+            patch.object(
+                document_intake,
+                "get_mq_service",
                 new_callable=AsyncMock,
                 return_value=mock_mq,
             ),
@@ -455,9 +465,10 @@ class TestUploadDocumentServiceFailures:
         application.dependency_overrides[get_database] = lambda: mock_db
 
         with (
-            patch("src.api.v1.documents.get_storage_service", return_value=failing_storage),
-            patch(
-                "src.api.v1.documents.get_mq_service",
+            patch.object(document_intake, "get_storage_service", return_value=failing_storage),
+            patch.object(
+                document_intake,
+                "get_mq_service",
                 new_callable=AsyncMock,
                 return_value=mock_mq,
             ),
@@ -487,9 +498,10 @@ class TestUploadDocumentServiceFailures:
         application.dependency_overrides[get_database] = lambda: mock_db
 
         with (
-            patch("src.api.v1.documents.get_storage_service", return_value=mock_storage),
-            patch(
-                "src.api.v1.documents.get_mq_service",
+            patch.object(document_intake, "get_storage_service", return_value=mock_storage),
+            patch.object(
+                document_intake,
+                "get_mq_service",
                 new_callable=AsyncMock,
                 return_value=failing_mq,
             ),
@@ -533,9 +545,10 @@ class TestUploadAllowedMimeTypes:
         application.dependency_overrides[get_database] = lambda: mock_db
 
         with (
-            patch("src.api.v1.documents.get_storage_service", return_value=mock_storage),
-            patch(
-                "src.api.v1.documents.get_mq_service",
+            patch.object(document_intake, "get_storage_service", return_value=mock_storage),
+            patch.object(
+                document_intake,
+                "get_mq_service",
                 new_callable=AsyncMock,
                 return_value=mock_mq,
             ),
@@ -566,9 +579,10 @@ class TestUploadAllowedMimeTypes:
         application.dependency_overrides[get_database] = lambda: mock_db
 
         with (
-            patch("src.api.v1.documents.get_storage_service", return_value=mock_storage),
-            patch(
-                "src.api.v1.documents.get_mq_service",
+            patch.object(document_intake, "get_storage_service", return_value=mock_storage),
+            patch.object(
+                document_intake,
+                "get_mq_service",
                 new_callable=AsyncMock,
                 return_value=mock_mq,
             ),
@@ -671,9 +685,10 @@ class TestUploadPersistsPendingRow:
         mock_db.get_document = AsyncMock(side_effect=_get)
 
         with (
-            patch("src.api.v1.documents.get_storage_service", return_value=mock_storage),
-            patch(
-                "src.api.v1.documents.get_mq_service",
+            patch.object(document_intake, "get_storage_service", return_value=mock_storage),
+            patch.object(
+                document_intake,
+                "get_mq_service",
                 new_callable=AsyncMock,
                 return_value=mock_mq,
             ),
@@ -715,9 +730,10 @@ class TestUploadEnqueueFailure:
         application.dependency_overrides[get_database] = lambda: mock_db
 
         with (
-            patch("src.api.v1.documents.get_storage_service", return_value=mock_storage),
-            patch(
-                "src.api.v1.documents.get_mq_service",
+            patch.object(document_intake, "get_storage_service", return_value=mock_storage),
+            patch.object(
+                document_intake,
+                "get_mq_service",
                 new_callable=AsyncMock,
                 return_value=failing_mq,
             ),
@@ -763,9 +779,10 @@ class TestUploadDedup:
         application.dependency_overrides[get_database] = lambda: mock_db
 
         with (
-            patch("src.api.v1.documents.get_storage_service", return_value=mock_storage),
-            patch(
-                "src.api.v1.documents.get_mq_service",
+            patch.object(document_intake, "get_storage_service", return_value=mock_storage),
+            patch.object(
+                document_intake,
+                "get_mq_service",
                 new_callable=AsyncMock,
                 return_value=mock_mq,
             ),
@@ -803,9 +820,10 @@ class TestUploadDedup:
         application.dependency_overrides[get_database] = lambda: mock_db
 
         with (
-            patch("src.api.v1.documents.get_storage_service", return_value=mock_storage),
-            patch(
-                "src.api.v1.documents.get_mq_service",
+            patch.object(document_intake, "get_storage_service", return_value=mock_storage),
+            patch.object(
+                document_intake,
+                "get_mq_service",
                 new_callable=AsyncMock,
                 return_value=mock_mq,
             ),
@@ -879,9 +897,10 @@ class TestUploadContentDedup:
 
         application = self._app(write_key, mock_db, mock_storage, mock_mq)
         with (
-            patch("src.api.v1.documents.get_storage_service", return_value=mock_storage),
-            patch(
-                "src.api.v1.documents.get_mq_service",
+            patch.object(document_intake, "get_storage_service", return_value=mock_storage),
+            patch.object(
+                document_intake,
+                "get_mq_service",
                 new_callable=AsyncMock,
                 return_value=mock_mq,
             ),
@@ -941,9 +960,10 @@ class TestUploadContentDedup:
             (b"error handling content unique", "errors.md"),
         ]
         with (
-            patch("src.api.v1.documents.get_storage_service", return_value=mock_storage),
-            patch(
-                "src.api.v1.documents.get_mq_service",
+            patch.object(document_intake, "get_storage_service", return_value=mock_storage),
+            patch.object(
+                document_intake,
+                "get_mq_service",
                 new_callable=AsyncMock,
                 return_value=mock_mq,
             ),
@@ -992,9 +1012,10 @@ class TestUploadContentDedup:
         names = ["guide.md", "guide-copy-1.md", "guide-copy-2.md"]
         seen: set[str] = set()
         with (
-            patch("src.api.v1.documents.get_storage_service", return_value=mock_storage),
-            patch(
-                "src.api.v1.documents.get_mq_service",
+            patch.object(document_intake, "get_storage_service", return_value=mock_storage),
+            patch.object(
+                document_intake,
+                "get_mq_service",
                 new_callable=AsyncMock,
                 return_value=mock_mq,
             ),

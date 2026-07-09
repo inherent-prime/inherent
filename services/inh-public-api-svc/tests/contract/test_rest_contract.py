@@ -33,6 +33,7 @@ from src.models.document import (
     DocumentUploadResponse,
 )
 from src.models.search import QualityVerdict, SearchResponse, SearchResult
+from src.services import document_intake
 from src.services.auth import (
     ResolvedAuth,
     get_api_key_info,
@@ -283,9 +284,10 @@ class TestDocumentUploadResponseShape:
         )
 
         with (
-            patch("src.api.v1.documents.get_storage_service", return_value=storage),
-            patch(
-                "src.api.v1.documents.get_mq_service",
+            patch.object(document_intake, "get_storage_service", return_value=storage),
+            patch.object(
+                document_intake,
+                "get_mq_service",
                 new=AsyncMock(return_value=AsyncMock()),
             ),
         ):
