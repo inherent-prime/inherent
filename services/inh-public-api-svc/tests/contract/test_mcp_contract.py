@@ -782,6 +782,30 @@ class TestUploadDocumentTool:
         assert "REST" in content[0].text
         db.create_or_reset_pending_document.assert_not_called()
 
+    async def test_unsupported_text_content_type_rejected_at_mcp_boundary(self):
+        """A text/* subtype that is NOT in the shared allow-list (e.g. text/xml)
+        is rejected at the MCP gate with the supported-types message — not passed
+        through to intake for a confusing two-step rejection (#87 review S1)."""
+        db = AsyncMock()
+        db.validate_api_key = AsyncMock(return_value=self._key())
+        db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
+        db.create_or_reset_pending_document = AsyncMock()
+
+        with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)):
+            content = await _call_tool(
+                "upload_document",
+                {
+                    "api_key": "x",
+                    "filename": "data.xml",
+                    "content": "<x/>",
+                    "content_type": "text/xml",
+                },
+            )
+
+        assert content[0].text.startswith("Error:")
+        assert "text/markdown" in content[0].text  # names the supported set
+        db.create_or_reset_pending_document.assert_not_called()
+
     async def test_empty_content_rejected(self):
         db = AsyncMock()
         db.validate_api_key = AsyncMock(return_value=self._key())

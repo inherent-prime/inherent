@@ -36,10 +36,11 @@ Upload parity (#87 Task 3)
 ---------------------------
 ``upload_document`` is the MCP counterpart of POST /v1/documents, but TEXT
 content only: the tool accepts ``content`` as a UTF-8 string (not raw bytes),
-so ``content_type`` must be a ``text/*`` MIME type (default
-``text/markdown``). Binary uploads (PDF, DOCX, PNG, ...) remain REST-only by
-design — the tool rejects a binary ``content_type`` with a message pointing
-the caller at POST /v1/documents. Both surfaces share the exact same
+so ``content_type`` must be one of the supported text types
+(``text/plain``, ``text/markdown`` [default], ``text/csv``, ``text/html``).
+Binary uploads (PDF, DOCX, PNG, ...) remain REST-only by design — the tool
+rejects an unsupported ``content_type`` with a message pointing the caller at
+POST /v1/documents. Both surfaces share the exact same
 validate/dedup/store/enqueue pipeline via ``src.services.document_intake``.
 """
 
@@ -49,7 +50,7 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
-from src.config.constants import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
+from src.config.constants import ALLOWED_MIME_TYPES, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
 from src.models.api_key import APIKeyInfo
 from src.models.evals import FeedbackRequest
 from src.services.database import get_database
@@ -66,6 +67,11 @@ from src.services.verify import verify_claim
 from src.utils import get_logger
 
 logger = get_logger(__name__)
+
+# The text MIME types upload_document accepts, derived from the shared upload
+# allow-list so the MCP gate can never drift from what intake_document permits.
+# Binary types in ALLOWED_MIME_TYPES (PDF/DOCX/PNG) stay REST-only by design.
+SUPPORTED_TEXT_MIME_TYPES = tuple(sorted(t for t in ALLOWED_MIME_TYPES if t.startswith("text/")))
 
 # Required permission per tool — mirrors the REST per-route dependencies (#14).
 _TOOL_PERMISSIONS: dict[str, str] = {
@@ -367,8 +373,8 @@ def create_mcp_server() -> Server:
                 name="upload_document",
                 description="Upload TEXT content for ingestion (same pipeline as POST "
                 "/v1/documents, minus binary files — PDF/DOCX/PNG uploads are REST-only by "
-                "design). Content is UTF-8 text; content_type must be a text/* MIME type "
-                "(default text/markdown). Requires 'write' permission.",
+                "design). Content is UTF-8 text; content_type must be one of text/plain, "
+                "text/markdown (default), text/csv, text/html. Requires 'write' permission.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -1028,13 +1034,14 @@ async def _handle_upload_document(key_info: APIKeyInfo, arguments: dict) -> list
     if not content:
         return [TextContent(type="text", text="Error: content is required and cannot be empty")]
 
-    if not content_type.startswith("text/"):
+    if content_type not in SUPPORTED_TEXT_MIME_TYPES:
         return [
             TextContent(
                 type="text",
                 text=(
-                    f"Error: upload_document only accepts text/* content (got "
-                    f"'{content_type}'). Binary uploads are REST-only by design — use "
+                    f"Error: upload_document accepts only these text content types: "
+                    f"{', '.join(SUPPORTED_TEXT_MIME_TYPES)} (got '{content_type}'). "
+                    f"Other formats (PDF, DOCX, PNG, ...) are REST-only by design — use "
                     f"POST /v1/documents instead."
                 ),
             )
