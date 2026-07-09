@@ -102,3 +102,47 @@ async def get_document_context(
         chunks=chunks,
         full_text=full_text,
     )
+
+
+@router.get("/chunks/{document_id}/{chunk_id}", response_model=DocumentChunk)
+async def get_document_chunk(
+    document_id: str,
+    chunk_id: str,
+    auth: Annotated[ResolvedAuth, Depends(resolve_workspace_read)],
+    database: Annotated[DatabaseService, Depends(get_database)],
+) -> DocumentChunk:
+    """
+    Get a single chunk by document_id + chunk_id (#87 API parity).
+
+    Requires an API key with 'read' permission.
+    Workspace can be specified via ``X-Workspace-Id`` header. A chunk_id that
+    exists but belongs to a different document or a foreign workspace reads
+    as 404 (no cross-tenant existence leak). Registered AFTER the literal
+    ``/context`` route above so that path is matched first (FastAPI/Starlette
+    matches routes in registration order; this generic ``{chunk_id}`` path
+    would otherwise shadow it).
+    """
+    workspace_id = auth.workspace_id
+    chunk = None
+
+    if workspace_id:
+        chunk = await database.get_document_chunk(
+            document_id=document_id,
+            chunk_id=chunk_id,
+            workspace_id=workspace_id,
+        )
+    else:
+        user_workspaces = await database.get_user_workspace_ids(auth.key_info.user_id)
+        for ws_id in user_workspaces:
+            chunk = await database.get_document_chunk(
+                document_id=document_id,
+                chunk_id=chunk_id,
+                workspace_id=ws_id,
+            )
+            if chunk:
+                break
+
+    if not chunk:
+        raise HTTPException(status_code=404, detail="Chunk not found")
+
+    return chunk

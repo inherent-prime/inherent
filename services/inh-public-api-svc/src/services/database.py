@@ -725,6 +725,47 @@ class DatabaseService:
                 for row in rows
             ]
 
+    async def get_document_chunk(
+        self, document_id: str, chunk_id: str, workspace_id: str
+    ) -> DocumentChunk | None:
+        """Get a single chunk, scoped to (document_id, chunk_id, workspace_id) (#87).
+
+        Mirrors get_document_chunks (above) but targets one row via a single
+        workspace-scoped query — no separate document-ownership pre-check is
+        needed since workspace_id is filtered directly on document_chunks via
+        its parent document. Returns None when the chunk is absent or belongs
+        to a different document/workspace, so a foreign chunk_id reads as
+        not-found rather than leaking cross-tenant existence.
+        """
+        async with self.session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT dc.id, dc.document_id, dc.content, dc.chunk_index, dc.token_count,
+                           dc.metadata, dc.content_hash, dc.source_uri, dc.ingested_at
+                    FROM document_chunks dc
+                    JOIN processed_documents pd ON pd.document_id = dc.document_id
+                    WHERE dc.document_id = :document_id
+                      AND dc.id = :chunk_id
+                      AND pd.workspace_id = :workspace_id
+                """
+                ),
+                {"document_id": document_id, "chunk_id": chunk_id, "workspace_id": workspace_id},
+            )
+            row = result.fetchone()
+
+            if not row:
+                return None
+
+            return DocumentChunk(
+                id=str(row.id),
+                document_id=str(row.document_id),
+                content=row.content,
+                chunk_index=row.chunk_index,
+                token_count=row.token_count or 0,
+                metadata=_merge_chunk_provenance(row),
+            )
+
     # User workspace queries
     async def get_user_workspace_ids(self, user_id: str) -> list[str]:
         """Get all workspace IDs the user has access to.
