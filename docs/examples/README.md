@@ -501,6 +501,17 @@ curl -s "$API_BASE/v1/chunks/$DOC_ID" \
 ]
 ```
 
+### Get a single chunk by id
+
+Fetch one chunk directly by its id within a document. Returns `404` if the chunk does not exist or belongs to a workspace you cannot access.
+
+```bash
+curl -s "$API_BASE/v1/chunks/$DOC_ID/$CHUNK_ID" \
+  -H "X-API-Key: $API_KEY" \
+  -H "X-Workspace-Id: $WORKSPACE_ID" \
+  | jq .
+```
+
 ### Get document context (all chunks as full text)
 
 Returns metadata + all chunks combined into `full_text`. Use this for MCP-style full-document context retrieval.
