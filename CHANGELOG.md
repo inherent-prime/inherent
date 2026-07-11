@@ -5,6 +5,23 @@ All notable changes to Inherent are documented here. The format follows
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.0] — 2026-07-09 — Org-readiness program
+
+Repository-level release tag (`v0.1.0`/`v0.1.0-rc1` were already used by an
+earlier, narrower release — see [releasing.md](docs/maintainers/releasing.md)
+for the image-publishing flow). Per-service package versions (independent of
+this tag) moved to `inh-contracts` 2.0.0, `inh-ingestion-svc` 0.5.0, and
+`inh-public-api-svc` 0.2.0 alongside this tag.
+
+A milestone-by-milestone push to make Inherent a self-hostable, permission-aware
+agent **memory substrate** an organization can run on day one. Delivered as a
+stack of reviewable PRs (merge order: #65 → #66 → #67 → #68 → #69 → #70, on top
+of the already-merged M0–M2 #62/#63/#64). See
+[docs/maintainers/org-readiness-requirements.md](docs/maintainers/org-readiness-requirements.md)
+and [ADR 0001](docs/adr/0001-agent-memory-substrate.md).
+
 ### Changed
 
 - **MCP tool registry (#100).** Every MCP tool is now declared exactly once in
@@ -27,23 +44,6 @@ All notable changes to Inherent are documented here. The format follows
   pattern sweep after bug fixes, dual-surface failure parity, compensated
   state mutations, registry-only MCP tool registration, and friction/unfiled-
   defect reporting.
-
-## [0.1.0] — 2026-07-09 — Org-readiness program
-
-The first tagged release. Repository-level release tag; per-service package
-versions (independent, see [releasing.md](docs/maintainers/releasing.md))
-moved to `inh-contracts` 2.0.0, `inh-ingestion-svc` 0.5.0, and
-`inh-public-api-svc` 0.2.0 alongside this tag.
-
-A milestone-by-milestone push to make Inherent a self-hostable, permission-aware
-agent **memory substrate** an organization can run on day one. Delivered as a
-stack of reviewable PRs (merge order: #65 → #66 → #67 → #68 → #69 → #70, on top
-of the already-merged M0–M2 #62/#63/#64). See
-[docs/maintainers/org-readiness-requirements.md](docs/maintainers/org-readiness-requirements.md)
-and [ADR 0001](docs/adr/0001-agent-memory-substrate.md).
-
-### Added
-
 - **Evals v1 — traffic-mined retrieval evals (#91).** Operators can now get a
   defensible retrieval-quality number for their own corpus without authoring a
   golden set. Search responses carry an `event_id`; consuming agents (or the
