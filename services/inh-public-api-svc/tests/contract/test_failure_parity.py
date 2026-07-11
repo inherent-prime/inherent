@@ -120,11 +120,6 @@ class TestRefreshMqDownParity:
     tests/unit/test_refresh_and_verify_endpoints.py). The MCP twin must do the
     equivalent: mark failed + clear error — never a permanently-pending doc."""
 
-    @pytest.mark.xfail(
-        reason="#98: MCP refresh_stale_source strands the document as 'pending' on "
-        "MQ failure — fix in flight on PR #96. Remove this marker once merged.",
-        strict=False,
-    )
     async def test_mcp_refresh_mq_down_marks_document_failed(self):
         db = _mock_db()
         failing_mq = AsyncMock()

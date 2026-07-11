@@ -599,7 +599,39 @@ async def _handle_refresh_stale_source(key_info: APIKeyInfo, arguments: dict) ->
     }
 
     mq = await get_mq_service()
-    await mq.publish(settings.mq_topic_document_uploaded, mq_message)
+    try:
+        await mq.publish(settings.mq_topic_document_uploaded, mq_message)
+    except Exception as exc:
+        # Compensate the pending reset above (#98). The document was just moved
+        # to 'pending'; if the enqueue fails it will never be re-ingested, so we
+        # must mark it failed — exactly as the REST twin
+        # (POST /v1/documents/{id}/refresh) does — instead of stranding it as
+        # permanently 'pending'. Both surfaces must leave the SAME state on an MQ
+        # outage (dual-surface failure parity, CLAUDE.md). A failure of the mark
+        # itself is logged, not swallowed into a success; retrying that mark is
+        # the separate #99 recovery contract.
+        logger.error(
+            "MQ publish failed during refresh — re-ingestion not enqueued",
+            error=str(exc),
+            document_id=document_id,
+        )
+        try:
+            await database.mark_document_failed(document_id, workspace_id, "refresh enqueue failed")
+        except Exception as mark_exc:
+            logger.error(
+                "Failed to mark document failed after refresh enqueue failure",
+                error=str(mark_exc),
+                document_id=document_id,
+            )
+        return [
+            TextContent(
+                type="text",
+                text=(
+                    "Error: failed to queue the document for re-processing. "
+                    "Please try again later."
+                ),
+            )
+        ]
 
     payload = {
         "document_id": fields["document_id"],
