@@ -160,3 +160,43 @@ async def test_resolve_uses_only_authorised_set_for_default() -> None:
     with _patch_user_workspaces(["ws-only"]):
         resolved = await _resolve_workspace(key, None, required=False)
     assert resolved.workspace_id == "ws-only"
+
+
+@pytest.mark.asyncio
+async def test_denied_workspace_access_is_logged_with_attempted_id() -> None:
+    """A 403 for a user-scoped key must emit a diagnostic warning carrying the
+    attempted workspace id and the user's authorised set, so support can tell a
+    wrong-id paste (e.g. Clerk org_id) from a real ownership gap without DB access.
+    """
+    key = _user_key()
+    with _patch_user_workspaces(["ws-owned"]):
+        with patch("src.services.auth.logger") as mock_logger:
+            with pytest.raises(HTTPException):
+                await _resolve_workspace(key, "user_ClerkOrgIdPasted", required=False)
+    mock_logger.warning.assert_called_once()
+    _, kwargs = mock_logger.warning.call_args
+    assert kwargs["requested_workspace_id"] == "user_ClerkOrgIdPasted"
+    assert kwargs["authorised_workspace_ids"] == ["ws-owned"]
+    assert kwargs["user_id"] == "user-1"
+
+
+@pytest.mark.asyncio
+async def test_scoped_key_mismatch_is_logged_with_attempted_id() -> None:
+    """A 403 from a workspace-scoped key requesting a different workspace logs
+    the key's binding and the requested id for the same diagnostic reason."""
+    key = APIKeyInfo(
+        key_id="key-ws",
+        user_id="user-1",
+        workspace_id="ws-scoped",
+        permissions=["read", "search"],
+        rate_limit=100,
+        expires_at=None,
+        status="active",
+    )
+    with patch("src.services.auth.logger") as mock_logger:
+        with pytest.raises(HTTPException):
+            await _resolve_workspace(key, "ws-other", required=False)
+    mock_logger.warning.assert_called_once()
+    _, kwargs = mock_logger.warning.call_args
+    assert kwargs["requested_workspace_id"] == "ws-other"
+    assert kwargs["key_workspace_id"] == "ws-scoped"

@@ -33,6 +33,7 @@ from src.models.document import (
     DocumentUploadResponse,
 )
 from src.models.search import QualityVerdict, SearchResponse, SearchResult
+from src.services import document_intake
 from src.services.auth import (
     ResolvedAuth,
     get_api_key_info,
@@ -212,6 +213,58 @@ class TestDocumentListResponseShape:
             assert field in doc, field
 
 
+class TestSingleChunkResponseShape:
+    """GET /v1/chunks/{document_id}/{chunk_id} (#87 single-chunk fetch)."""
+
+    async def test_get_chunk_response_shape(self, read_key, single_workspace_db):
+        from src.models.document import DocumentChunk
+
+        chunk = DocumentChunk(
+            id="chunk-1",
+            document_id="doc-1",
+            content="the relevant passage",
+            chunk_index=0,
+            token_count=12,
+            metadata={"heading": "Intro"},
+        )
+        single_workspace_db.get_document_chunk = AsyncMock(return_value=chunk)
+        app = _build_app(key=read_key, db=single_workspace_db)
+        async with _client(app) as c:
+            r = await c.get("/v1/chunks/doc-1/chunk-1", headers=_HDR)
+        assert r.status_code == 200
+        body = r.json()
+        for field in ("id", "document_id", "content", "chunk_index", "token_count", "metadata"):
+            assert field in body, field
+        assert body["id"] == "chunk-1"
+        assert body["document_id"] == "doc-1"
+        DocumentChunk.model_validate(body)
+
+    async def test_get_chunk_404_unknown_chunk(self, read_key, single_workspace_db):
+        """Unknown chunk_id under a real document -> 404 with detail."""
+        single_workspace_db.get_document_chunk = AsyncMock(return_value=None)
+        app = _build_app(key=read_key, db=single_workspace_db)
+        async with _client(app) as c:
+            r = await c.get("/v1/chunks/doc-1/chunk-missing", headers=_HDR)
+        assert r.status_code == 404
+        assert "detail" in r.json()
+
+    async def test_get_chunk_tenant_isolation_foreign_workspace_404(
+        self, read_key, single_workspace_db
+    ):
+        """A chunk that belongs to a different workspace must read as 404, not leak."""
+        single_workspace_db.get_document_chunk = AsyncMock(return_value=None)
+        app = _build_app(key=read_key, db=single_workspace_db)
+        app.dependency_overrides[resolve_workspace_read] = lambda: ResolvedAuth(
+            key_info=read_key, workspace_id="ws-1"
+        )
+        async with _client(app) as c:
+            r = await c.get("/v1/chunks/doc-foreign/chunk-foreign", headers=_HDR)
+        assert r.status_code == 404
+        single_workspace_db.get_document_chunk.assert_awaited_once_with(
+            document_id="doc-foreign", chunk_id="chunk-foreign", workspace_id="ws-1"
+        )
+
+
 class TestDocumentUploadResponseShape:
     async def test_upload_response_shape(self, write_key):
         app = _build_app(key=write_key, db=AsyncMock())
@@ -231,9 +284,10 @@ class TestDocumentUploadResponseShape:
         )
 
         with (
-            patch("src.api.v1.documents.get_storage_service", return_value=storage),
-            patch(
-                "src.api.v1.documents.get_mq_service",
+            patch.object(document_intake, "get_storage_service", return_value=storage),
+            patch.object(
+                document_intake,
+                "get_mq_service",
                 new=AsyncMock(return_value=AsyncMock()),
             ),
         ):
@@ -351,6 +405,17 @@ class TestDocumentsReadPermission:
         )
         async with _client(app) as c:
             r = await c.get("/v1/documents/doc-1/lineage", headers=_HDR)
+        assert r.status_code == 403
+
+    async def test_get_chunk_requires_read(self, search_only_key, single_workspace_db):
+        """A search-only key (no 'read') cannot fetch a single chunk -> 403."""
+        app = _build_app(
+            key=search_only_key,
+            db=single_workspace_db,
+            override_permissions=False,
+        )
+        async with _client(app) as c:
+            r = await c.get("/v1/chunks/doc-1/chunk-1", headers=_HDR)
         assert r.status_code == 403
 
 

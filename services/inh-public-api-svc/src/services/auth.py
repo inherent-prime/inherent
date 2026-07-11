@@ -160,6 +160,14 @@ async def _resolve_workspace(
     # Workspace-scoped key: the binding wins. Reject a header that disagrees.
     if key_info.workspace_id is not None:
         if header_workspace_id is not None and header_workspace_id != key_info.workspace_id:
+            logger.warning(
+                "workspace_access_denied",
+                reason="scoped_key_header_mismatch",
+                user_id=key_info.user_id,
+                key_id=key_info.key_id,
+                key_workspace_id=key_info.workspace_id,
+                requested_workspace_id=header_workspace_id,
+            )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=(
@@ -176,6 +184,17 @@ async def _resolve_workspace(
         user_workspaces = await database.get_user_workspace_ids(key_info.user_id)
         if workspace_id in user_workspaces:
             return ResolvedAuth(key_info=key_info, workspace_id=workspace_id)
+        # Log the attempted vs authorised set so support can tell "user pasted
+        # the wrong id (e.g. Clerk org_id / workspace name)" apart from a real
+        # ownership gap without shelling into the DB.
+        logger.warning(
+            "workspace_access_denied",
+            reason="requested_workspace_not_in_user_set",
+            user_id=key_info.user_id,
+            key_id=key_info.key_id,
+            requested_workspace_id=workspace_id,
+            authorised_workspace_ids=user_workspaces,
+        )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"You don't have access to workspace '{workspace_id}'",

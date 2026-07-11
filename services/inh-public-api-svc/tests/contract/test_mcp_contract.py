@@ -2,7 +2,8 @@
 
 Locks down the MCP agent surface so agents do not silently break. For each tool
 (search_documents, search_memory, get_citations, verify_claim, explain_lineage,
-refresh_stale_source, get_document_context, list_documents) we assert:
+refresh_stale_source, get_document_context, list_documents, get_document,
+list_chunks) we assert:
 
 - **inputSchema** advertises the documented required fields with the documented
   JSON types (and ``api_key`` is always required).
@@ -47,6 +48,9 @@ TOOL_SPEC: dict[str, dict] = {
     "report_feedback": {"required": ["api_key", "event_id", "verdict"]},
     "get_retrieval_health": {"required": ["api_key", "workspace_id"]},
     "delete_document": {"required": ["api_key", "document_id"]},
+    "get_document": {"required": ["api_key", "document_id"]},
+    "list_chunks": {"required": ["api_key", "document_id"]},
+    "upload_document": {"required": ["api_key", "filename", "content"]},
 }
 
 # Permission each tool requires (mirrors src/mcp_server/server._TOOL_PERMISSIONS).
@@ -62,6 +66,9 @@ _PERMISSION: dict[str, str] = {
     "report_feedback": "search",
     "get_retrieval_health": "search",
     "delete_document": "write",
+    "get_document": "read",
+    "list_chunks": "read",
+    "upload_document": "write",
 }
 
 # A key that LACKS the tool's required permission (so the denied path triggers).
@@ -85,6 +92,9 @@ _TOOL_ARGS: dict[str, dict] = {
     "report_feedback": {"event_id": "ev_1", "verdict": "answered"},
     "get_retrieval_health": {"workspace_id": "ws-1"},
     "delete_document": {"document_id": "doc-1"},
+    "get_document": {"document_id": "doc-1"},
+    "list_chunks": {"document_id": "doc-1"},
+    "upload_document": {"filename": "notes.md", "content": "# hello world"},
 }
 
 ALL_TOOLS = list(_PERMISSION)
@@ -171,6 +181,19 @@ class TestToolSchemas:
         assert props["document_id"]["type"] == "string"
         assert props["chunk_id"]["type"] == "string"
 
+    async def test_upload_document_schema_types(self):
+        """content_type is optional and defaults to text/markdown (text-only,
+        binary uploads stay REST-only by design, #87)."""
+        tools = await _list_tools()
+        schema = tools["upload_document"].inputSchema
+        props = schema["properties"]
+        assert props["filename"]["type"] == "string"
+        assert props["content"]["type"] == "string"
+        assert props["content_type"]["type"] == "string"
+        assert props["content_type"]["default"] == "text/markdown"
+        assert "content_type" not in schema["required"]
+        assert "workspace_id" in props
+
 
 # =========================================================================== #
 # output is list[TextContent]
@@ -204,6 +227,8 @@ class TestToolOutputType:
             }
         )
         db.create_or_reset_pending_document = AsyncMock(return_value=None)
+        db.get_document_id_by_content_hash = AsyncMock(return_value=None)
+        db.get_document_id_by_filename = AsyncMock(return_value=None)
         db.get_eval_event = AsyncMock(
             return_value={
                 "event_id": "ev_1",
@@ -247,6 +272,10 @@ class TestToolOutputType:
         mq.publish = AsyncMock(return_value=None)
         storage = MagicMock()
         storage.delete_file = AsyncMock(return_value=None)
+        storage.generate_key = MagicMock(return_value="ws-1/uuid/notes.md")
+        storage.upload_file = AsyncMock(return_value=None)
+        storage.build_storage_url = MagicMock(return_value="s3://bucket/ws-1/uuid/notes.md")
+        storage._bucket = "bucket"
 
         args = {"api_key": "x", **_TOOL_ARGS[name]}
         with (
@@ -265,6 +294,16 @@ class TestToolOutputType:
             patch(
                 "src.services.deletion.get_storage_service",
                 new=MagicMock(return_value=storage),
+            ),
+            # upload_document reaches storage/MQ through the shared
+            # document_intake service (same one REST uses, #87 Task 3).
+            patch(
+                "src.services.document_intake.get_storage_service",
+                new=MagicMock(return_value=storage),
+            ),
+            patch(
+                "src.services.document_intake.get_mq_service",
+                new=AsyncMock(return_value=mq),
             ),
         ):
             content = await _call_tool(name, args)
@@ -470,4 +509,396 @@ class TestEvalsMcpTools:
 
         assert content[0].text.startswith("Error:")
         assert "not accessible" in content[0].text
+
+
+# =========================================================================== #
+# get_document / list_chunks (#87 API parity Task 2): REST GET /v1/documents/{id}
+# and GET /v1/chunks/{document_id} equivalents. Access check mirrors
+# _handle_get_context / _resolve_document_for_user: get_document_by_id then
+# verify the caller owns the document's workspace, so a foreign document 404s
+# without ever leaking its data.
+# =========================================================================== #
+class TestGetDocumentTool:
+    def _key(self, permissions: list[str] = ("read",)) -> APIKeyInfo:
+        return APIKeyInfo(
+            key_id="key-1",
+            user_id="user-1",
+            workspace_id=None,
+            permissions=list(permissions),  # type: ignore[arg-type]
+            rate_limit=100,
+            expires_at=None,
+            status="active",
+        )
+
+    async def test_returns_document_metadata_as_json(self, sample_document):
+        db = AsyncMock()
+        db.validate_api_key = AsyncMock(return_value=self._key())
+        db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
+        db.get_document_by_id = AsyncMock(return_value=sample_document)
+
+        with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)):
+            content = await _call_tool("get_document", {"api_key": "x", "document_id": "doc-1"})
+
+        assert isinstance(content[0], TextContent)
+        assert '"doc-1"' in content[0].text
+        assert '"report.pdf"' in content[0].text
+        assert '"ws-1"' in content[0].text
+        db.get_document_by_id.assert_awaited_once_with("doc-1")
+
+    async def test_unknown_document_returns_not_found_error(self):
+        db = AsyncMock()
+        db.validate_api_key = AsyncMock(return_value=self._key())
+        db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
+        db.get_document_by_id = AsyncMock(return_value=None)
+
+        with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)):
+            content = await _call_tool(
+                "get_document", {"api_key": "x", "document_id": "doc-missing"}
+            )
+
+        assert content[0].text.startswith("Error:")
+        assert "doc-missing" in content[0].text
+
+    async def test_cross_workspace_document_denies_access_without_leak(self, sample_document):
+        """A document belonging to a workspace the caller does not own must not
+        leak its metadata — mirrors _resolve_document_for_user's access check."""
+        foreign = sample_document.model_copy(update={"workspace_id": "ws-foreign"})
+        db = AsyncMock()
+        db.validate_api_key = AsyncMock(return_value=self._key())
+        db.get_user_workspace_ids = AsyncMock(return_value=["ws-owned"])
+        db.get_document_by_id = AsyncMock(return_value=foreign)
+
+        with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)):
+            content = await _call_tool("get_document", {"api_key": "x", "document_id": "doc-1"})
+
+        assert content[0].text.startswith("Error:")
+        assert "don't have access" in content[0].text
+        # No leaked document fields (e.g. the foreign workspace id) in the error.
+        assert "ws-foreign" not in content[0].text
+
+    async def test_denied_without_read_permission(self):
+        db = AsyncMock()
+        db.validate_api_key = AsyncMock(return_value=self._key(["search"]))
+        db.get_document_by_id = AsyncMock()
+
+        with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)):
+            content = await _call_tool("get_document", {"api_key": "x", "document_id": "doc-1"})
+
+        assert content[0].text == "Error: API key does not have 'read' permission"
+        db.get_document_by_id.assert_not_called()
+
+
+class TestListChunksTool:
+    def _key(self, permissions: list[str] = ("read",)) -> APIKeyInfo:
+        return APIKeyInfo(
+            key_id="key-1",
+            user_id="user-1",
+            workspace_id=None,
+            permissions=list(permissions),  # type: ignore[arg-type]
+            rate_limit=100,
+            expires_at=None,
+            status="active",
+        )
+
+    async def test_returns_chunk_list_as_json(self, sample_document):
+        from src.models.document import DocumentChunk
+
+        chunks = [
+            DocumentChunk(id="chunk-1", document_id="doc-1", content="hello", chunk_index=0),
+            DocumentChunk(id="chunk-2", document_id="doc-1", content="world", chunk_index=1),
+        ]
+        db = AsyncMock()
+        db.validate_api_key = AsyncMock(return_value=self._key())
+        db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
+        db.get_document_by_id = AsyncMock(return_value=sample_document)
+        db.get_document_chunks_by_doc_id = AsyncMock(return_value=chunks)
+
+        with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)):
+            content = await _call_tool("list_chunks", {"api_key": "x", "document_id": "doc-1"})
+
+        assert isinstance(content[0], TextContent)
+        assert '"chunk-1"' in content[0].text
+        assert '"chunk-2"' in content[0].text
+        assert '"hello"' in content[0].text
+        db.get_document_chunks_by_doc_id.assert_awaited_once_with("doc-1")
+
+    async def test_unknown_document_returns_not_found_error(self):
+        db = AsyncMock()
+        db.validate_api_key = AsyncMock(return_value=self._key())
+        db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
+        db.get_document_by_id = AsyncMock(return_value=None)
+        db.get_document_chunks_by_doc_id = AsyncMock()
+
+        with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)):
+            content = await _call_tool(
+                "list_chunks", {"api_key": "x", "document_id": "doc-missing"}
+            )
+
+        assert content[0].text.startswith("Error:")
+        assert "doc-missing" in content[0].text
+        db.get_document_chunks_by_doc_id.assert_not_called()
+
+    async def test_cross_workspace_document_denies_access_without_leak(self, sample_document):
+        foreign = sample_document.model_copy(update={"workspace_id": "ws-foreign"})
+        db = AsyncMock()
+        db.validate_api_key = AsyncMock(return_value=self._key())
+        db.get_user_workspace_ids = AsyncMock(return_value=["ws-owned"])
+        db.get_document_by_id = AsyncMock(return_value=foreign)
+        db.get_document_chunks_by_doc_id = AsyncMock()
+
+        with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)):
+            content = await _call_tool("list_chunks", {"api_key": "x", "document_id": "doc-1"})
+
+        assert content[0].text.startswith("Error:")
+        assert "don't have access" in content[0].text
+        db.get_document_chunks_by_doc_id.assert_not_called()
+
+    async def test_denied_without_read_permission(self):
+        db = AsyncMock()
+        db.validate_api_key = AsyncMock(return_value=self._key(["search"]))
+        db.get_document_by_id = AsyncMock()
+        db.get_document_chunks_by_doc_id = AsyncMock()
+
+        with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)):
+            content = await _call_tool("list_chunks", {"api_key": "x", "document_id": "doc-1"})
+
+        assert content[0].text == "Error: API key does not have 'read' permission"
+        db.get_document_by_id.assert_not_called()
+        db.get_document_chunks_by_doc_id.assert_not_called()
         db.eval_scorecard_counts.assert_not_called()
+
+
+# =========================================================================== #
+# upload_document (#87 API parity Task 3): text-only counterpart of
+# POST /v1/documents. Binary uploads stay REST-only by design — content_type
+# must be a text/* MIME type or the tool errors and points the caller at the
+# REST endpoint. Shares src/services/document_intake.intake_document with
+# REST so validation, dedup, storage and MQ publish never drift.
+# =========================================================================== #
+class TestUploadDocumentTool:
+    def _key(self, permissions: list[str] = ("write",)) -> APIKeyInfo:
+        return APIKeyInfo(
+            key_id="key-1",
+            user_id="user-1",
+            workspace_id=None,
+            permissions=list(permissions),  # type: ignore[arg-type]
+            rate_limit=100,
+            expires_at=None,
+            status="active",
+        )
+
+    def _storage(self) -> MagicMock:
+        storage = MagicMock()
+        storage.generate_key = MagicMock(return_value="ws-1/uuid/notes.md")
+        storage.upload_file = AsyncMock(return_value=None)
+        storage.build_storage_url = MagicMock(return_value="s3://bucket/ws-1/uuid/notes.md")
+        storage._bucket = "bucket"
+        return storage
+
+    def _mq(self) -> AsyncMock:
+        mq = AsyncMock()
+        mq.publish = AsyncMock(return_value=None)
+        return mq
+
+    def _intake_patches(self, storage, mq):
+        return (
+            patch(
+                "src.services.document_intake.get_storage_service",
+                new=MagicMock(return_value=storage),
+            ),
+            patch(
+                "src.services.document_intake.get_mq_service",
+                new=AsyncMock(return_value=mq),
+            ),
+        )
+
+    async def test_upload_happy_path_returns_pending_doc_json(self):
+        """A single-workspace caller uploads text content and gets back the
+        DocumentUploadResponse JSON with status='pending' — same shape as
+        POST /v1/documents."""
+        db = AsyncMock()
+        db.validate_api_key = AsyncMock(return_value=self._key())
+        db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
+        db.get_document_id_by_content_hash = AsyncMock(return_value=None)
+        db.get_document_id_by_filename = AsyncMock(return_value=None)
+        db.create_or_reset_pending_document = AsyncMock(return_value=None)
+
+        storage = self._storage()
+        mq = self._mq()
+        p1, p2 = self._intake_patches(storage, mq)
+
+        with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)), p1, p2:
+            content = await _call_tool(
+                "upload_document",
+                {"api_key": "x", "filename": "notes.md", "content": "# hello world"},
+            )
+
+        assert isinstance(content[0], TextContent)
+        assert '"status":"pending"' in content[0].text or '"status": "pending"' in content[0].text
+        assert '"workspace_id":"ws-1"' in content[0].text or '"workspace_id": "ws-1"' in (
+            content[0].text
+        )
+        assert '"notes.md"' in content[0].text
+        mq.publish.assert_awaited_once()
+        storage.upload_file.assert_awaited_once()
+
+    async def test_write_permission_denied(self):
+        """A key without 'write' gets the standard permission error and never
+        reaches storage/db."""
+        db = AsyncMock()
+        db.validate_api_key = AsyncMock(return_value=self._key(["read", "search"]))
+        db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
+        db.create_or_reset_pending_document = AsyncMock()
+
+        with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)):
+            content = await _call_tool(
+                "upload_document",
+                {"api_key": "x", "filename": "notes.md", "content": "# hello world"},
+            )
+
+        assert content[0].text == "Error: API key does not have 'write' permission"
+        db.create_or_reset_pending_document.assert_not_called()
+
+    async def test_binary_content_type_rejected_with_rest_only_message(self):
+        """A non-text/* content_type is rejected before storage/db are ever
+        touched, and the error directs the caller to REST."""
+        db = AsyncMock()
+        db.validate_api_key = AsyncMock(return_value=self._key())
+        db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
+        db.create_or_reset_pending_document = AsyncMock()
+
+        with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)):
+            content = await _call_tool(
+                "upload_document",
+                {
+                    "api_key": "x",
+                    "filename": "report.pdf",
+                    "content": "not really a pdf",
+                    "content_type": "application/pdf",
+                },
+            )
+
+        assert content[0].text.startswith("Error:")
+        assert "REST" in content[0].text
+        db.create_or_reset_pending_document.assert_not_called()
+
+    async def test_unsupported_text_content_type_rejected_at_mcp_boundary(self):
+        """A text/* subtype that is NOT in the shared allow-list (e.g. text/xml)
+        is rejected at the MCP gate with the supported-types message — not passed
+        through to intake for a confusing two-step rejection (#87 review S1)."""
+        db = AsyncMock()
+        db.validate_api_key = AsyncMock(return_value=self._key())
+        db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
+        db.create_or_reset_pending_document = AsyncMock()
+
+        with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)):
+            content = await _call_tool(
+                "upload_document",
+                {
+                    "api_key": "x",
+                    "filename": "data.xml",
+                    "content": "<x/>",
+                    "content_type": "text/xml",
+                },
+            )
+
+        assert content[0].text.startswith("Error:")
+        assert "text/markdown" in content[0].text  # names the supported set
+        db.create_or_reset_pending_document.assert_not_called()
+
+    async def test_empty_content_rejected(self):
+        db = AsyncMock()
+        db.validate_api_key = AsyncMock(return_value=self._key())
+        db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
+        db.create_or_reset_pending_document = AsyncMock()
+
+        with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)):
+            content = await _call_tool(
+                "upload_document",
+                {"api_key": "x", "filename": "notes.md", "content": ""},
+            )
+
+        assert content[0].text.startswith("Error:")
+        db.create_or_reset_pending_document.assert_not_called()
+
+    async def test_no_workspace_returns_error(self):
+        """A caller who owns zero workspaces cannot upload anywhere."""
+        db = AsyncMock()
+        db.validate_api_key = AsyncMock(return_value=self._key())
+        db.get_user_workspace_ids = AsyncMock(return_value=[])
+
+        with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)):
+            content = await _call_tool(
+                "upload_document",
+                {"api_key": "x", "filename": "notes.md", "content": "# hello world"},
+            )
+
+        assert content[0].text.startswith("Error:")
+
+    async def test_multiple_workspaces_without_workspace_id_returns_error(self):
+        """A caller owning multiple workspaces must disambiguate via
+        workspace_id — uploading needs exactly one target."""
+        db = AsyncMock()
+        db.validate_api_key = AsyncMock(return_value=self._key())
+        db.get_user_workspace_ids = AsyncMock(return_value=["ws-1", "ws-2"])
+        db.create_or_reset_pending_document = AsyncMock()
+
+        with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)):
+            content = await _call_tool(
+                "upload_document",
+                {"api_key": "x", "filename": "notes.md", "content": "# hello world"},
+            )
+
+        assert content[0].text.startswith("Error:")
+        db.create_or_reset_pending_document.assert_not_called()
+
+    async def test_multiple_workspaces_with_explicit_workspace_id_succeeds(self):
+        """Passing workspace_id disambiguates among multiple owned workspaces."""
+        db = AsyncMock()
+        db.validate_api_key = AsyncMock(return_value=self._key())
+        db.get_user_workspace_ids = AsyncMock(return_value=["ws-1", "ws-2"])
+        db.get_document_id_by_content_hash = AsyncMock(return_value=None)
+        db.get_document_id_by_filename = AsyncMock(return_value=None)
+        db.create_or_reset_pending_document = AsyncMock(return_value=None)
+
+        storage = self._storage()
+        mq = self._mq()
+        p1, p2 = self._intake_patches(storage, mq)
+
+        with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)), p1, p2:
+            content = await _call_tool(
+                "upload_document",
+                {
+                    "api_key": "x",
+                    "filename": "notes.md",
+                    "content": "# hello world",
+                    "workspace_id": "ws-2",
+                },
+            )
+
+        assert '"workspace_id":"ws-2"' in content[0].text or '"workspace_id": "ws-2"' in (
+            content[0].text
+        )
+
+    async def test_foreign_workspace_id_denied(self):
+        """A workspace_id the caller does not own is rejected — tenant
+        scoping, same convention as _get_workspace_ids elsewhere."""
+        db = AsyncMock()
+        db.validate_api_key = AsyncMock(return_value=self._key())
+        db.get_user_workspace_ids = AsyncMock(return_value=["ws-owned"])
+        db.create_or_reset_pending_document = AsyncMock()
+
+        with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)):
+            content = await _call_tool(
+                "upload_document",
+                {
+                    "api_key": "x",
+                    "filename": "notes.md",
+                    "content": "# hello world",
+                    "workspace_id": "ws-foreign",
+                },
+            )
+
+        assert content[0].text.startswith("Error:")
+        assert "don't have access" in content[0].text
+        db.create_or_reset_pending_document.assert_not_called()

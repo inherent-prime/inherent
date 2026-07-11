@@ -232,6 +232,11 @@ Notes:
 - The seeded `ink_dev_local_key_001` is a **dev convenience** — create your own
   workspace and API keys before exposing the stack to anything real.
 
+This release stack is a zero-setup **demo**. Before you point real users or data
+at it, work through [Taking Inherent to Production](docs/deploy/production.md) —
+real object storage, MongoDB auth, TLS, `ENVIRONMENT=production`, the event-queue
+eviction policy, and backups.
+
 ## Local Smoke Test
 
 After `make dev` succeeds, run these commands to verify the full document path

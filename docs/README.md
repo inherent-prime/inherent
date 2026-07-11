@@ -9,6 +9,7 @@ then open the smallest relevant document.
 | If you need to... | Open this |
 | --- | --- |
 | Start the system locally and run the first upload/search flow | [getting-started/local.md](getting-started/local.md) |
+| Harden the demo stack before exposing it to real users/data | [deploy/production.md](deploy/production.md) |
 | Copy request examples for every public endpoint | [examples/README.md](examples/README.md) |
 | Use sample files for upload testing | [examples/sample-documents/](examples/sample-documents/) |
 | Check what belongs in the OSS repository | [maintainers/repository-boundaries.md](maintainers/repository-boundaries.md) |
@@ -36,6 +37,8 @@ docs/
   README.md                    agent-first discovery hub
   getting-started/
     local.md                   local start, upload, ingest, and search guide
+  deploy/
+    production.md              hardening checklist for real deployments
   examples/
     README.md                  endpoint-by-endpoint curl examples
     sample-documents/          files used by local upload examples

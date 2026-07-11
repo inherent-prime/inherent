@@ -1,0 +1,26 @@
+meta {
+  name: Get Single Chunk
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{api_base}}/v1/chunks/{{document_id}}/{{chunk_id}}
+  body: none
+  auth: inherit
+}
+
+headers {
+  X-Workspace-Id: {{workspace_id}}
+}
+
+tests {
+  test("status is 200", function() {
+    expect(res.status).to.equal(200);
+  });
+}
+
+docs {
+  Fetch a single chunk by its id within a document. Returns 404 if the chunk
+  does not exist or belongs to a workspace you cannot access.
+}

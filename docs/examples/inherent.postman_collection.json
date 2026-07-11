@@ -8,9 +8,21 @@
   "auth": {
     "type": "apikey",
     "apikey": [
-      { "key": "key", "value": "X-API-Key", "type": "string" },
-      { "key": "value", "value": "{{api_key}}", "type": "string" },
-      { "key": "in", "value": "header", "type": "string" }
+      {
+        "key": "key",
+        "value": "X-API-Key",
+        "type": "string"
+      },
+      {
+        "key": "value",
+        "value": "{{api_key}}",
+        "type": "string"
+      },
+      {
+        "key": "in",
+        "value": "header",
+        "type": "string"
+      }
     ]
   },
   "item": [
@@ -36,8 +48,12 @@
             "header": [],
             "url": {
               "raw": "{{api_base}}/health",
-              "host": ["{{api_base}}"],
-              "path": ["health"]
+              "host": [
+                "{{api_base}}"
+              ],
+              "path": [
+                "health"
+              ]
             },
             "description": "Liveness probe for the public API. No auth required (the inherited X-API-Key header is ignored)."
           },
@@ -47,12 +63,25 @@
               "originalRequest": {
                 "method": "GET",
                 "header": [],
-                "url": { "raw": "{{api_base}}/health", "host": ["{{api_base}}"], "path": ["health"] }
+                "url": {
+                  "raw": "{{api_base}}/health",
+                  "host": [
+                    "{{api_base}}"
+                  ],
+                  "path": [
+                    "health"
+                  ]
+                }
               },
               "status": "OK",
               "code": 200,
               "_postman_previewlanguage": "json",
-              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
               "cookie": [],
               "body": "{\n  \"status\": \"healthy\",\n  \"service\": \"inh-public-api-svc\"\n}"
             }
@@ -76,8 +105,13 @@
             "header": [],
             "url": {
               "raw": "{{api_base}}/health/ready",
-              "host": ["{{api_base}}"],
-              "path": ["health", "ready"]
+              "host": [
+                "{{api_base}}"
+              ],
+              "path": [
+                "health",
+                "ready"
+              ]
             },
             "description": "Readiness probe. Checks PostgreSQL + Weaviate. Returns `degraded` (still 200) or 503 if a backing service is unhealthy."
           },
@@ -87,12 +121,26 @@
               "originalRequest": {
                 "method": "GET",
                 "header": [],
-                "url": { "raw": "{{api_base}}/health/ready", "host": ["{{api_base}}"], "path": ["health", "ready"] }
+                "url": {
+                  "raw": "{{api_base}}/health/ready",
+                  "host": [
+                    "{{api_base}}"
+                  ],
+                  "path": [
+                    "health",
+                    "ready"
+                  ]
+                }
               },
               "status": "OK",
               "code": 200,
               "_postman_previewlanguage": "json",
-              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
               "cookie": [],
               "body": "{\n  \"status\": \"healthy\",\n  \"timestamp\": \"2024-01-15T10:00:00.000000+00:00\",\n  \"version\": \"0.1.0\",\n  \"service\": \"inh-public-api-svc\",\n  \"checks\": {\n    \"database\": { \"status\": \"healthy\", \"latency_ms\": 4.2 },\n    \"weaviate\": { \"status\": \"healthy\", \"latency_ms\": 12.7 }\n  }\n}"
             }
@@ -116,8 +164,12 @@
             "header": [],
             "url": {
               "raw": "{{ingest_base}}/health",
-              "host": ["{{ingest_base}}"],
-              "path": ["health"]
+              "host": [
+                "{{ingest_base}}"
+              ],
+              "path": [
+                "health"
+              ]
             },
             "description": "Liveness probe for the ingestion service. Reports whether the Temporal worker is running. No auth."
           },
@@ -127,12 +179,25 @@
               "originalRequest": {
                 "method": "GET",
                 "header": [],
-                "url": { "raw": "{{ingest_base}}/health", "host": ["{{ingest_base}}"], "path": ["health"] }
+                "url": {
+                  "raw": "{{ingest_base}}/health",
+                  "host": [
+                    "{{ingest_base}}"
+                  ],
+                  "path": [
+                    "health"
+                  ]
+                }
               },
               "status": "OK",
               "code": 200,
               "_postman_previewlanguage": "json",
-              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
               "cookie": [],
               "body": "{\n  \"status\": \"healthy\",\n  \"temporal_worker\": true,\n  \"version\": \"0.4.0\"\n}"
             }
@@ -167,7 +232,10 @@
           "request": {
             "method": "POST",
             "header": [
-              { "key": "X-Workspace-Id", "value": "{{workspace_id}}" }
+              {
+                "key": "X-Workspace-Id",
+                "value": "{{workspace_id}}"
+              }
             ],
             "body": {
               "mode": "formdata",
@@ -182,8 +250,13 @@
             },
             "url": {
               "raw": "{{api_base}}/v1/documents",
-              "host": ["{{api_base}}"],
-              "path": ["v1", "documents"]
+              "host": [
+                "{{api_base}}"
+              ],
+              "path": [
+                "v1",
+                "documents"
+              ]
             },
             "description": "Upload a document (multipart/form-data). Returns 201 with `document_id`, `status: pending`. The test script saves `document_id` to the environment."
           },
@@ -192,14 +265,42 @@
               "name": "201 Created",
               "originalRequest": {
                 "method": "POST",
-                "header": [{ "key": "X-Workspace-Id", "value": "{{workspace_id}}" }],
-                "body": { "mode": "formdata", "formdata": [{ "key": "file", "type": "file", "src": [] }] },
-                "url": { "raw": "{{api_base}}/v1/documents", "host": ["{{api_base}}"], "path": ["v1", "documents"] }
+                "header": [
+                  {
+                    "key": "X-Workspace-Id",
+                    "value": "{{workspace_id}}"
+                  }
+                ],
+                "body": {
+                  "mode": "formdata",
+                  "formdata": [
+                    {
+                      "key": "file",
+                      "type": "file",
+                      "src": []
+                    }
+                  ]
+                },
+                "url": {
+                  "raw": "{{api_base}}/v1/documents",
+                  "host": [
+                    "{{api_base}}"
+                  ],
+                  "path": [
+                    "v1",
+                    "documents"
+                  ]
+                }
               },
               "status": "Created",
               "code": 201,
               "_postman_previewlanguage": "json",
-              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
               "cookie": [],
               "body": "{\n  \"document_id\": \"3fa85f64-5717-4562-b3fc-2c963f66afa6\",\n  \"name\": \"sample.txt\",\n  \"workspace_id\": \"ws_local_001\",\n  \"storage_url\": \"s3://inherent-documents/ws_local_001/3fa85f64-5717-4562-b3fc-2c963f66afa6/sample.txt\",\n  \"mime_type\": \"text/plain\",\n  \"size_bytes\": 842,\n  \"status\": \"pending\",\n  \"message\": \"Document uploaded successfully. Processing will begin shortly.\"\n}"
             }
@@ -221,15 +322,29 @@
           "request": {
             "method": "GET",
             "header": [
-              { "key": "X-Workspace-Id", "value": "{{workspace_id}}" }
+              {
+                "key": "X-Workspace-Id",
+                "value": "{{workspace_id}}"
+              }
             ],
             "url": {
               "raw": "{{api_base}}/v1/documents?page=1&page_size=5",
-              "host": ["{{api_base}}"],
-              "path": ["v1", "documents"],
+              "host": [
+                "{{api_base}}"
+              ],
+              "path": [
+                "v1",
+                "documents"
+              ],
               "query": [
-                { "key": "page", "value": "1" },
-                { "key": "page_size", "value": "5" }
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "page_size",
+                  "value": "5"
+                }
               ]
             },
             "description": "List documents in the workspace with pagination."
@@ -239,13 +354,42 @@
               "name": "200 OK",
               "originalRequest": {
                 "method": "GET",
-                "header": [{ "key": "X-Workspace-Id", "value": "{{workspace_id}}" }],
-                "url": { "raw": "{{api_base}}/v1/documents?page=1&page_size=5", "host": ["{{api_base}}"], "path": ["v1", "documents"], "query": [{ "key": "page", "value": "1" }, { "key": "page_size", "value": "5" }] }
+                "header": [
+                  {
+                    "key": "X-Workspace-Id",
+                    "value": "{{workspace_id}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{api_base}}/v1/documents?page=1&page_size=5",
+                  "host": [
+                    "{{api_base}}"
+                  ],
+                  "path": [
+                    "v1",
+                    "documents"
+                  ],
+                  "query": [
+                    {
+                      "key": "page",
+                      "value": "1"
+                    },
+                    {
+                      "key": "page_size",
+                      "value": "5"
+                    }
+                  ]
+                }
               },
               "status": "OK",
               "code": 200,
               "_postman_previewlanguage": "json",
-              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
               "cookie": [],
               "body": "{\n  \"documents\": [\n    {\n      \"id\": \"3fa85f64-5717-4562-b3fc-2c963f66afa6\",\n      \"name\": \"sample.txt\",\n      \"workspace_id\": \"ws_local_001\",\n      \"source_type\": \"upload\",\n      \"mime_type\": \"text/plain\",\n      \"size_bytes\": 842,\n      \"chunk_count\": 4,\n      \"status\": \"processed\",\n      \"created_at\": \"2024-01-15T10:00:00+00:00\",\n      \"updated_at\": \"2024-01-15T10:00:05+00:00\",\n      \"metadata\": null\n    }\n  ],\n  \"total\": 1,\n  \"page\": 1,\n  \"page_size\": 5\n}"
             }
@@ -267,12 +411,21 @@
           "request": {
             "method": "GET",
             "header": [
-              { "key": "X-Workspace-Id", "value": "{{workspace_id}}" }
+              {
+                "key": "X-Workspace-Id",
+                "value": "{{workspace_id}}"
+              }
             ],
             "url": {
               "raw": "{{api_base}}/v1/documents/{{document_id}}",
-              "host": ["{{api_base}}"],
-              "path": ["v1", "documents", "{{document_id}}"]
+              "host": [
+                "{{api_base}}"
+              ],
+              "path": [
+                "v1",
+                "documents",
+                "{{document_id}}"
+              ]
             },
             "description": "Fetch a single document by ID. 404 if not found in the workspace."
           },
@@ -281,13 +434,33 @@
               "name": "200 OK",
               "originalRequest": {
                 "method": "GET",
-                "header": [{ "key": "X-Workspace-Id", "value": "{{workspace_id}}" }],
-                "url": { "raw": "{{api_base}}/v1/documents/{{document_id}}", "host": ["{{api_base}}"], "path": ["v1", "documents", "{{document_id}}"] }
+                "header": [
+                  {
+                    "key": "X-Workspace-Id",
+                    "value": "{{workspace_id}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{api_base}}/v1/documents/{{document_id}}",
+                  "host": [
+                    "{{api_base}}"
+                  ],
+                  "path": [
+                    "v1",
+                    "documents",
+                    "{{document_id}}"
+                  ]
+                }
               },
               "status": "OK",
               "code": 200,
               "_postman_previewlanguage": "json",
-              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
               "cookie": [],
               "body": "{\n  \"id\": \"3fa85f64-5717-4562-b3fc-2c963f66afa6\",\n  \"name\": \"sample.txt\",\n  \"workspace_id\": \"ws_local_001\",\n  \"source_type\": \"upload\",\n  \"mime_type\": \"text/plain\",\n  \"size_bytes\": 842,\n  \"chunk_count\": 4,\n  \"status\": \"processed\",\n  \"created_at\": \"2024-01-15T10:00:00+00:00\",\n  \"updated_at\": \"2024-01-15T10:00:05+00:00\",\n  \"metadata\": null\n}"
             }
@@ -315,18 +488,33 @@
           "request": {
             "method": "POST",
             "header": [
-              { "key": "X-Workspace-Id", "value": "{{workspace_id}}" },
-              { "key": "Content-Type", "value": "application/json" }
+              {
+                "key": "X-Workspace-Id",
+                "value": "{{workspace_id}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"query\": \"what retrieval modes does Inherent support\",\n  \"limit\": 5\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{api_base}}/v1/search",
-              "host": ["{{api_base}}"],
-              "path": ["v1", "search"]
+              "host": [
+                "{{api_base}}"
+              ],
+              "path": [
+                "v1",
+                "search"
+              ]
             },
             "description": "Default semantic (vector) search. Wait until documents are `processed` before searching."
           },
@@ -335,14 +523,45 @@
               "name": "200 OK",
               "originalRequest": {
                 "method": "POST",
-                "header": [{ "key": "X-Workspace-Id", "value": "{{workspace_id}}" }, { "key": "Content-Type", "value": "application/json" }],
-                "body": { "mode": "raw", "raw": "{\n  \"query\": \"what retrieval modes does Inherent support\",\n  \"limit\": 5\n}", "options": { "raw": { "language": "json" } } },
-                "url": { "raw": "{{api_base}}/v1/search", "host": ["{{api_base}}"], "path": ["v1", "search"] }
+                "header": [
+                  {
+                    "key": "X-Workspace-Id",
+                    "value": "{{workspace_id}}"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"query\": \"what retrieval modes does Inherent support\",\n  \"limit\": 5\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{api_base}}/v1/search",
+                  "host": [
+                    "{{api_base}}"
+                  ],
+                  "path": [
+                    "v1",
+                    "search"
+                  ]
+                }
               },
               "status": "OK",
               "code": 200,
               "_postman_previewlanguage": "json",
-              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
               "cookie": [],
               "body": "{\n  \"results\": [\n    {\n      \"chunk_id\": \"chunk-uuid-here\",\n      \"document_id\": \"3fa85f64-5717-4562-b3fc-2c963f66afa6\",\n      \"document_name\": \"sample.txt\",\n      \"content\": \"Section 2: Key Concepts\\nInherent is a backend system...\",\n      \"score\": 0.87,\n      \"metadata\": { \"chunk_index\": 1, \"token_count\": 64 },\n      \"context_before\": null,\n      \"context_after\": null\n    }\n  ],\n  \"query\": \"what retrieval modes does Inherent support\",\n  \"total_results\": 1,\n  \"processing_time_ms\": 42.3,\n  \"search_mode\": \"semantic\",\n  \"total_tokens\": 0\n}"
             }
@@ -364,18 +583,33 @@
           "request": {
             "method": "POST",
             "header": [
-              { "key": "X-Workspace-Id", "value": "{{workspace_id}}" },
-              { "key": "Content-Type", "value": "application/json" }
+              {
+                "key": "X-Workspace-Id",
+                "value": "{{workspace_id}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"query\": \"document ingestion pipeline\",\n  \"limit\": 5,\n  \"search_mode\": \"hybrid\",\n  \"alpha\": 0.6\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{api_base}}/v1/search",
-              "host": ["{{api_base}}"],
-              "path": ["v1", "search"]
+              "host": [
+                "{{api_base}}"
+              ],
+              "path": [
+                "v1",
+                "search"
+              ]
             },
             "description": "Hybrid search. `alpha` weights vector (1.0) vs keyword (0.0)."
           },
@@ -384,14 +618,45 @@
               "name": "200 OK",
               "originalRequest": {
                 "method": "POST",
-                "header": [{ "key": "X-Workspace-Id", "value": "{{workspace_id}}" }, { "key": "Content-Type", "value": "application/json" }],
-                "body": { "mode": "raw", "raw": "{\n  \"query\": \"document ingestion pipeline\",\n  \"limit\": 5,\n  \"search_mode\": \"hybrid\",\n  \"alpha\": 0.6\n}", "options": { "raw": { "language": "json" } } },
-                "url": { "raw": "{{api_base}}/v1/search", "host": ["{{api_base}}"], "path": ["v1", "search"] }
+                "header": [
+                  {
+                    "key": "X-Workspace-Id",
+                    "value": "{{workspace_id}}"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"query\": \"document ingestion pipeline\",\n  \"limit\": 5,\n  \"search_mode\": \"hybrid\",\n  \"alpha\": 0.6\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{api_base}}/v1/search",
+                  "host": [
+                    "{{api_base}}"
+                  ],
+                  "path": [
+                    "v1",
+                    "search"
+                  ]
+                }
               },
               "status": "OK",
               "code": 200,
               "_postman_previewlanguage": "json",
-              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
               "cookie": [],
               "body": "{\n  \"results\": [\n    {\n      \"chunk_id\": \"chunk-uuid-here\",\n      \"document_id\": \"3fa85f64-5717-4562-b3fc-2c963f66afa6\",\n      \"document_name\": \"sample.txt\",\n      \"content\": \"Section 3: The ingestion pipeline parses, chunks, and embeds documents...\",\n      \"score\": 0.79,\n      \"metadata\": { \"chunk_index\": 2, \"token_count\": 72 },\n      \"context_before\": null,\n      \"context_after\": null\n    }\n  ],\n  \"query\": \"document ingestion pipeline\",\n  \"total_results\": 1,\n  \"processing_time_ms\": 51.6,\n  \"search_mode\": \"hybrid\",\n  \"total_tokens\": 0\n}"
             }
@@ -413,18 +678,33 @@
           "request": {
             "method": "POST",
             "header": [
-              { "key": "X-Workspace-Id", "value": "{{workspace_id}}" },
-              { "key": "Content-Type", "value": "application/json" }
+              {
+                "key": "X-Workspace-Id",
+                "value": "{{workspace_id}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"query\": \"Weaviate PostgreSQL\",\n  \"limit\": 5,\n  \"search_mode\": \"keyword\"\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{api_base}}/v1/search",
-              "host": ["{{api_base}}"],
-              "path": ["v1", "search"]
+              "host": [
+                "{{api_base}}"
+              ],
+              "path": [
+                "v1",
+                "search"
+              ]
             },
             "description": "Keyword (BM25) search."
           },
@@ -433,14 +713,45 @@
               "name": "200 OK",
               "originalRequest": {
                 "method": "POST",
-                "header": [{ "key": "X-Workspace-Id", "value": "{{workspace_id}}" }, { "key": "Content-Type", "value": "application/json" }],
-                "body": { "mode": "raw", "raw": "{\n  \"query\": \"Weaviate PostgreSQL\",\n  \"limit\": 5,\n  \"search_mode\": \"keyword\"\n}", "options": { "raw": { "language": "json" } } },
-                "url": { "raw": "{{api_base}}/v1/search", "host": ["{{api_base}}"], "path": ["v1", "search"] }
+                "header": [
+                  {
+                    "key": "X-Workspace-Id",
+                    "value": "{{workspace_id}}"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"query\": \"Weaviate PostgreSQL\",\n  \"limit\": 5,\n  \"search_mode\": \"keyword\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{api_base}}/v1/search",
+                  "host": [
+                    "{{api_base}}"
+                  ],
+                  "path": [
+                    "v1",
+                    "search"
+                  ]
+                }
               },
               "status": "OK",
               "code": 200,
               "_postman_previewlanguage": "json",
-              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
               "cookie": [],
               "body": "{\n  \"results\": [\n    {\n      \"chunk_id\": \"chunk-uuid-here\",\n      \"document_id\": \"3fa85f64-5717-4562-b3fc-2c963f66afa6\",\n      \"document_name\": \"sample.txt\",\n      \"content\": \"Inherent stores metadata in PostgreSQL and vectors in Weaviate.\",\n      \"score\": 1.42,\n      \"metadata\": { \"chunk_index\": 3, \"token_count\": 58 },\n      \"context_before\": null,\n      \"context_after\": null\n    }\n  ],\n  \"query\": \"Weaviate PostgreSQL\",\n  \"total_results\": 1,\n  \"processing_time_ms\": 9.4,\n  \"search_mode\": \"keyword\",\n  \"total_tokens\": 0\n}"
             }
@@ -462,18 +773,33 @@
           "request": {
             "method": "POST",
             "header": [
-              { "key": "X-Workspace-Id", "value": "{{workspace_id}}" },
-              { "key": "Content-Type", "value": "application/json" }
+              {
+                "key": "X-Workspace-Id",
+                "value": "{{workspace_id}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"query\": \"supported file formats\",\n  \"limit\": 3,\n  \"include_context\": true,\n  \"context_window\": 2\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{api_base}}/v1/search",
-              "host": ["{{api_base}}"],
-              "path": ["v1", "search"]
+              "host": [
+                "{{api_base}}"
+              ],
+              "path": [
+                "v1",
+                "search"
+              ]
             },
             "description": "Includes surrounding chunks per result (`context_before`/`context_after`)."
           },
@@ -482,14 +808,45 @@
               "name": "200 OK",
               "originalRequest": {
                 "method": "POST",
-                "header": [{ "key": "X-Workspace-Id", "value": "{{workspace_id}}" }, { "key": "Content-Type", "value": "application/json" }],
-                "body": { "mode": "raw", "raw": "{\n  \"query\": \"supported file formats\",\n  \"limit\": 3,\n  \"include_context\": true,\n  \"context_window\": 2\n}", "options": { "raw": { "language": "json" } } },
-                "url": { "raw": "{{api_base}}/v1/search", "host": ["{{api_base}}"], "path": ["v1", "search"] }
+                "header": [
+                  {
+                    "key": "X-Workspace-Id",
+                    "value": "{{workspace_id}}"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"query\": \"supported file formats\",\n  \"limit\": 3,\n  \"include_context\": true,\n  \"context_window\": 2\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{api_base}}/v1/search",
+                  "host": [
+                    "{{api_base}}"
+                  ],
+                  "path": [
+                    "v1",
+                    "search"
+                  ]
+                }
               },
               "status": "OK",
               "code": 200,
               "_postman_previewlanguage": "json",
-              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
               "cookie": [],
               "body": "{\n  \"results\": [\n    {\n      \"chunk_id\": \"chunk-uuid-here\",\n      \"document_id\": \"3fa85f64-5717-4562-b3fc-2c963f66afa6\",\n      \"document_name\": \"sample.txt\",\n      \"content\": \"Section 4: Supported file formats include txt, md, csv, html, pdf, json, docx.\",\n      \"score\": 0.91,\n      \"metadata\": { \"chunk_index\": 2, \"token_count\": 60 },\n      \"context_before\": \"Section 3: The ingestion pipeline parses, chunks, and embeds documents...\",\n      \"context_after\": \"Section 5: Retrieval modes are semantic, hybrid, and keyword.\"\n    }\n  ],\n  \"query\": \"supported file formats\",\n  \"total_results\": 1,\n  \"processing_time_ms\": 47.8,\n  \"search_mode\": \"semantic\",\n  \"total_tokens\": 0\n}"
             }
@@ -511,18 +868,33 @@
           "request": {
             "method": "POST",
             "header": [
-              { "key": "X-Workspace-Id", "value": "{{workspace_id}}" },
-              { "key": "Content-Type", "value": "application/json" }
+              {
+                "key": "X-Workspace-Id",
+                "value": "{{workspace_id}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"query\": \"embeddings\",\n  \"limit\": 5,\n  \"document_ids\": [\"{{document_id}}\"]\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{api_base}}/v1/search",
-              "host": ["{{api_base}}"],
-              "path": ["v1", "search"]
+              "host": [
+                "{{api_base}}"
+              ],
+              "path": [
+                "v1",
+                "search"
+              ]
             },
             "description": "Restrict search to specific document IDs."
           },
@@ -531,14 +903,45 @@
               "name": "200 OK",
               "originalRequest": {
                 "method": "POST",
-                "header": [{ "key": "X-Workspace-Id", "value": "{{workspace_id}}" }, { "key": "Content-Type", "value": "application/json" }],
-                "body": { "mode": "raw", "raw": "{\n  \"query\": \"embeddings\",\n  \"limit\": 5,\n  \"document_ids\": [\"{{document_id}}\"]\n}", "options": { "raw": { "language": "json" } } },
-                "url": { "raw": "{{api_base}}/v1/search", "host": ["{{api_base}}"], "path": ["v1", "search"] }
+                "header": [
+                  {
+                    "key": "X-Workspace-Id",
+                    "value": "{{workspace_id}}"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"query\": \"embeddings\",\n  \"limit\": 5,\n  \"document_ids\": [\"{{document_id}}\"]\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{api_base}}/v1/search",
+                  "host": [
+                    "{{api_base}}"
+                  ],
+                  "path": [
+                    "v1",
+                    "search"
+                  ]
+                }
               },
               "status": "OK",
               "code": 200,
               "_postman_previewlanguage": "json",
-              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
               "cookie": [],
               "body": "{\n  \"results\": [\n    {\n      \"chunk_id\": \"chunk-uuid-here\",\n      \"document_id\": \"3fa85f64-5717-4562-b3fc-2c963f66afa6\",\n      \"document_name\": \"sample.txt\",\n      \"content\": \"Embeddings are generated per chunk and stored in Weaviate.\",\n      \"score\": 0.83,\n      \"metadata\": { \"chunk_index\": 1, \"token_count\": 49 },\n      \"context_before\": null,\n      \"context_after\": null\n    }\n  ],\n  \"query\": \"embeddings\",\n  \"total_results\": 1,\n  \"processing_time_ms\": 31.2,\n  \"search_mode\": \"semantic\",\n  \"total_tokens\": 0\n}"
             }
@@ -566,12 +969,21 @@
           "request": {
             "method": "GET",
             "header": [
-              { "key": "X-Workspace-Id", "value": "{{workspace_id}}" }
+              {
+                "key": "X-Workspace-Id",
+                "value": "{{workspace_id}}"
+              }
             ],
             "url": {
               "raw": "{{api_base}}/v1/chunks/{{document_id}}",
-              "host": ["{{api_base}}"],
-              "path": ["v1", "chunks", "{{document_id}}"]
+              "host": [
+                "{{api_base}}"
+              ],
+              "path": [
+                "v1",
+                "chunks",
+                "{{document_id}}"
+              ]
             },
             "description": "List all chunks for a document."
           },
@@ -580,13 +992,105 @@
               "name": "200 OK",
               "originalRequest": {
                 "method": "GET",
-                "header": [{ "key": "X-Workspace-Id", "value": "{{workspace_id}}" }],
-                "url": { "raw": "{{api_base}}/v1/chunks/{{document_id}}", "host": ["{{api_base}}"], "path": ["v1", "chunks", "{{document_id}}"] }
+                "header": [
+                  {
+                    "key": "X-Workspace-Id",
+                    "value": "{{workspace_id}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{api_base}}/v1/chunks/{{document_id}}",
+                  "host": [
+                    "{{api_base}}"
+                  ],
+                  "path": [
+                    "v1",
+                    "chunks",
+                    "{{document_id}}"
+                  ]
+                }
               },
               "status": "OK",
               "code": 200,
               "_postman_previewlanguage": "json",
-              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "[\n  {\n    \"id\": \"1\",\n    \"document_id\": \"3fa85f64-5717-4562-b3fc-2c963f66afa6\",\n    \"content\": \"Inherent Knowledge Base — Sample Text Document\\n\\nThis is a plain text file...\",\n    \"chunk_index\": 0,\n    \"token_count\": 141,\n    \"metadata\": null\n  }\n]"
+            }
+          ]
+        },
+        {
+          "name": "Get Single Chunk",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Workspace-Id",
+                "value": "{{workspace_id}}"
+              }
+            ],
+            "url": {
+              "raw": "{{api_base}}/v1/chunks/{{document_id}}/{{chunk_id}}",
+              "host": [
+                "{{api_base}}"
+              ],
+              "path": [
+                "v1",
+                "chunks",
+                "{{document_id}}",
+                "{{chunk_id}}"
+              ]
+            },
+            "description": "Fetch a single chunk by its id within a document. Returns 404 if the chunk does not exist or belongs to a workspace you cannot access."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "X-Workspace-Id",
+                    "value": "{{workspace_id}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{api_base}}/v1/chunks/{{document_id}}",
+                  "host": [
+                    "{{api_base}}"
+                  ],
+                  "path": [
+                    "v1",
+                    "chunks",
+                    "{{document_id}}"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
               "cookie": [],
               "body": "[\n  {\n    \"id\": \"1\",\n    \"document_id\": \"3fa85f64-5717-4562-b3fc-2c963f66afa6\",\n    \"content\": \"Inherent Knowledge Base — Sample Text Document\\n\\nThis is a plain text file...\",\n    \"chunk_index\": 0,\n    \"token_count\": 141,\n    \"metadata\": null\n  }\n]"
             }
@@ -608,12 +1112,22 @@
           "request": {
             "method": "GET",
             "header": [
-              { "key": "X-Workspace-Id", "value": "{{workspace_id}}" }
+              {
+                "key": "X-Workspace-Id",
+                "value": "{{workspace_id}}"
+              }
             ],
             "url": {
               "raw": "{{api_base}}/v1/chunks/{{document_id}}/context",
-              "host": ["{{api_base}}"],
-              "path": ["v1", "chunks", "{{document_id}}", "context"]
+              "host": [
+                "{{api_base}}"
+              ],
+              "path": [
+                "v1",
+                "chunks",
+                "{{document_id}}",
+                "context"
+              ]
             },
             "description": "Returns document metadata + all chunks combined into `full_text`. For MCP-style full-document context retrieval."
           },
@@ -622,13 +1136,34 @@
               "name": "200 OK",
               "originalRequest": {
                 "method": "GET",
-                "header": [{ "key": "X-Workspace-Id", "value": "{{workspace_id}}" }],
-                "url": { "raw": "{{api_base}}/v1/chunks/{{document_id}}/context", "host": ["{{api_base}}"], "path": ["v1", "chunks", "{{document_id}}", "context"] }
+                "header": [
+                  {
+                    "key": "X-Workspace-Id",
+                    "value": "{{workspace_id}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{api_base}}/v1/chunks/{{document_id}}/context",
+                  "host": [
+                    "{{api_base}}"
+                  ],
+                  "path": [
+                    "v1",
+                    "chunks",
+                    "{{document_id}}",
+                    "context"
+                  ]
+                }
               },
               "status": "OK",
               "code": 200,
               "_postman_previewlanguage": "json",
-              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
               "cookie": [],
               "body": "{\n  \"document\": {\n    \"id\": \"3fa85f64-5717-4562-b3fc-2c963f66afa6\",\n    \"name\": \"sample.txt\",\n    \"workspace_id\": \"ws_local_001\",\n    \"source_type\": \"upload\",\n    \"mime_type\": \"text/plain\",\n    \"size_bytes\": 842,\n    \"chunk_count\": 4,\n    \"status\": \"processed\",\n    \"created_at\": \"2024-01-15T10:00:00+00:00\",\n    \"updated_at\": \"2024-01-15T10:00:05+00:00\",\n    \"metadata\": null\n  },\n  \"chunks\": [\n    {\n      \"id\": \"1\",\n      \"document_id\": \"3fa85f64-5717-4562-b3fc-2c963f66afa6\",\n      \"content\": \"Inherent Knowledge Base — Sample Text Document...\",\n      \"chunk_index\": 0,\n      \"token_count\": 141,\n      \"metadata\": null\n    }\n  ],\n  \"full_text\": \"Inherent Knowledge Base — Sample Text Document\\n\\n...\\n\\nSection 4: Retrieval Modes\\n...\"\n}"
             }
@@ -642,9 +1177,21 @@
       "auth": {
         "type": "apikey",
         "apikey": [
-          { "key": "key", "value": "X-API-Key", "type": "string" },
-          { "key": "value", "value": "{{ingest_key}}", "type": "string" },
-          { "key": "in", "value": "header", "type": "string" }
+          {
+            "key": "key",
+            "value": "X-API-Key",
+            "type": "string"
+          },
+          {
+            "key": "value",
+            "value": "{{ingest_key}}",
+            "type": "string"
+          },
+          {
+            "key": "in",
+            "value": "header",
+            "type": "string"
+          }
         ]
       },
       "item": [
@@ -664,17 +1211,28 @@
           "request": {
             "method": "POST",
             "header": [
-              { "key": "Content-Type", "value": "application/json" }
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"document_id\": \"{{document_id}}\",\n  \"workspace_id\": \"{{workspace_id}}\",\n  \"user_id\": \"{{user_id}}\",\n  \"filename\": \"sample.txt\",\n  \"original_filename\": \"sample.txt\",\n  \"content_type\": \"text/plain\",\n  \"size_bytes\": 842,\n  \"storage_backend\": \"s3\",\n  \"storage_path\": \"{{workspace_id}}/{{document_id}}/sample.txt\"\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{ingest_base}}/ingest",
-              "host": ["{{ingest_base}}"],
-              "path": ["ingest"]
+              "host": [
+                "{{ingest_base}}"
+              ],
+              "path": [
+                "ingest"
+              ]
             },
             "description": "Manually (re-)ingest a file already in S3, bypassing the upload endpoint. Async by default: returns **202 Accepted** with a `workflow_id`. Returns **409** if a workflow is already running for this document, **503** if Temporal is unavailable."
           },
@@ -683,14 +1241,40 @@
               "name": "202 Accepted",
               "originalRequest": {
                 "method": "POST",
-                "header": [{ "key": "Content-Type", "value": "application/json" }],
-                "body": { "mode": "raw", "raw": "{\n  \"document_id\": \"{{document_id}}\",\n  \"workspace_id\": \"{{workspace_id}}\",\n  \"user_id\": \"{{user_id}}\",\n  \"filename\": \"sample.txt\",\n  \"original_filename\": \"sample.txt\",\n  \"content_type\": \"text/plain\",\n  \"size_bytes\": 842,\n  \"storage_backend\": \"s3\",\n  \"storage_path\": \"{{workspace_id}}/{{document_id}}/sample.txt\"\n}", "options": { "raw": { "language": "json" } } },
-                "url": { "raw": "{{ingest_base}}/ingest", "host": ["{{ingest_base}}"], "path": ["ingest"] }
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"document_id\": \"{{document_id}}\",\n  \"workspace_id\": \"{{workspace_id}}\",\n  \"user_id\": \"{{user_id}}\",\n  \"filename\": \"sample.txt\",\n  \"original_filename\": \"sample.txt\",\n  \"content_type\": \"text/plain\",\n  \"size_bytes\": 842,\n  \"storage_backend\": \"s3\",\n  \"storage_path\": \"{{workspace_id}}/{{document_id}}/sample.txt\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{ingest_base}}/ingest",
+                  "host": [
+                    "{{ingest_base}}"
+                  ],
+                  "path": [
+                    "ingest"
+                  ]
+                }
               },
               "status": "Accepted",
               "code": 202,
               "_postman_previewlanguage": "json",
-              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
               "cookie": [],
               "body": "{\n  \"workflow_id\": \"ingest-3fa85f64-5717-4562-b3fc-2c963f66afa6\",\n  \"document_id\": \"3fa85f64-5717-4562-b3fc-2c963f66afa6\",\n  \"status\": \"started\"\n}"
             }
@@ -712,19 +1296,33 @@
           "request": {
             "method": "POST",
             "header": [
-              { "key": "Content-Type", "value": "application/json" }
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"document_id\": \"{{document_id}}\",\n  \"workspace_id\": \"{{workspace_id}}\",\n  \"user_id\": \"{{user_id}}\",\n  \"filename\": \"sample.txt\",\n  \"original_filename\": \"sample.txt\",\n  \"content_type\": \"text/plain\",\n  \"size_bytes\": 842,\n  \"storage_backend\": \"s3\",\n  \"storage_path\": \"{{workspace_id}}/{{document_id}}/sample.txt\"\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{ingest_base}}/ingest?wait=true",
-              "host": ["{{ingest_base}}"],
-              "path": ["ingest"],
+              "host": [
+                "{{ingest_base}}"
+              ],
+              "path": [
+                "ingest"
+              ],
               "query": [
-                { "key": "wait", "value": "true" }
+                {
+                  "key": "wait",
+                  "value": "true"
+                }
               ]
             },
             "description": "Same as Trigger Ingestion but blocks until the workflow finishes and returns **200 OK** with the full result (`success`, `chunks_created`, `processing_time_ms`)."
@@ -734,14 +1332,46 @@
               "name": "200 OK",
               "originalRequest": {
                 "method": "POST",
-                "header": [{ "key": "Content-Type", "value": "application/json" }],
-                "body": { "mode": "raw", "raw": "{\n  \"document_id\": \"{{document_id}}\",\n  \"workspace_id\": \"{{workspace_id}}\",\n  \"user_id\": \"{{user_id}}\",\n  \"filename\": \"sample.txt\",\n  \"original_filename\": \"sample.txt\",\n  \"content_type\": \"text/plain\",\n  \"size_bytes\": 842,\n  \"storage_backend\": \"s3\",\n  \"storage_path\": \"{{workspace_id}}/{{document_id}}/sample.txt\"\n}", "options": { "raw": { "language": "json" } } },
-                "url": { "raw": "{{ingest_base}}/ingest?wait=true", "host": ["{{ingest_base}}"], "path": ["ingest"], "query": [{ "key": "wait", "value": "true" }] }
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"document_id\": \"{{document_id}}\",\n  \"workspace_id\": \"{{workspace_id}}\",\n  \"user_id\": \"{{user_id}}\",\n  \"filename\": \"sample.txt\",\n  \"original_filename\": \"sample.txt\",\n  \"content_type\": \"text/plain\",\n  \"size_bytes\": 842,\n  \"storage_backend\": \"s3\",\n  \"storage_path\": \"{{workspace_id}}/{{document_id}}/sample.txt\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{ingest_base}}/ingest?wait=true",
+                  "host": [
+                    "{{ingest_base}}"
+                  ],
+                  "path": [
+                    "ingest"
+                  ],
+                  "query": [
+                    {
+                      "key": "wait",
+                      "value": "true"
+                    }
+                  ]
+                }
               },
               "status": "OK",
               "code": 200,
               "_postman_previewlanguage": "json",
-              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
               "cookie": [],
               "body": "{\n  \"workflow_id\": \"ingest-3fa85f64-5717-4562-b3fc-2c963f66afa6\",\n  \"document_id\": \"3fa85f64-5717-4562-b3fc-2c963f66afa6\",\n  \"success\": true,\n  \"chunks_created\": 4,\n  \"processing_time_ms\": 1820,\n  \"error\": null\n}"
             }
@@ -765,8 +1395,14 @@
             "header": [],
             "url": {
               "raw": "{{ingest_base}}/ingest/{{document_id}}/status",
-              "host": ["{{ingest_base}}"],
-              "path": ["ingest", "{{document_id}}", "status"]
+              "host": [
+                "{{ingest_base}}"
+              ],
+              "path": [
+                "ingest",
+                "{{document_id}}",
+                "status"
+              ]
             },
             "description": "Query the real-time progress of an ingestion workflow (`step`, `progress`, `chunks_created`). Returns 404 if no workflow exists or it is no longer queryable."
           },
@@ -776,12 +1412,27 @@
               "originalRequest": {
                 "method": "GET",
                 "header": [],
-                "url": { "raw": "{{ingest_base}}/ingest/{{document_id}}/status", "host": ["{{ingest_base}}"], "path": ["ingest", "{{document_id}}", "status"] }
+                "url": {
+                  "raw": "{{ingest_base}}/ingest/{{document_id}}/status",
+                  "host": [
+                    "{{ingest_base}}"
+                  ],
+                  "path": [
+                    "ingest",
+                    "{{document_id}}",
+                    "status"
+                  ]
+                }
               },
               "status": "OK",
               "code": 200,
               "_postman_previewlanguage": "json",
-              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
               "cookie": [],
               "body": "{\n  \"workflow_id\": \"ingest-3fa85f64-5717-4562-b3fc-2c963f66afa6\",\n  \"document_id\": \"3fa85f64-5717-4562-b3fc-2c963f66afa6\",\n  \"step\": \"embedding\",\n  \"progress\": 60,\n  \"chunks_created\": 4\n}"
             }
@@ -803,17 +1454,30 @@
           "request": {
             "method": "PATCH",
             "header": [
-              { "key": "Content-Type", "value": "application/json" }
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"content\": \"Updated chunk text goes here.\"\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{ingest_base}}/chunks/{{document_id}}/0",
-              "host": ["{{ingest_base}}"],
-              "path": ["chunks", "{{document_id}}", "0"]
+              "host": [
+                "{{ingest_base}}"
+              ],
+              "path": [
+                "chunks",
+                "{{document_id}}",
+                "0"
+              ]
             },
             "description": "Edit chunk #0 of a document via a Temporal workflow (updates PostgreSQL + re-embeds in Weaviate). Replace the trailing `0` with the target chunk index. Returns 409 if an edit is already in progress, 500 if the edit fails."
           },
@@ -822,14 +1486,42 @@
               "name": "200 OK",
               "originalRequest": {
                 "method": "PATCH",
-                "header": [{ "key": "Content-Type", "value": "application/json" }],
-                "body": { "mode": "raw", "raw": "{\n  \"content\": \"Updated chunk text goes here.\"\n}", "options": { "raw": { "language": "json" } } },
-                "url": { "raw": "{{ingest_base}}/chunks/{{document_id}}/0", "host": ["{{ingest_base}}"], "path": ["chunks", "{{document_id}}", "0"] }
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"content\": \"Updated chunk text goes here.\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{ingest_base}}/chunks/{{document_id}}/0",
+                  "host": [
+                    "{{ingest_base}}"
+                  ],
+                  "path": [
+                    "chunks",
+                    "{{document_id}}",
+                    "0"
+                  ]
+                }
               },
               "status": "OK",
               "code": 200,
               "_postman_previewlanguage": "json",
-              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
               "cookie": [],
               "body": "{\n  \"document_id\": \"3fa85f64-5717-4562-b3fc-2c963f66afa6\",\n  \"chunk_index\": 0,\n  \"updated\": true\n}"
             }
@@ -853,8 +1545,13 @@
             "header": [],
             "url": {
               "raw": "{{ingest_base}}/lineage/{{document_id}}",
-              "host": ["{{ingest_base}}"],
-              "path": ["lineage", "{{document_id}}"]
+              "host": [
+                "{{ingest_base}}"
+              ],
+              "path": [
+                "lineage",
+                "{{document_id}}"
+              ]
             },
             "description": "Get data lineage for a document: an ordered list of ingestion pipeline step events (what happened during ingestion)."
           },
@@ -864,12 +1561,26 @@
               "originalRequest": {
                 "method": "GET",
                 "header": [],
-                "url": { "raw": "{{ingest_base}}/lineage/{{document_id}}", "host": ["{{ingest_base}}"], "path": ["lineage", "{{document_id}}"] }
+                "url": {
+                  "raw": "{{ingest_base}}/lineage/{{document_id}}",
+                  "host": [
+                    "{{ingest_base}}"
+                  ],
+                  "path": [
+                    "lineage",
+                    "{{document_id}}"
+                  ]
+                }
               },
               "status": "OK",
               "code": 200,
               "_postman_previewlanguage": "json",
-              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
               "cookie": [],
               "body": "{\n  \"document_id\": \"3fa85f64-5717-4562-b3fc-2c963f66afa6\",\n  \"events\": [\n    {\n      \"id\": 1,\n      \"workflow_run_id\": \"ingest-3fa85f64-5717-4562-b3fc-2c963f66afa6\",\n      \"document_id\": \"3fa85f64-5717-4562-b3fc-2c963f66afa6\",\n      \"workspace_id\": \"ws_local_001\",\n      \"event_type\": \"document_fetched\",\n      \"status\": \"completed\",\n      \"duration_ms\": 120,\n      \"metadata\": null,\n      \"created_at\": \"2024-01-15T10:00:01+00:00\"\n    },\n    {\n      \"id\": 2,\n      \"workflow_run_id\": \"ingest-3fa85f64-5717-4562-b3fc-2c963f66afa6\",\n      \"document_id\": \"3fa85f64-5717-4562-b3fc-2c963f66afa6\",\n      \"workspace_id\": \"ws_local_001\",\n      \"event_type\": \"chunks_embedded\",\n      \"status\": \"completed\",\n      \"duration_ms\": 1620,\n      \"metadata\": { \"chunks_created\": 4 },\n      \"created_at\": \"2024-01-15T10:00:05+00:00\"\n    }\n  ]\n}"
             }
@@ -893,11 +1604,22 @@
             "header": [],
             "url": {
               "raw": "{{ingest_base}}/documents/{{document_id}}?workspace_id={{workspace_id}}&user_id={{user_id}}",
-              "host": ["{{ingest_base}}"],
-              "path": ["documents", "{{document_id}}"],
+              "host": [
+                "{{ingest_base}}"
+              ],
+              "path": [
+                "documents",
+                "{{document_id}}"
+              ],
               "query": [
-                { "key": "workspace_id", "value": "{{workspace_id}}" },
-                { "key": "user_id", "value": "{{user_id}}" }
+                {
+                  "key": "workspace_id",
+                  "value": "{{workspace_id}}"
+                },
+                {
+                  "key": "user_id",
+                  "value": "{{user_id}}"
+                }
               ]
             },
             "description": "DESTRUCTIVE. Deletes the document from PostgreSQL and its chunks from Weaviate. Both `workspace_id` and `user_id` query params are required. Weaviate cleanup is best-effort (`weaviate_cleaned=false` if it fails). Ordered after the read requests so it does not break the other chained requests. Returns 404 if the document is not in PostgreSQL."
@@ -908,12 +1630,36 @@
               "originalRequest": {
                 "method": "DELETE",
                 "header": [],
-                "url": { "raw": "{{ingest_base}}/documents/{{document_id}}?workspace_id={{workspace_id}}&user_id={{user_id}}", "host": ["{{ingest_base}}"], "path": ["documents", "{{document_id}}"], "query": [{ "key": "workspace_id", "value": "{{workspace_id}}" }, { "key": "user_id", "value": "{{user_id}}" }] }
+                "url": {
+                  "raw": "{{ingest_base}}/documents/{{document_id}}?workspace_id={{workspace_id}}&user_id={{user_id}}",
+                  "host": [
+                    "{{ingest_base}}"
+                  ],
+                  "path": [
+                    "documents",
+                    "{{document_id}}"
+                  ],
+                  "query": [
+                    {
+                      "key": "workspace_id",
+                      "value": "{{workspace_id}}"
+                    },
+                    {
+                      "key": "user_id",
+                      "value": "{{user_id}}"
+                    }
+                  ]
+                }
               },
               "status": "OK",
               "code": 200,
               "_postman_previewlanguage": "json",
-              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
               "cookie": [],
               "body": "{\n  \"deleted\": true,\n  \"document_id\": \"3fa85f64-5717-4562-b3fc-2c963f66afa6\",\n  \"weaviate_cleaned\": true\n}"
             }
@@ -941,12 +1687,26 @@
                 "header": [],
                 "url": {
                   "raw": "{{ingest_base}}/dead-letter?status=pending&limit=50",
-                  "host": ["{{ingest_base}}"],
-                  "path": ["dead-letter"],
+                  "host": [
+                    "{{ingest_base}}"
+                  ],
+                  "path": [
+                    "dead-letter"
+                  ],
                   "query": [
-                    { "key": "workspace_id", "value": "{{workspace_id}}", "disabled": true },
-                    { "key": "status", "value": "pending" },
-                    { "key": "limit", "value": "50" }
+                    {
+                      "key": "workspace_id",
+                      "value": "{{workspace_id}}",
+                      "disabled": true
+                    },
+                    {
+                      "key": "status",
+                      "value": "pending"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "50"
+                    }
                   ]
                 },
                 "description": "List dead-letter jobs. Optional filters: `workspace_id`, `status` (default `pending`), `limit` (1–200, default 50)."
@@ -957,12 +1717,35 @@
                   "originalRequest": {
                     "method": "GET",
                     "header": [],
-                    "url": { "raw": "{{ingest_base}}/dead-letter?status=pending&limit=50", "host": ["{{ingest_base}}"], "path": ["dead-letter"], "query": [{ "key": "status", "value": "pending" }, { "key": "limit", "value": "50" }] }
+                    "url": {
+                      "raw": "{{ingest_base}}/dead-letter?status=pending&limit=50",
+                      "host": [
+                        "{{ingest_base}}"
+                      ],
+                      "path": [
+                        "dead-letter"
+                      ],
+                      "query": [
+                        {
+                          "key": "status",
+                          "value": "pending"
+                        },
+                        {
+                          "key": "limit",
+                          "value": "50"
+                        }
+                      ]
+                    }
                   },
                   "status": "OK",
                   "code": 200,
                   "_postman_previewlanguage": "json",
-                  "header": [{ "key": "Content-Type", "value": "application/json" }],
+                  "header": [
+                    {
+                      "key": "Content-Type",
+                      "value": "application/json"
+                    }
+                  ],
                   "cookie": [],
                   "body": "{\n  \"jobs\": [\n    {\n      \"id\": 1,\n      \"document_id\": \"3fa85f64-5717-4562-b3fc-2c963f66afa6\",\n      \"workspace_id\": \"ws_local_001\",\n      \"user_id\": \"user_local_001\",\n      \"workflow_run_id\": \"ingest-3fa85f64-5717-4562-b3fc-2c963f66afa6\",\n      \"original_message\": { \"document_id\": \"3fa85f64-5717-4562-b3fc-2c963f66afa6\", \"workspace_id\": \"ws_local_001\" },\n      \"error_message\": \"Embedding service timeout\",\n      \"error_type\": \"TimeoutError\",\n      \"retry_count\": 0,\n      \"status\": \"pending\",\n      \"created_at\": \"2024-01-15T10:05:00+00:00\",\n      \"updated_at\": \"2024-01-15T10:05:00+00:00\"\n    }\n  ],\n  \"total\": 1\n}"
                 }
@@ -986,8 +1769,13 @@
                 "header": [],
                 "url": {
                   "raw": "{{ingest_base}}/dead-letter/1",
-                  "host": ["{{ingest_base}}"],
-                  "path": ["dead-letter", "1"]
+                  "host": [
+                    "{{ingest_base}}"
+                  ],
+                  "path": [
+                    "dead-letter",
+                    "1"
+                  ]
                 },
                 "description": "Get a single dead-letter job by numeric `job_id`. Returns 404 if not found. Replace `1` with a real job ID from the list."
               },
@@ -997,12 +1785,26 @@
                   "originalRequest": {
                     "method": "GET",
                     "header": [],
-                    "url": { "raw": "{{ingest_base}}/dead-letter/1", "host": ["{{ingest_base}}"], "path": ["dead-letter", "1"] }
+                    "url": {
+                      "raw": "{{ingest_base}}/dead-letter/1",
+                      "host": [
+                        "{{ingest_base}}"
+                      ],
+                      "path": [
+                        "dead-letter",
+                        "1"
+                      ]
+                    }
                   },
                   "status": "OK",
                   "code": 200,
                   "_postman_previewlanguage": "json",
-                  "header": [{ "key": "Content-Type", "value": "application/json" }],
+                  "header": [
+                    {
+                      "key": "Content-Type",
+                      "value": "application/json"
+                    }
+                  ],
                   "cookie": [],
                   "body": "{\n  \"id\": 1,\n  \"document_id\": \"3fa85f64-5717-4562-b3fc-2c963f66afa6\",\n  \"workspace_id\": \"ws_local_001\",\n  \"user_id\": \"user_local_001\",\n  \"workflow_run_id\": \"ingest-3fa85f64-5717-4562-b3fc-2c963f66afa6\",\n  \"original_message\": { \"document_id\": \"3fa85f64-5717-4562-b3fc-2c963f66afa6\", \"workspace_id\": \"ws_local_001\" },\n  \"error_message\": \"Embedding service timeout\",\n  \"error_type\": \"TimeoutError\",\n  \"retry_count\": 0,\n  \"status\": \"pending\",\n  \"created_at\": \"2024-01-15T10:05:00+00:00\",\n  \"updated_at\": \"2024-01-15T10:05:00+00:00\"\n}"
                 }
@@ -1026,8 +1828,14 @@
                 "header": [],
                 "url": {
                   "raw": "{{ingest_base}}/dead-letter/1/retry",
-                  "host": ["{{ingest_base}}"],
-                  "path": ["dead-letter", "1", "retry"]
+                  "host": [
+                    "{{ingest_base}}"
+                  ],
+                  "path": [
+                    "dead-letter",
+                    "1",
+                    "retry"
+                  ]
                 },
                 "description": "Retry a dead-letter job by re-publishing its original message. Only jobs with status `pending` or `retrying` can be retried (else 409). Returns 404 if the job is missing, 500 if re-trigger fails (status reset to pending)."
               },
@@ -1037,12 +1845,27 @@
                   "originalRequest": {
                     "method": "POST",
                     "header": [],
-                    "url": { "raw": "{{ingest_base}}/dead-letter/1/retry", "host": ["{{ingest_base}}"], "path": ["dead-letter", "1", "retry"] }
+                    "url": {
+                      "raw": "{{ingest_base}}/dead-letter/1/retry",
+                      "host": [
+                        "{{ingest_base}}"
+                      ],
+                      "path": [
+                        "dead-letter",
+                        "1",
+                        "retry"
+                      ]
+                    }
                   },
                   "status": "OK",
                   "code": 200,
                   "_postman_previewlanguage": "json",
-                  "header": [{ "key": "Content-Type", "value": "application/json" }],
+                  "header": [
+                    {
+                      "key": "Content-Type",
+                      "value": "application/json"
+                    }
+                  ],
                   "cookie": [],
                   "body": "{\n  \"retried\": true,\n  \"job_id\": 1,\n  \"new_workflow_id\": \"ingest-3fa85f64-5717-4562-b3fc-2c963f66afa6\"\n}"
                 }
@@ -1066,8 +1889,14 @@
                 "header": [],
                 "url": {
                   "raw": "{{ingest_base}}/dead-letter/1/abandon",
-                  "host": ["{{ingest_base}}"],
-                  "path": ["dead-letter", "1", "abandon"]
+                  "host": [
+                    "{{ingest_base}}"
+                  ],
+                  "path": [
+                    "dead-letter",
+                    "1",
+                    "abandon"
+                  ]
                 },
                 "description": "Mark a dead-letter job as permanently abandoned. Returns 404 if the job is missing."
               },
@@ -1077,12 +1906,27 @@
                   "originalRequest": {
                     "method": "POST",
                     "header": [],
-                    "url": { "raw": "{{ingest_base}}/dead-letter/1/abandon", "host": ["{{ingest_base}}"], "path": ["dead-letter", "1", "abandon"] }
+                    "url": {
+                      "raw": "{{ingest_base}}/dead-letter/1/abandon",
+                      "host": [
+                        "{{ingest_base}}"
+                      ],
+                      "path": [
+                        "dead-letter",
+                        "1",
+                        "abandon"
+                      ]
+                    }
                   },
                   "status": "OK",
                   "code": 200,
                   "_postman_previewlanguage": "json",
-                  "header": [{ "key": "Content-Type", "value": "application/json" }],
+                  "header": [
+                    {
+                      "key": "Content-Type",
+                      "value": "application/json"
+                    }
+                  ],
                   "cookie": [],
                   "body": "{\n  \"abandoned\": true,\n  \"job_id\": 1\n}"
                 }
