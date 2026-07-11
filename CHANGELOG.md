@@ -1,10 +1,39 @@
 # Changelog
 
 All notable changes to Inherent are documented here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project has not
-yet cut a tagged release, so everything sits under **Unreleased**.
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased] — Org-readiness program
+## [Unreleased]
+
+### Changed
+
+- **MCP tool registry (#100).** Every MCP tool is now declared exactly once in
+  a `_TOOLS` registry (schema + permission + handler); `list_tools`,
+  permission enforcement, and dispatch all derive from it. Previously a tool
+  had to be registered in 4 disjoint places, so it could be advertised but
+  unusable (or callable but hidden) with no compile-time or test signal. No
+  behavior change — same tools, schemas, and permissions.
+
+### Added
+
+- **REST ↔ MCP failure-parity contract suite** (`tests/contract/
+  test_failure_parity.py`): dependency-failure tests (MQ down, vector store
+  down) asserting both surfaces leave the same document state and surface an
+  error. Includes `xfail` pins for #98 (MCP refresh strands documents as
+  'pending' on MQ failure — fix in PR #96) and #99 (upload's compensating
+  mark-failed is not retried), so those contracts flip to enforced the moment
+  the fixes land.
+- **CLAUDE.md defect-prevention rules** from the #98/#99/#100 retrospective:
+  pattern sweep after bug fixes, dual-surface failure parity, compensated
+  state mutations, registry-only MCP tool registration, and friction/unfiled-
+  defect reporting.
+
+## [0.1.0] — 2026-07-09 — Org-readiness program
+
+The first tagged release. Repository-level release tag; per-service package
+versions (independent, see [releasing.md](docs/maintainers/releasing.md))
+moved to `inh-contracts` 2.0.0, `inh-ingestion-svc` 0.5.0, and
+`inh-public-api-svc` 0.2.0 alongside this tag.
 
 A milestone-by-milestone push to make Inherent a self-hostable, permission-aware
 agent **memory substrate** an organization can run on day one. Delivered as a
@@ -15,6 +44,25 @@ and [ADR 0001](docs/adr/0001-agent-memory-substrate.md).
 
 ### Added
 
+- **Evals v1 — traffic-mined retrieval evals (#91).** Operators can now get a
+  defensible retrieval-quality number for their own corpus without authoring a
+  golden set. Search responses carry an `event_id`; consuming agents (or the
+  new `docs/examples/eval_trial.py` trial-labeling script) report a verdict via
+  `POST /v1/evals/feedback` (MCP: `report_feedback`), and positive feedback
+  auto-promotes the query into a labeled eval case. `POST /v1/evals/runs`
+  replays the active cases as a keyword-vs-semantic-vs-hybrid mode comparison
+  scored with dependency-free recall@k / MRR / nDCG; `GET /v1/evals/scorecard`
+  (MCP: `get_retrieval_health`) gives the day-one summary (answer rate, corpus
+  gaps, labeled-case count). Rounds out with `GET /v1/evals/cases`,
+  `PATCH /v1/evals/cases/{id}`, `GET /v1/evals/runs/{id}`, and
+  `DELETE /v1/evals/events`. Capture is on by default (write-behind, never
+  blocks or fails a search), per-tenant opt-out via
+  `EVAL_CAPTURE_DISABLED_WORKSPACES`, raw events purge after
+  `EVAL_RETENTION_DAYS` (default 30) or on demand. Adds migration `015_evals.sql`.
+  Design boundary — retrieval-layer evals only, no answer/task grading, no LLM
+  judge, no second service — is recorded in
+  [ADR 0003](docs/adr/0003-traffic-mined-retrieval-evals.md); quickstart in
+  [docs/getting-started/local.md](docs/getting-started/local.md#6-judge-retrieval-quality-evals).
 - **Document delete — REST + MCP (#87 P1).** An agent can finally retract
   knowledge: `DELETE /v1/documents/{id}` and the MCP `delete_document` tool
   remove a document's Weaviate objects (tenant-scoped), its PostgreSQL row +

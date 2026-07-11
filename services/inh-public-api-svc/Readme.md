@@ -81,6 +81,13 @@ The MCP server uses stdio rather than an HTTP transport in the current implement
 | `/v1/chunks/{doc_id}` | `GET` | List chunks for a document |
 | `/v1/chunks/{doc_id}/{chunk_id}` | `GET` | Fetch a single chunk by id |
 | `/v1/chunks/{doc_id}/context` | `GET` | Reconstruct document context from chunks |
+| `/v1/evals/feedback` | `POST` | Report a verdict on a captured search event; auto-promotes to a labeled eval case |
+| `/v1/evals/scorecard` | `GET` | Workspace retrieval scorecard (answer rate, corpus gaps, labeled-case count) |
+| `/v1/evals/cases` | `GET` | Page through labeled eval cases for the workspace |
+| `/v1/evals/cases/{case_id}` | `PATCH` | Enable or disable an eval case |
+| `/v1/evals/runs` | `POST` | Start a keyword/semantic/hybrid mode-comparison eval run (202, runs in background) |
+| `/v1/evals/runs/{run_id}` | `GET` | Fetch an eval run's summary + per-case metrics |
+| `/v1/evals/events` | `DELETE` | Purge captured search events for the workspace |
 
 ## MCP Tools
 
@@ -98,6 +105,8 @@ The MCP server uses stdio rather than an HTTP transport in the current implement
 | `explain_lineage` | Explain a document's (or chunk's) provenance and freshness |
 | `refresh_stale_source` | Re-ingest an already-uploaded document (clear staleness) |
 | `delete_document` | Permanently delete a document (vectors + chunks + stored bytes) |
+| `report_feedback` | Record a verdict on a captured search event (closes the evals feedback loop) |
+| `get_retrieval_health` | Retrieve the workspace's retrieval scorecard |
 
 ## Validation Commands
 
@@ -116,7 +125,7 @@ src/
   api/         FastAPI routes
   config/      Settings and constants
   core/        Shared exceptions and response helpers
-  mcp/         MCP server implementation
+  mcp_server/  MCP server implementation
   middleware/  Auth, rate limiting, audit, and error handling
   models/      Request and response models
   services/    Database, search, MQ, storage, metrics, and auth logic

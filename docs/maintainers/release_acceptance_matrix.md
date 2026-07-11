@@ -69,6 +69,7 @@ Locally you can reproduce it with `make dev` (stack up) followed by
 | Stable shared event + naming contracts between services            | contracts suite (#8) |
 | Vector-backed similarity search returns relevant passages          | compose e2e (ingestion-to-search) |
 | End-to-end: upload → process → searchable                          | compose e2e (`integration.yml`) |
+| Traffic-mined retrieval evals (feedback capture, scorecard, mode-comparison runs) | public-api `contract` (#3); compose e2e flywheel (`integration.yml`) |
 
 ## Pre-tag flow
 

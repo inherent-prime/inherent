@@ -1,23 +1,22 @@
 """MCP Server implementation for AI agent integration.
 
+Tool registry (#100)
+--------------------
+Every tool is declared exactly once, in the ``_TOOLS`` registry at the bottom
+of this module: name -> ToolDef(description, input_schema, permission,
+handler). ``list_tools`` and the ``call_tool`` dispatcher both iterate the
+registry, so a tool cannot be advertised without being callable, callable
+without being advertised, or dispatched without a permission — the four
+previously disjoint registration points (permission map, Tool() entry,
+dispatch elif, schema) cannot drift.
+
 Permission parity (#14)
 -----------------------
 Every tool validates the supplied API key and then checks that the key carries
 the permission the equivalent REST route requires (see ``src/services/auth.py``
 and the per-route dependencies). A key missing the required permission gets a
 clear ``Error: ...`` response and the tool body NEVER runs — exactly like the
-REST 403 path. Permission map:
-
-    search_documents / search_memory   -> "search"
-    get_document_context / list_documents -> "read"
-    get_citations                       -> "search"
-    verify_claim                        -> "read"
-    explain_lineage                     -> "read"
-    refresh_stale_source                -> "write"
-    report_feedback / get_retrieval_health -> "search"
-    delete_document                     -> "write"
-    get_document / list_chunks          -> "read"
-    upload_document                     -> "write"
+REST 403 path. Each tool's permission lives on its ``_TOOLS`` entry.
 
 Search-feature parity (#14)
 ---------------------------
@@ -45,6 +44,8 @@ validate/dedup/store/enqueue pipeline via ``src.services.document_intake``.
 """
 
 import json
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -68,28 +69,29 @@ from src.utils import get_logger
 
 logger = get_logger(__name__)
 
+# A tool handler receives the already-authenticated key and the raw arguments.
+ToolHandler = Callable[["APIKeyInfo", dict], Awaitable[list[TextContent]]]
+
 # The text MIME types upload_document accepts, derived from the shared upload
 # allow-list so the MCP gate can never drift from what intake_document permits.
 # Binary types in ALLOWED_MIME_TYPES (PDF/DOCX/PNG) stay REST-only by design.
 SUPPORTED_TEXT_MIME_TYPES = tuple(sorted(t for t in ALLOWED_MIME_TYPES if t.startswith("text/")))
 
-# Required permission per tool — mirrors the REST per-route dependencies (#14).
-_TOOL_PERMISSIONS: dict[str, str] = {
-    "search_documents": "search",
-    "search_memory": "search",
-    "get_citations": "search",
-    "get_document_context": "read",
-    "list_documents": "read",
-    "verify_claim": "read",
-    "explain_lineage": "read",
-    "refresh_stale_source": "write",
-    "report_feedback": "search",
-    "get_retrieval_health": "search",
-    "delete_document": "write",
-    "get_document": "read",
-    "list_chunks": "read",
-    "upload_document": "write",
-}
+
+@dataclass(frozen=True)
+class ToolDef:
+    """Everything the server needs to know about one MCP tool (#100).
+
+    Declared once in the ``_TOOLS`` registry (bottom of this module, after the
+    handlers it references). ``list_tools`` and ``call_tool`` both iterate the
+    registry, so advertisement, dispatch, schema, and permission can't drift.
+    """
+
+    description: str
+    input_schema: dict
+    permission: str  # mirrors the REST per-route dependency (#14)
+    handler: ToolHandler
+
 
 # Schema shared by the two search-shaped tools so they stay identical (#14/#40).
 _SEARCH_INPUT_SCHEMA = {
@@ -176,233 +178,10 @@ def create_mcp_server() -> Server:
 
     @server.list_tools()
     async def list_tools() -> list[Tool]:
-        """List available MCP tools with versioned, documented input schemas."""
+        """List available MCP tools straight from the registry (#100)."""
         return [
-            Tool(
-                name="search_documents",
-                description="Search for relevant documents and chunks using semantic, hybrid, or "
-                "keyword search. Omit workspace_id to search across ALL your workspaces. "
-                "Requires 'search' permission.",
-                inputSchema=_SEARCH_INPUT_SCHEMA,
-            ),
-            Tool(
-                name="search_memory",
-                description="Memory primitive: retrieve evidence chunks for a query (canonical "
-                "agent search). Same parameters and behaviour as search_documents; returns "
-                "structured results with scores and provenance. Requires 'search' permission.",
-                inputSchema=_SEARCH_INPUT_SCHEMA,
-            ),
-            Tool(
-                name="get_citations",
-                description="Run a search and return the claim-level Citation objects attached to "
-                "each result (chunk_id, document, character spans, score, provenance, freshness) "
-                "so an answer can cite its evidence. Requires 'search' permission.",
-                inputSchema=_SEARCH_INPUT_SCHEMA,
-            ),
-            Tool(
-                name="get_document_context",
-                description="Get the full content of a document for context. Requires 'read' "
-                "permission.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "api_key": {"type": "string", "description": "Your Inherent API key"},
-                        "document_id": {
-                            "type": "string",
-                            "description": "The document ID to retrieve",
-                        },
-                    },
-                    "required": ["api_key", "document_id"],
-                },
-            ),
-            Tool(
-                name="list_documents",
-                description="List all documents. Omit workspace_id to list from ALL your "
-                "workspaces. Requires 'read' permission.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "api_key": {"type": "string", "description": "Your Inherent API key"},
-                        "workspace_id": {
-                            "type": "string",
-                            "description": "Optional: specific workspace. If omitted, lists from all your workspaces.",
-                        },
-                        "page": {
-                            "type": "integer",
-                            "description": "Page number (default 1)",
-                            "default": 1,
-                        },
-                        "page_size": {
-                            "type": "integer",
-                            "description": "Items per page (default 20)",
-                            "default": 20,
-                        },
-                    },
-                    "required": ["api_key"],
-                },
-            ),
-            Tool(
-                name="verify_claim",
-                description="Memory primitive: verify how well a list of evidence passages "
-                "supports a claim (offline lexical strategy). Returns support_level "
-                "(strong/weak/none), score and reason. Requires 'read' permission.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "api_key": {"type": "string", "description": "Your Inherent API key"},
-                        "claim": {
-                            "type": "string",
-                            "description": "The natural-language claim to verify",
-                        },
-                        "evidence": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Candidate supporting passages (e.g. retrieved chunk contents)",
-                        },
-                    },
-                    "required": ["api_key", "claim"],
-                },
-            ),
-            Tool(
-                name="explain_lineage",
-                description="Memory primitive: explain a document's (or chunk's) provenance and "
-                "freshness — source_uri, content_hash, ingested_at, is_stale and document_name — "
-                "from already-ingested data. Requires 'read' permission.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "api_key": {"type": "string", "description": "Your Inherent API key"},
-                        "document_id": {
-                            "type": "string",
-                            "description": "The document ID to explain",
-                        },
-                        "chunk_id": {
-                            "type": "string",
-                            "description": "Optional: a specific chunk ID for chunk-level provenance",
-                        },
-                    },
-                    "required": ["api_key", "document_id"],
-                },
-            ),
-            Tool(
-                name="refresh_stale_source",
-                description="Memory primitive: re-ingest an already-uploaded document to clear "
-                "stale evidence (same logic as POST /v1/documents/{id}/refresh). Requires "
-                "'write' permission.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "api_key": {"type": "string", "description": "Your Inherent API key"},
-                        "document_id": {
-                            "type": "string",
-                            "description": "The document ID to refresh (re-ingest)",
-                        },
-                    },
-                    "required": ["api_key", "document_id"],
-                },
-            ),
-            Tool(
-                name="report_feedback",
-                description="ALWAYS call this after using search results: report whether the "
-                "returned evidence answered your query. Your feedback builds this workspace's "
-                "retrieval eval set and improves future quality measurement. Pass the "
-                "event_id from the search response. Requires 'search' permission.",
-                inputSchema=_FEEDBACK_INPUT_SCHEMA,
-            ),
-            Tool(
-                name="get_retrieval_health",
-                description="Get the retrieval-quality scorecard for a workspace: answer rate, "
-                "verdict distribution, corpus gaps, labeled-case count, and last eval run. Use "
-                "it to calibrate how much to trust search results from this corpus. Requires "
-                "'search' permission.",
-                inputSchema=_HEALTH_INPUT_SCHEMA,
-            ),
-            Tool(
-                name="delete_document",
-                description="Memory primitive: permanently delete a document and all of its "
-                "derived data — vectors, chunks, and stored bytes (same logic as DELETE "
-                "/v1/documents/{id}). Use to retract knowledge that should no longer be "
-                "retrievable. Requires 'write' permission.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "api_key": {"type": "string", "description": "Your Inherent API key"},
-                        "document_id": {
-                            "type": "string",
-                            "description": "The document ID to delete",
-                        },
-                    },
-                    "required": ["api_key", "document_id"],
-                },
-            ),
-            Tool(
-                name="get_document",
-                description="Get a single document's metadata (name, source_type, mime_type, "
-                "size, chunk_count, status, timestamps) — same data as GET "
-                "/v1/documents/{id}. Requires 'read' permission.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "api_key": {"type": "string", "description": "Your Inherent API key"},
-                        "document_id": {
-                            "type": "string",
-                            "description": "The document ID to retrieve",
-                        },
-                    },
-                    "required": ["api_key", "document_id"],
-                },
-            ),
-            Tool(
-                name="list_chunks",
-                description="List all chunks belonging to a document (id, content, chunk_index, "
-                "token_count) — same data as GET /v1/chunks/{document_id}. Requires 'read' "
-                "permission.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "api_key": {"type": "string", "description": "Your Inherent API key"},
-                        "document_id": {
-                            "type": "string",
-                            "description": "The document ID whose chunks to list",
-                        },
-                    },
-                    "required": ["api_key", "document_id"],
-                },
-            ),
-            Tool(
-                name="upload_document",
-                description="Upload TEXT content for ingestion (same pipeline as POST "
-                "/v1/documents, minus binary files — PDF/DOCX/PNG uploads are REST-only by "
-                "design). Content is UTF-8 text; content_type must be one of text/plain, "
-                "text/markdown (default), text/csv, text/html. Requires 'write' permission.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "api_key": {"type": "string", "description": "Your Inherent API key"},
-                        "filename": {
-                            "type": "string",
-                            "description": "Name to store the document under",
-                        },
-                        "content": {
-                            "type": "string",
-                            "description": "The document's text content (UTF-8)",
-                        },
-                        "content_type": {
-                            "type": "string",
-                            "description": "MIME type of the content; must be text/* "
-                            "(default text/markdown). Binary types are rejected — use "
-                            "POST /v1/documents for binary uploads.",
-                            "default": "text/markdown",
-                        },
-                        "workspace_id": {
-                            "type": "string",
-                            "description": "Optional: target workspace. Required if your key "
-                            "has access to more than one workspace.",
-                        },
-                    },
-                    "required": ["api_key", "filename", "content"],
-                },
-            ),
+            Tool(name=name, description=tool.description, inputSchema=tool.input_schema)
+            for name, tool in _TOOLS.items()
         ]
 
     @server.call_tool()
@@ -420,47 +199,23 @@ def create_mcp_server() -> Server:
             if not key_info:
                 return [TextContent(type="text", text="Error: Invalid or expired API key")]
 
+            # Registry lookup (#100): advertisement, permission, and dispatch
+            # all come from the same ToolDef, so they cannot disagree.
+            tool = _TOOLS.get(name)
+            if tool is None:
+                return [TextContent(type="text", text=f"Error: Unknown tool '{name}'")]
+
             # Permission parity with REST (#14): check BEFORE executing the body
             # so a denied key never reaches the search/db/verify services.
-            required = _TOOL_PERMISSIONS.get(name)
-            if required is None:
-                return [TextContent(type="text", text=f"Error: Unknown tool '{name}'")]
-            if not key_info.has_permission(required):
+            if not key_info.has_permission(tool.permission):
                 return [
                     TextContent(
                         type="text",
-                        text=f"Error: API key does not have '{required}' permission",
+                        text=f"Error: API key does not have '{tool.permission}' permission",
                     )
                 ]
 
-            if name in ("search_documents", "search_memory"):
-                return await _handle_search(key_info, arguments)
-            elif name == "get_citations":
-                return await _handle_get_citations(key_info, arguments)
-            elif name == "get_document_context":
-                return await _handle_get_context(key_info, arguments)
-            elif name == "list_documents":
-                return await _handle_list_documents(key_info, arguments)
-            elif name == "verify_claim":
-                return await _handle_verify_claim(key_info, arguments)
-            elif name == "explain_lineage":
-                return await _handle_explain_lineage(key_info, arguments)
-            elif name == "refresh_stale_source":
-                return await _handle_refresh_stale_source(key_info, arguments)
-            elif name == "report_feedback":
-                return await _handle_report_feedback(key_info, arguments)
-            elif name == "get_retrieval_health":
-                return await _handle_get_retrieval_health(key_info, arguments)
-            elif name == "delete_document":
-                return await _handle_delete_document(key_info, arguments)
-            elif name == "get_document":
-                return await _handle_get_document(key_info, arguments)
-            elif name == "list_chunks":
-                return await _handle_list_chunks(key_info, arguments)
-            elif name == "upload_document":
-                return await _handle_upload_document(key_info, arguments)
-            else:  # pragma: no cover - guarded by _TOOL_PERMISSIONS above
-                return [TextContent(type="text", text=f"Error: Unknown tool '{name}'")]
+            return await tool.handler(key_info, arguments)
 
         except Exception as e:
             logger.error("MCP tool error", tool=name, error=str(e))
@@ -1064,6 +819,260 @@ async def _handle_upload_document(key_info: APIKeyInfo, arguments: dict) -> list
         content_type=content_type,
     )
     return [TextContent(type="text", text=result.model_dump_json())]
+
+
+# =============================================================================
+# Tool registry — THE single place a tool exists (#100)
+# =============================================================================
+# Adding a tool = adding one entry here (plus its handler above). list_tools,
+# permission enforcement, and dispatch all derive from this dict, so a tool can
+# never be advertised-but-unusable or callable-but-hidden. Defined after the
+# handlers so the entries can reference them directly.
+
+_TOOLS: dict[str, ToolDef] = {
+    "search_documents": ToolDef(
+        description="Search for relevant documents and chunks using semantic, hybrid, or "
+        "keyword search. Omit workspace_id to search across ALL your workspaces. "
+        "Requires 'search' permission.",
+        input_schema=_SEARCH_INPUT_SCHEMA,
+        permission="search",
+        handler=_handle_search,
+    ),
+    "search_memory": ToolDef(
+        description="Memory primitive: retrieve evidence chunks for a query (canonical "
+        "agent search). Same parameters and behaviour as search_documents; returns "
+        "structured results with scores and provenance. Requires 'search' permission.",
+        input_schema=_SEARCH_INPUT_SCHEMA,
+        permission="search",
+        handler=_handle_search,
+    ),
+    "get_citations": ToolDef(
+        description="Run a search and return the claim-level Citation objects attached to "
+        "each result (chunk_id, document, character spans, score, provenance, freshness) "
+        "so an answer can cite its evidence. Requires 'search' permission.",
+        input_schema=_SEARCH_INPUT_SCHEMA,
+        permission="search",
+        handler=_handle_get_citations,
+    ),
+    "get_document_context": ToolDef(
+        description="Get the full content of a document for context. Requires 'read' "
+        "permission.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "api_key": {"type": "string", "description": "Your Inherent API key"},
+                "document_id": {
+                    "type": "string",
+                    "description": "The document ID to retrieve",
+                },
+            },
+            "required": ["api_key", "document_id"],
+        },
+        permission="read",
+        handler=_handle_get_context,
+    ),
+    "list_documents": ToolDef(
+        description="List all documents. Omit workspace_id to list from ALL your "
+        "workspaces. Requires 'read' permission.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "api_key": {"type": "string", "description": "Your Inherent API key"},
+                "workspace_id": {
+                    "type": "string",
+                    "description": "Optional: specific workspace. If omitted, lists from all your workspaces.",
+                },
+                "page": {
+                    "type": "integer",
+                    "description": "Page number (default 1)",
+                    "default": 1,
+                },
+                "page_size": {
+                    "type": "integer",
+                    "description": "Items per page (default 20)",
+                    "default": 20,
+                },
+            },
+            "required": ["api_key"],
+        },
+        permission="read",
+        handler=_handle_list_documents,
+    ),
+    "verify_claim": ToolDef(
+        description="Memory primitive: verify how well a list of evidence passages "
+        "supports a claim (offline lexical strategy). Returns support_level "
+        "(strong/weak/none), score and reason. Requires 'read' permission.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "api_key": {"type": "string", "description": "Your Inherent API key"},
+                "claim": {
+                    "type": "string",
+                    "description": "The natural-language claim to verify",
+                },
+                "evidence": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Candidate supporting passages (e.g. retrieved chunk contents)",
+                },
+            },
+            "required": ["api_key", "claim"],
+        },
+        permission="read",
+        handler=_handle_verify_claim,
+    ),
+    "explain_lineage": ToolDef(
+        description="Memory primitive: explain a document's (or chunk's) provenance and "
+        "freshness — source_uri, content_hash, ingested_at, is_stale and document_name — "
+        "from already-ingested data. Requires 'read' permission.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "api_key": {"type": "string", "description": "Your Inherent API key"},
+                "document_id": {
+                    "type": "string",
+                    "description": "The document ID to explain",
+                },
+                "chunk_id": {
+                    "type": "string",
+                    "description": "Optional: a specific chunk ID for chunk-level provenance",
+                },
+            },
+            "required": ["api_key", "document_id"],
+        },
+        permission="read",
+        handler=_handle_explain_lineage,
+    ),
+    "refresh_stale_source": ToolDef(
+        description="Memory primitive: re-ingest an already-uploaded document to clear "
+        "stale evidence (same logic as POST /v1/documents/{id}/refresh). Requires "
+        "'write' permission.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "api_key": {"type": "string", "description": "Your Inherent API key"},
+                "document_id": {
+                    "type": "string",
+                    "description": "The document ID to refresh (re-ingest)",
+                },
+            },
+            "required": ["api_key", "document_id"],
+        },
+        permission="write",
+        handler=_handle_refresh_stale_source,
+    ),
+    "report_feedback": ToolDef(
+        description="ALWAYS call this after using search results: report whether the "
+        "returned evidence answered your query. Your feedback builds this workspace's "
+        "retrieval eval set and improves future quality measurement. Pass the "
+        "event_id from the search response. Requires 'search' permission.",
+        input_schema=_FEEDBACK_INPUT_SCHEMA,
+        permission="search",
+        handler=_handle_report_feedback,
+    ),
+    "get_retrieval_health": ToolDef(
+        description="Get the retrieval-quality scorecard for a workspace: answer rate, "
+        "verdict distribution, corpus gaps, labeled-case count, and last eval run. Use "
+        "it to calibrate how much to trust search results from this corpus. Requires "
+        "'search' permission.",
+        input_schema=_HEALTH_INPUT_SCHEMA,
+        permission="search",
+        handler=_handle_get_retrieval_health,
+    ),
+    "delete_document": ToolDef(
+        description="Memory primitive: permanently delete a document and all of its "
+        "derived data — vectors, chunks, and stored bytes (same logic as DELETE "
+        "/v1/documents/{id}). Use to retract knowledge that should no longer be "
+        "retrievable. Requires 'write' permission.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "api_key": {"type": "string", "description": "Your Inherent API key"},
+                "document_id": {
+                    "type": "string",
+                    "description": "The document ID to delete",
+                },
+            },
+            "required": ["api_key", "document_id"],
+        },
+        permission="write",
+        handler=_handle_delete_document,
+    ),
+    "get_document": ToolDef(
+        description="Get a single document's metadata (name, source_type, mime_type, "
+        "size, chunk_count, status, timestamps) — same data as GET "
+        "/v1/documents/{id}. Requires 'read' permission.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "api_key": {"type": "string", "description": "Your Inherent API key"},
+                "document_id": {
+                    "type": "string",
+                    "description": "The document ID to retrieve",
+                },
+            },
+            "required": ["api_key", "document_id"],
+        },
+        permission="read",
+        handler=_handle_get_document,
+    ),
+    "list_chunks": ToolDef(
+        description="List all chunks belonging to a document (id, content, chunk_index, "
+        "token_count) — same data as GET /v1/chunks/{document_id}. Requires 'read' "
+        "permission.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "api_key": {"type": "string", "description": "Your Inherent API key"},
+                "document_id": {
+                    "type": "string",
+                    "description": "The document ID whose chunks to list",
+                },
+            },
+            "required": ["api_key", "document_id"],
+        },
+        permission="read",
+        handler=_handle_list_chunks,
+    ),
+    "upload_document": ToolDef(
+        description="Upload TEXT content for ingestion (same pipeline as POST "
+        "/v1/documents, minus binary files — PDF/DOCX/PNG uploads are REST-only by "
+        "design). Content is UTF-8 text; content_type must be one of text/plain, "
+        "text/markdown (default), text/csv, text/html. Requires 'write' permission.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "api_key": {"type": "string", "description": "Your Inherent API key"},
+                "filename": {
+                    "type": "string",
+                    "description": "Name to store the document under",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The document's text content (UTF-8)",
+                },
+                "content_type": {
+                    "type": "string",
+                    "description": "MIME type of the content; must be text/* "
+                    "(default text/markdown). Binary types are rejected — use "
+                    "POST /v1/documents for binary uploads.",
+                    "default": "text/markdown",
+                },
+                "workspace_id": {
+                    "type": "string",
+                    "description": "Optional: target workspace. Required if your key "
+                    "has access to more than one workspace.",
+                },
+            },
+            "required": ["api_key", "filename", "content"],
+        },
+        permission="write",
+        handler=_handle_upload_document,
+    ),
+}
+
+# Derived view kept for callers/tests that only need the permission map.
+_TOOL_PERMISSIONS: dict[str, str] = {name: tool.permission for name, tool in _TOOLS.items()}
 
 
 async def run_mcp_server() -> None:

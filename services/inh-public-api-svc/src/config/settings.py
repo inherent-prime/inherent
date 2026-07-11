@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     mcp_port: int = 8001
     log_level: str = "INFO"
     environment: str = "development"
-    version: str = "0.1.0"
+    version: str = "0.2.0"
 
     # Database (Read-only access)
     database_url: str = "postgresql://postgres:postgres@localhost:5432/knowledge_base"

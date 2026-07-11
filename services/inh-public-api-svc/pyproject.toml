@@ -1,6 +1,6 @@
 [project]
 name = "inh-public-api-svc"
-version = "0.1.0"
+version = "0.2.0"
 description = "Customer-facing API and MCP server for Inherent Knowledge Base"
 readme = "Readme.md"
 requires-python = ">=3.11"

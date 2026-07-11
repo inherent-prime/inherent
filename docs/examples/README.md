@@ -87,7 +87,7 @@ curl -s "$API_BASE/health/ready" | jq .
 {
   "status": "healthy",
   "timestamp": "2024-01-15T10:00:00.000000+00:00",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "service": "inh-public-api-svc",
   "checks": {
     "database": { "status": "healthy", "latency_ms": 4.2 },

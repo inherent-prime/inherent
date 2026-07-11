@@ -55,6 +55,7 @@ It gives you:
 - PostgreSQL as structured storage for documents and chunks
 - Weaviate as vector index for similarity search
 - REST API for search, document listing, chunk access, and context retrieval
+- Traffic-mined retrieval evals — turn real search traffic and agent feedback into a labeled eval set, then score recall/MRR/nDCG across keyword, semantic, and hybrid modes on your own corpus, no golden-set authoring required
 - Local-first developer setup with Docker Compose
 
 ## What's In The Repo
