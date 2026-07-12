@@ -5,6 +5,18 @@ All notable changes to Inherent are documented here. The format follows
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.5.0] — 2026-07-12 — Org-readiness program
+
+Repository-level release tag, continuing from the last published tag
+`v0.4.1` (an out-of-band ingestion-svc hotfix — see below). `v0.1.0`/
+`v0.1.0-rc1` and `v0.2.0` were never fully published (see
+[releasing.md](docs/maintainers/releasing.md) for the image-publishing flow);
+this is the first repository-level tag published since `v0.4.1`. Per-service
+package versions (independent of this tag) moved to `inh-contracts` 2.0.0,
+`inh-ingestion-svc` 0.5.0, and `inh-public-api-svc` 0.2.0 alongside this tag.
+
 ### Fixed
 
 - **Compensating mark-failed writes are retried (#99).** When an MQ publish
@@ -18,14 +30,6 @@ All notable changes to Inherent are documented here. The format follows
   `tests/contract/test_failure_parity.py` is now enforced (xfail removed) and
   the refresh double-failure pair is pinned on both surfaces. Durable lesson
   recorded in [docs/developer/learnings.md](docs/developer/learnings.md).
-
-## [0.2.0] — 2026-07-09 — Org-readiness program
-
-Repository-level release tag (`v0.1.0`/`v0.1.0-rc1` were already used by an
-earlier, narrower release — see [releasing.md](docs/maintainers/releasing.md)
-for the image-publishing flow). Per-service package versions (independent of
-this tag) moved to `inh-contracts` 2.0.0, `inh-ingestion-svc` 0.5.0, and
-`inh-public-api-svc` 0.2.0 alongside this tag.
 
 A milestone-by-milestone push to make Inherent a self-hostable, permission-aware
 agent **memory substrate** an organization can run on day one. Delivered as a
@@ -230,3 +234,23 @@ A codescan-driven pass fixing correctness, isolation, and durability defects.
   filename dedup — verbatim copies collapse onto one document. Adds migration
   `010_document_content_hash.sql` (nullable `content_hash` column + lookup
   index) plus unit coverage and a compose E2E content-flood regression test.
+
+## [0.4.1] — 2026-07-04 — ingestion-svc NUL-byte fix
+
+Out-of-band repository-level hotfix tag, published ahead of the 0.5.0
+org-readiness release above (this entry was backfilled retroactively — the
+tag shipped without a changelog entry at the time).
+
+### Fixed
+
+- **Ingestion failed permanently on NUL bytes in extracted text (#84).**
+  Postgres `text`/`varchar` columns reject the NUL (0x00) byte, so
+  `StagingService.write_text()` raised `ValueError`, the `extract_text`
+  activity retried 3x deterministically, and the workflow failed — leaving
+  the document stuck with no chunks or embeddings. The quality check already
+  flagged this as a `no_binary_content` warning but only at warning severity,
+  so the pipeline proceeded with the raw text anyway. The activity now strips
+  NUL bytes after the quality check runs (so the diagnostic still sees the
+  raw signal) and before `write_text`; a document that is entirely NUL bytes
+  still fails the existing empty-text guard. Bumps `inh-ingestion-svc`
+  0.4.0 → 0.4.1.
