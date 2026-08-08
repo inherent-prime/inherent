@@ -337,6 +337,9 @@ class TestMemoryPrimitives:
         assert payload["is_stale"] is False
 
     async def test_explain_lineage_blocks_foreign_document(self):
+        """Undifferentiated not-found, not a distinguishable "you don't have
+        access" (#138 blocker-1 follow-up: that distinction was a
+        cross-workspace existence oracle)."""
         doc = Document(
             id="doc-x",
             name="foreign.pdf",
@@ -357,7 +360,7 @@ class TestMemoryPrimitives:
             {"api_key": "k", "document_id": "doc-x", "_key_info": _key(permissions=["read"])},
             mock_db,
         )
-        assert "don't have access" in result[0].text
+        assert result[0].text == "Error: Document 'doc-x' not found"
         mock_db.get_document_chunks_by_doc_id.assert_not_called()
 
     async def test_refresh_stale_source_republishes_event(self):

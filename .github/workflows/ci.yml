@@ -38,6 +38,19 @@ jobs:
             security: uv run bandit -c pyproject.toml -r src
             test: uv run pytest
             cov_fail_under: 45
+          # inh-contracts previously ran in NO automation (#132 item 4): a
+          # change to a shared constant like DEFAULT_S3_REGION or the
+          # Weaviate-naming derivation was caught by nothing, only a
+          # one-sided drift downstream. No Postgres dependency; runs in <1s.
+          - service: inh-contracts
+            path: services/inh-contracts
+            python-version: "3.11"
+            lint: uv run ruff check src tests
+            format: uv run black --check src tests
+            typecheck: ""
+            security: ""
+            test: uv run pytest
+            cov_fail_under: 95
 
     services:
       postgres:
@@ -122,17 +135,59 @@ jobs:
         if: always()
         run: echo "### ${{ matrix.service }} checks passed :white_check_mark:" >> "$GITHUB_STEP_SUMMARY"
 
+  # Root-level tests/ (#183): pins repo-root artifacts (docker-compose.yml's
+  # init behavior, the initial migration) that don't belong to either
+  # service. There is no root pyproject.toml/uv.lock -- these tests have no
+  # project dependencies (stdlib pathlib only, reading files as text), so a
+  # pinned ephemeral `uvx` pytest run is enough; no `uv sync`/venv needed.
+  # Previously ran in NO workflow and NO Makefile target, so a regression in
+  # the Postgres init script had no CI signal.
+  root-tests:
+    name: root tests/ (repo-level pins)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # Matches the service-checks matrix's python-version pin, even though
+      # this suite has no project of its own to sync.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      # Pin pytest's version to match the services' dev dependency (see
+      # docs/developer/dependencies.md) instead of floating to whatever uvx
+      # resolves latest, for reproducible runs.
+      - name: Test
+        run: uvx 'pytest==9.0.2' tests/ -q
+
+      - name: Report check summary
+        if: always()
+        run: echo "### root tests/ checks passed :white_check_mark:" >> "$GITHUB_STEP_SUMMARY"
+
   required-tests:
     name: Required tests before merge
     runs-on: ubuntu-latest
     needs:
       - service-checks
+      - root-tests
     if: always()
     steps:
       - name: Verify service checks passed
         run: |
           if [ "${{ needs.service-checks.result }}" != "success" ]; then
             echo "::error::One or more service checks failed. Do not merge until CI is green."
+            exit 1
+          fi
+
+          if [ "${{ needs.root-tests.result }}" != "success" ]; then
+            echo "::error::Root-level tests/ failed. Do not merge until CI is green."
             exit 1
           fi
 

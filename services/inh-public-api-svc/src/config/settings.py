@@ -3,8 +3,11 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from inh_contracts.defaults import DEFAULT_MONGODB_URI, DEFAULT_S3_BUCKET, DEFAULT_S3_REGION
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from src.config.constants import DEFAULT_DATABASE_NAME
 
 
 class Settings(BaseSettings):
@@ -39,11 +42,17 @@ class Settings(BaseSettings):
     version: str = "0.2.0"
 
     # Database (reads + document/eval writes; not a read-only role)
-    database_url: str = "postgresql://postgres:postgres@localhost:5432/knowledge_base"
+    database_url: str = f"postgresql://postgres:postgres@localhost:5432/{DEFAULT_DATABASE_NAME}"
 
     # MongoDB (Read-only — for workspace ownership lookups; control-plane truth)
+    # Default: see inh_contracts.defaults.DEFAULT_MONGODB_URI (#176) -- the
+    # single source of truth shared with ingestion-svc's mongodb_uri field.
+    # The URI carries no database path segment on purpose: mongodb_db_name
+    # below is what actually selects the database (client[mongodb_db_name],
+    # see services/mongo_client.py), so the path is not a second source of
+    # truth that needs to independently agree with it.
     mongodb_uri: str = Field(
-        default="mongodb://localhost:27017/main",
+        default=DEFAULT_MONGODB_URI,
         alias="MONGODB_URI",
         description="MongoDB connection URI; reads workspaces collection for ownership checks",
     )
@@ -59,7 +68,7 @@ class Settings(BaseSettings):
     use_cloud_sql_connector: bool = False
     # Format: project:region:instance
     cloud_sql_instance: str | None = None
-    cloud_sql_database: str = "knowledge_base"
+    cloud_sql_database: str = DEFAULT_DATABASE_NAME
     cloud_sql_user: str = "ingestion_user"
     # Password for Cloud SQL (optional - if not set, uses IAM authentication)
     cloud_sql_password: str | None = None
@@ -108,8 +117,25 @@ class Settings(BaseSettings):
     )
     aws_access_key_id: str = Field(default="", description="S3 access key ID")
     aws_secret_access_key: str = Field(default="", description="S3 secret access key")
-    aws_s3_bucket: str = Field(default="inherent-documents", description="S3 bucket for documents")
-    aws_s3_region: str = Field(default="eu-central-1", description="S3 region")
+    # Default: see inh_contracts.defaults.DEFAULT_S3_BUCKET (#176) -- the
+    # single source of truth shared with ingestion-svc's storage_bucket field.
+    aws_s3_bucket: str = Field(default=DEFAULT_S3_BUCKET, description="S3 bucket for documents")
+    # Default: see inh_contracts.defaults.DEFAULT_S3_REGION (#132) -- the single
+    # source of truth shared with ingestion-svc's s3_region field.
+    #
+    # Alias: ingestion-svc reads AWS_REGION (#132 blocker 1). Without accepting
+    # it here too, an operator who follows docs/deploy/production.md step 3
+    # ("set AWS_REGION=<your-region>") configures ingestion but leaves this
+    # service on DEFAULT_S3_REGION -- the exact drift #132 exists to prevent,
+    # now reintroduced one layer up (env var NAME instead of default VALUE).
+    # AWS_S3_REGION is tried first so it still overrides a stray AWS_REGION
+    # when an operator deliberately wants this service on a different region.
+    aws_s3_region: str = Field(
+        default=DEFAULT_S3_REGION,
+        validation_alias=AliasChoices("AWS_S3_REGION", "AWS_REGION"),
+        description="S3 region. AWS_S3_REGION wins if set; otherwise falls back "
+        "to AWS_REGION (the var ingestion-svc reads) so one var configures both.",
+    )
 
     # MQ (Redis / Valkey)
     mq_redis_url: str = Field(
@@ -229,23 +255,29 @@ class Settings(BaseSettings):
         ),
     )
 
-    # Per-document diversification (#146) — EXPERIMENTAL, OFF BY DEFAULT.
+    # Per-document diversification (#146) — ON BY DEFAULT since 2026-08-06.
     #
     # Unlike the #47 scaffolding above, this method IS implemented (it's a
     # deterministic round-robin over already-fetched candidates, not a new
-    # model or index); it stays gated behind the same eval-gate policy
-    # (no default-on without a documented eval improvement vs the hybrid
-    # baseline + maintainer approval) because it changes ranking order, which
-    # the compose retrieval-eval gate needs to measure before this can default
-    # on. See docs/advanced-indexes.md and ADR 0004.
+    # model or index). It was gated behind the same eval-gate policy as the
+    # #47 methods (no default-on without a documented eval improvement vs the
+    # hybrid baseline + maintainer approval) because it changes ranking
+    # order; both conditions are now met (recall@5 0.5->1.0 on the
+    # multi_doc_crowding golden-corpus category, maintainer approval granted
+    # 2026-08-06) so the default flipped. Set ENABLE_DIVERSIFICATION=false to
+    # restore the pre-2026-08-06 (pre-#146-default-flip) behavior. See
+    # docs/advanced-indexes.md and ADR 0004 (including its 2026-08-06
+    # amendment).
     enable_diversification: bool = Field(
-        default=False,
+        default=True,
         description=(
-            "EXPERIMENTAL (#146), off by default. Opt-in per-document result "
+            "On by default since 2026-08-06 (#146). Per-document result "
             "diversification: round-robins candidates across document_id before "
             "truncating to the page size, so one highly-relevant document can't "
-            "crowd out every other result. Requires a documented eval improvement "
-            "vs the hybrid baseline + maintainer approval before it may default on."
+            "crowd out every other result. Cleared the eval-gate policy "
+            "(documented eval improvement vs the hybrid baseline + maintainer "
+            "approval, see ADR 0004) before defaulting on. Set to false to "
+            "restore the pre-#146-default-flip ranking behavior."
         ),
     )
     diversification_over_fetch_multiplier: int = Field(
@@ -303,8 +335,27 @@ class Settings(BaseSettings):
         """Parse the opt-out CSV into a set (whitespace/empty entries dropped)."""
         return {w.strip() for w in self.eval_capture_disabled_workspaces.split(",") if w.strip()}
 
-    # Health Checks
-    health_check_timeout_seconds: float = 5.0
+    # Health Checks (#203)
+    # Two independent knobs, not one: the readiness probe already treats
+    # Postgres and Weaviate as having different tolerances (see
+    # api/v1/health.py's 100ms-vs-500ms "high latency" thresholds -- Weaviate
+    # vector search is expected to be slower than a Postgres round-trip), so
+    # a shared single timeout would force one dependency's probe to inherit
+    # the other's budget. The previous single `health_check_timeout_seconds`
+    # knob was declared but had ZERO call sites -- health.py read hardcoded
+    # DATABASE_HEALTH_CHECK_TIMEOUT / WEAVIATE_HEALTH_CHECK_TIMEOUT constants
+    # instead, so setting it silently did nothing (#203). Deleted rather than
+    # kept alongside these two, to avoid leaving a second unread knob.
+    database_health_check_timeout_seconds: float = Field(
+        default=5.0,
+        alias="DATABASE_HEALTH_CHECK_TIMEOUT_SECONDS",
+        description="Timeout for the Postgres health-check query used by GET /health/ready",
+    )
+    weaviate_health_check_timeout_seconds: float = Field(
+        default=5.0,
+        alias="WEAVIATE_HEALTH_CHECK_TIMEOUT_SECONDS",
+        description="Timeout for the Weaviate health-check call used by GET /health/ready",
+    )
 
     # Audit Logging
     audit_log_enabled: bool = True

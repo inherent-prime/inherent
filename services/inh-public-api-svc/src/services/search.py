@@ -186,11 +186,25 @@ class SearchService:
             finally:
                 self._client = None
 
-    async def is_connected(self) -> bool:
-        """Check if Weaviate is reachable."""
+    async def is_connected(self, timeout: float) -> bool:
+        """Check if Weaviate is reachable.
+
+        Args:
+            timeout: Per-request timeout (seconds) for the readiness call.
+                REQUIRED, not defaulted -- this used to hardcode its own 5.0s
+                fallback, a third copy of the health-check timeout alongside
+                the two `constants.py` used to carry (#203). A default here
+                would silently reintroduce exactly that: any future caller
+                that omits the kwarg gets a hardcoded value instead of an
+                error, so an operator's configured
+                ``WEAVIATE_HEALTH_CHECK_TIMEOUT_SECONDS`` would again not
+                reach this call. The one real caller
+                (``api/v1/health.py::_check_weaviate``) always passes
+                ``settings.weaviate_health_check_timeout_seconds`` explicitly.
+        """
         try:
             client = await self._get_client()
-            response = await client.get("/v1/.well-known/ready", timeout=5.0)
+            response = await client.get("/v1/.well-known/ready", timeout=timeout)
             return response.status_code == 200
         except Exception:
             return False
@@ -641,7 +655,8 @@ class SearchService:
         # Truncate back to the requested page size after min_score filtering
         # (the query may have over-fetched to avoid under-filling) (#31), or
         # diversify-then-truncate when enable_diversification is on (#146,
-        # EXPERIMENTAL, off by default -- see settings.py).
+        # on by default since 2026-08-06 -- see settings.py; an operator can
+        # still set ENABLE_DIVERSIFICATION=false to opt out).
         if settings.enable_diversification:
             return self._diversify_by_document(results, request.limit)
         return results[: request.limit]
@@ -650,7 +665,8 @@ class SearchService:
     def _diversify_by_document(results: list[SearchResult], limit: int) -> list[SearchResult]:
         """Round-robin diversify candidates across ``document_id`` (#146).
 
-        EXPERIMENTAL, gated by ``enable_diversification`` (default False).
+        Gated by ``enable_diversification`` (default True since 2026-08-06;
+        an operator can set ENABLE_DIVERSIFICATION=false to disable it).
         Widening the fetch (see the diversification branch in
         ``_build_graphql``) surfaces more per-document candidates than the
         page size; without this step, a naive score-sorted truncate to
@@ -707,7 +723,7 @@ class SearchService:
         # page could come back short even when more above-threshold matches
         # exist. Results are truncated back to request.limit after filtering (#31).
         fetch_limit = min(100, request.limit * 3) if request.min_score > 0 else request.limit
-        # Diversification (#146, EXPERIMENTAL, off by default) needs a wider
+        # Diversification (#146, on by default since 2026-08-06) needs a wider
         # candidate pool to diversify across -- fetching exactly `limit` rows
         # leaves nothing to round-robin against once the top document's
         # chunks fill the page. Takes the max with the min_score branch above

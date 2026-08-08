@@ -79,12 +79,16 @@ nav:
       - REST API: reference/rest-api.md
       - MCP tools: reference/mcp-tools.md
       - Configuration: reference/configuration.md
+      - Supported file types: reference/file-types.md
   - Release Notes: release-notes.md
   - Architecture:
+      - System overview: architecture/overview.md
       - ADR index: adr/README.md
       - 0001 — Agent memory substrate: adr/0001-agent-memory-substrate.md
       - 0002 — Weaviate multi-tenancy scale: adr/0002-weaviate-multi-tenancy-scale.md
       - 0003 — Traffic-mined retrieval evals: adr/0003-traffic-mined-retrieval-evals.md
+      - 0004 — Per-document result diversification: adr/0004-per-document-diversification.md
+      - 0005 — ZIP archive expansion fan-out: adr/0005-zip-archive-fanout.md
       - Threat model — RAG poisoning: threat-models/rag-poisoning-injection.md
   - Community:
       - Contributing: community/contributing.md

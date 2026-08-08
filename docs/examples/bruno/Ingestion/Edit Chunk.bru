@@ -5,9 +5,13 @@ meta {
 }
 
 patch {
-  url: {{ingest_base}}/chunks/{{document_id}}/0
+  url: {{ingest_base}}/chunks/{{document_id}}/0?workspace_id={{workspace_id}}
   body: json
   auth: inherit
+}
+
+params:query {
+  workspace_id: {{workspace_id}}
 }
 
 body:json {
@@ -17,12 +21,16 @@ body:json {
 }
 
 tests {
-  test("status is 200, 409 (in progress), or 500 (failed)", function() {
-    expect([200, 409, 500]).to.include(res.status);
+  test("status is 200, 404 (not owned), 409 (in progress), or 500 (failed)", function() {
+    expect([200, 404, 409, 500]).to.include(res.status);
   });
 }
 
 docs {
   Edit chunk #0 via a Temporal workflow (updates PostgreSQL + re-embeds in Weaviate). Replace the
-  trailing `0` with the target chunk index. 409 if an edit is already in progress, 500 if it fails.
+  trailing `0` with the target chunk index. `workspace_id` query param is required and must own
+  `document_id` (#134). 404 if the document isn't found in that workspace or `chunk_index` is out
+  of range, 409 if an edit is already in progress. 500 means PostgreSQL updated but the Weaviate
+  re-embed did not (even after retries) -- the new content is durable but search may return stale
+  results for this chunk until a retry succeeds; also recorded as a GET /lineage ingestion event.
 }

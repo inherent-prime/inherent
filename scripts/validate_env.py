@@ -221,10 +221,21 @@ def _check_consistency(ing: Any, pub: Any, report: Report) -> None:
             f"WEAVIATE_URL differs: ingestion={ing.weaviate_url}, public-api={pub_weaviate}."
         )
 
+    # (#132 item 7) Promoted from warn to error: this is the exact defect #132
+    # exists to prevent -- ingestion and public-api targeting different S3
+    # regions means uploads land in one bucket/region while reads target
+    # another (PermanentRedirect / IllegalLocationConstraintException at
+    # request time, not at startup). Same severity class as the EMBEDDING_DIM
+    # check below: a resolved cross-service physical-target mismatch, not a
+    # cosmetic naming difference. public-api now falls back to AWS_REGION via
+    # AliasChoices (#132 blocker 1), so this only fires when an operator sets
+    # AWS_S3_REGION to deliberately diverge from AWS_REGION -- which is a real
+    # disagreement, not the accidental-default case the alias already closed.
     if ing.s3_region and pub.aws_s3_region and ing.s3_region != pub.aws_s3_region:
-        report.warn(
+        report.error(
             f"AWS_REGION ({ing.s3_region}) and AWS_S3_REGION ({pub.aws_s3_region}) disagree. "
-            "Set both to the same value."
+            "Set both to the same value (or unset AWS_S3_REGION so public-api falls back to "
+            "AWS_REGION)."
         )
 
     # Ingestion reads STORAGE_BUCKET; public-api reads AWS_S3_BUCKET. They are

@@ -9,11 +9,9 @@ from sqlalchemy import text
 
 from src.config import settings
 from src.config.constants import (
-    DATABASE_HEALTH_CHECK_TIMEOUT,
     HEALTH_STATUS_DEGRADED,
     HEALTH_STATUS_HEALTHY,
     HEALTH_STATUS_UNHEALTHY,
-    WEAVIATE_HEALTH_CHECK_TIMEOUT,
 )
 from src.models.health import ComponentHealth, HealthResponse, LivenessResponse
 from src.services import metrics
@@ -105,14 +103,14 @@ async def _check_database() -> ComponentHealth:
     try:
         db = await asyncio.wait_for(
             get_database(),
-            timeout=DATABASE_HEALTH_CHECK_TIMEOUT,
+            timeout=settings.database_health_check_timeout_seconds,
         )
 
         # Run a simple query to verify connection
         async with db.session() as session:
             await asyncio.wait_for(
                 session.execute(text("SELECT 1")),
-                timeout=DATABASE_HEALTH_CHECK_TIMEOUT,
+                timeout=settings.database_health_check_timeout_seconds,
             )
 
         latency_ms = (time.time() - start_time) * 1000
@@ -152,13 +150,17 @@ async def _check_weaviate() -> ComponentHealth:
     try:
         search_service = await asyncio.wait_for(
             get_search_service(),
-            timeout=WEAVIATE_HEALTH_CHECK_TIMEOUT,
+            timeout=settings.weaviate_health_check_timeout_seconds,
         )
 
-        # Check if connected
+        # Check if connected. The timeout is passed BOTH to is_connected()
+        # (so it reaches the actual httpx call, which otherwise has its own
+        # internal default) and to the outer wait_for (defense in depth if
+        # is_connected's own timeout handling is ever bypassed) -- see
+        # SearchService.is_connected's docstring (#203).
         is_connected = await asyncio.wait_for(
-            search_service.is_connected(),
-            timeout=WEAVIATE_HEALTH_CHECK_TIMEOUT,
+            search_service.is_connected(timeout=settings.weaviate_health_check_timeout_seconds),
+            timeout=settings.weaviate_health_check_timeout_seconds,
         )
 
         latency_ms = (time.time() - start_time) * 1000

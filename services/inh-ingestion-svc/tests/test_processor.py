@@ -423,6 +423,67 @@ class TestProcessorWithMocks:
         assert result.success is True
 
 
+class TestStoreDocumentFencedOutLogsLoudly:
+    """(#110 follow-up review item 5) _store_document's workflow_run_id is a
+    throwaway uuid4() (this legacy path has no real Temporal run concept) --
+    which can NEVER match a prior claim, so store_processed_document is
+    guaranteed to return None (fenced out) on a re-index of any document a
+    real workflow run has already claimed. Discarding that None and logging
+    "Stored in PostgreSQL" unconditionally would be a textbook
+    silent-no-op-reporting-success landmine sitting in code someone may one
+    day revive -- this pins that it fails loudly (an ERROR log naming the
+    document_id) instead, by patching the module's logger directly rather
+    than depending on structlog's global processor/handler wiring."""
+
+    @pytest.mark.asyncio
+    async def test_none_return_is_not_logged_as_success(self, test_settings: Settings):
+        from unittest.mock import patch
+
+        processor = DocumentProcessor(test_settings)
+        processor._initialized = True
+
+        mock_db = MagicMock()
+        mock_db.store_processed_document = AsyncMock(return_value=None)  # fenced out
+        processor.db_service = mock_db
+        processor.weaviate_service = None  # isolate the PostgreSQL branch
+
+        message = DocumentUploadMessage(
+            event_type="document.uploaded",
+            document_id="doc_fenced_out",
+            workspace_id="ws_1",
+            user_id="user_1",
+            filename="f.txt",
+            original_filename="f.txt",
+            content_type="text/plain",
+            size_bytes=10,
+            storage_backend="local",
+            storage_path="p",
+            timestamp=datetime.now(UTC).isoformat(),
+        )
+
+        with patch("src.services.processor.logger") as mock_logger:
+            await processor._store_document(
+                message=message, chunks=[], text_length=0, processing_time_ms=1
+            )
+
+        # The misleading success log must never fire on a fenced-out write.
+        success_calls = [
+            c
+            for c in mock_logger.info.call_args_list
+            if c.args and c.args[0] == "Stored in PostgreSQL"
+        ]
+        assert success_calls == [], f"logged success on a fenced-out (None) write: {success_calls}"
+
+        # It must instead be reported as a real error, naming the document.
+        error_calls = [
+            c
+            for c in mock_logger.error.call_args_list
+            if c.args and c.args[0] == "Failed to store in PostgreSQL"
+        ]
+        assert len(error_calls) == 1
+        assert error_calls[0].kwargs["document_id"] == "doc_fenced_out"
+
+
 class TestProcessorFetch:
     """Tests for document fetching."""
 

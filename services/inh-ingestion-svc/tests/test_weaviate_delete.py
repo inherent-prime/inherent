@@ -190,7 +190,15 @@ def client():
 
 
 class TestDeleteDocumentEndpoint:
-    """Tests for DELETE /documents/{document_id}."""
+    """Tests for DELETE /documents/{document_id}.
+
+    Security (#175): the endpoint now resolves document_id against
+    PostgreSQL and 404s unless the stored workspace_id matches the caller's
+    claim (mirrors #134) -- see tests/test_ingestion_ownership.py for the
+    full owner-allowed / non-owner-denied / lookup-failure-denies matrix.
+    These tests cover the happy path and pre-existing failure-path
+    behaviors once ownership is already proven.
+    """
 
     def test_requires_auth(self, client: TestClient):
         resp = client.delete("/documents/doc1?workspace_id=ws1&user_id=u1")
@@ -214,6 +222,9 @@ class TestDeleteDocumentEndpoint:
         mock_get_weaviate.return_value = mock_weaviate_svc
 
         mock_db_svc = MagicMock()
+        mock_db_svc.get_document_status = AsyncMock(
+            return_value={"document_id": "doc1", "workspace_id": "ws1", "user_id": "u1"}
+        )
         mock_db_svc.delete_document = AsyncMock(return_value=True)
         mock_get_db.return_value = mock_db_svc
 
@@ -228,7 +239,11 @@ class TestDeleteDocumentEndpoint:
         assert data["document_id"] == "doc1"
         assert data["weaviate_cleaned"] is True
 
-        mock_db_svc.delete_document.assert_called_once_with("doc1")
+        # The resolved workspace_id/user_id (not necessarily distinguishable
+        # from the caller's here since they match, but this is the call
+        # shape #175 requires -- see the cross-tenant test below for the
+        # case where they diverge).
+        mock_db_svc.delete_document.assert_called_once_with("doc1", workspace_id="ws1")
         mock_weaviate_svc.delete_document_chunks_graceful.assert_called_once_with(
             workspace_id="ws1",
             document_id="doc1",
@@ -246,6 +261,9 @@ class TestDeleteDocumentEndpoint:
         mock_get_weaviate.return_value = mock_weaviate_svc
 
         mock_db_svc = MagicMock()
+        mock_db_svc.get_document_status = AsyncMock(
+            return_value={"document_id": "doc1", "workspace_id": "ws1", "user_id": "u1"}
+        )
         mock_db_svc.delete_document = AsyncMock(return_value=True)
         mock_get_db.return_value = mock_db_svc
 
@@ -267,6 +285,9 @@ class TestDeleteDocumentEndpoint:
         mock_get_weaviate.return_value = None
 
         mock_db_svc = MagicMock()
+        mock_db_svc.get_document_status = AsyncMock(
+            return_value={"document_id": "doc1", "workspace_id": "ws1", "user_id": "u1"}
+        )
         mock_db_svc.delete_document = AsyncMock(return_value=True)
         mock_get_db.return_value = mock_db_svc
 
@@ -285,10 +306,14 @@ class TestDeleteDocumentEndpoint:
     def test_document_not_found_returns_404(
         self, mock_get_weaviate, mock_get_db, client: TestClient
     ):
-        """PG delete returns False (no matching row) -> 404."""
+        """No matching PostgreSQL row -> 404 from the ownership guard itself
+        (the pre-existing post-delete `not deleted` 404 is now an
+        unreachable-in-practice defense-in-depth branch, see the docstring
+        on the route)."""
         mock_get_weaviate.return_value = None
 
         mock_db_svc = MagicMock()
+        mock_db_svc.get_document_status = AsyncMock(return_value=None)
         mock_db_svc.delete_document = AsyncMock(return_value=False)
         mock_get_db.return_value = mock_db_svc
 
@@ -298,3 +323,66 @@ class TestDeleteDocumentEndpoint:
         )
 
         assert resp.status_code == 404
+        mock_db_svc.delete_document.assert_not_called()
+
+    @patch("src.temporal.shared_services.get_db_service")
+    @patch("src.temporal.shared_services.get_weaviate_service")
+    def test_foreign_workspace_returns_404_and_never_touches_weaviate_or_pg(
+        self, mock_get_weaviate, mock_get_db, client: TestClient
+    ):
+        """#175's exact cross-tenant scenario: document exists but is owned
+        by a DIFFERENT workspace than the caller claims. Before this fix,
+        the caller-supplied workspace_id/user_id drove the Weaviate cleanup
+        directly (deleting from a possibly-foreign tenant's collection) and
+        the PG delete matched on document_id alone. Now: 404, and neither
+        the Weaviate cleanup nor the PG delete are ever called."""
+        mock_weaviate_svc = MagicMock()
+        mock_weaviate_svc.delete_document_chunks_graceful = AsyncMock(return_value=(True, 5))
+        mock_get_weaviate.return_value = mock_weaviate_svc
+
+        mock_db_svc = MagicMock()
+        mock_db_svc.get_document_status = AsyncMock(
+            return_value={
+                "document_id": "doc1",
+                "workspace_id": "ws_owner",
+                "user_id": "user_owner",
+            }
+        )
+        mock_db_svc.delete_document = AsyncMock(return_value=True)
+        mock_get_db.return_value = mock_db_svc
+
+        resp = client.delete(
+            "/documents/doc1?workspace_id=ws_attacker&user_id=user_attacker",
+            headers={"X-API-Key": VALID_API_KEY},
+        )
+
+        assert resp.status_code == 404
+        mock_weaviate_svc.delete_document_chunks_graceful.assert_not_called()
+        mock_db_svc.delete_document.assert_not_called()
+
+    @patch("src.temporal.shared_services.get_db_service")
+    @patch("src.temporal.shared_services.get_weaviate_service")
+    def test_ownership_lookup_failure_denies_not_allows(
+        self, mock_get_weaviate, mock_get_db, client: TestClient
+    ):
+        """If the ownership lookup itself fails (DB outage), the request
+        must NOT silently proceed as if it were owned -- it must fail
+        loudly (5xx), matching the no-log-and-swallow posture of
+        user_owns_workspace_in_mongo on the public-API side."""
+        mock_weaviate_svc = MagicMock()
+        mock_weaviate_svc.delete_document_chunks_graceful = AsyncMock(return_value=(True, 5))
+        mock_get_weaviate.return_value = mock_weaviate_svc
+
+        mock_db_svc = MagicMock()
+        mock_db_svc.get_document_status = AsyncMock(side_effect=RuntimeError("DB unavailable"))
+        mock_db_svc.delete_document = AsyncMock(return_value=True)
+        mock_get_db.return_value = mock_db_svc
+
+        with pytest.raises(RuntimeError, match="DB unavailable"):
+            client.delete(
+                "/documents/doc1?workspace_id=ws1&user_id=u1",
+                headers={"X-API-Key": VALID_API_KEY},
+            )
+
+        mock_weaviate_svc.delete_document_chunks_graceful.assert_not_called()
+        mock_db_svc.delete_document.assert_not_called()

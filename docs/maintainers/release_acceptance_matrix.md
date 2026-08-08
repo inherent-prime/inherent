@@ -78,7 +78,7 @@ see [docs/testing.md § Benchmark JSON report artifacts](../testing.md#benchmark
 
 | README / product claim                                              | Covering suite(s) |
 | ------------------------------------------------------------------- | ----------------- |
-| Multi-format ingestion (text, MD, CSV, HTML, JSON, PDF, DOCX, PNG)  | ingestion unit + `eval` (#5, #6) |
+| Multi-format ingestion (text, Markdown, PDF, DOCX, source code, and more — see the full [supported file types](../reference/file-types.md) list) | ingestion unit + `eval` (#5, #6) |
 | Chunking + embedding generation for semantic retrieval             | ingestion unit + `eval` (#5, #6); compose retrieval evals |
 | Background processing survives dependency hiccups                   | ingestion `failure_injection` (#7) |
 | REST API: search, document listing, chunk access, context retrieval | public-api unit + `contract` (#2, #3) |

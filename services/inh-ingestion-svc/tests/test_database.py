@@ -185,6 +185,7 @@ class TestDocumentStorage:
             chunks=sample_chunks,
             text_length=120,
             processing_time_ms=500,
+            workflow_run_id="test-run",
         )
 
         assert doc_id is not None
@@ -205,6 +206,7 @@ class TestDocumentStorage:
             chunks=sample_chunks,
             text_length=120,
             processing_time_ms=500,
+            workflow_run_id="test-run",
         )
 
         # Retrieve chunks and verify FK
@@ -231,6 +233,7 @@ class TestDocumentStorage:
             chunks=sample_chunks,
             text_length=120,
             processing_time_ms=500,
+            workflow_run_id="test-run",
         )
 
         doc = await db_service.get_document_status(message.document_id)
@@ -257,6 +260,7 @@ class TestDocumentStorage:
             chunks=sample_chunks,
             text_length=100,
             processing_time_ms=500,
+            workflow_run_id="test-run",
         )
 
         # Store again with different values
@@ -265,6 +269,7 @@ class TestDocumentStorage:
             chunks=sample_chunks[:1],  # Only 1 chunk
             text_length=50,
             processing_time_ms=200,
+            workflow_run_id="test-run",
         )
 
         # Should update, not create new
@@ -295,6 +300,7 @@ class TestDocumentRetrieval:
             chunks=sample_chunks,
             text_length=120,
             processing_time_ms=500,
+            workflow_run_id="test-run",
         )
 
         docs = await db_service.get_documents_by_workspace(message.workspace_id)
@@ -318,6 +324,7 @@ class TestDocumentRetrieval:
             chunks=sample_chunks,
             text_length=120,
             processing_time_ms=500,
+            workflow_run_id="test-run",
         )
 
         chunks = await db_service.get_document_chunks(message.document_id)
@@ -354,14 +361,18 @@ class TestDocumentDeletion:
             chunks=sample_chunks,
             text_length=120,
             processing_time_ms=500,
+            workflow_run_id="test-run",
         )
 
         # Verify chunks exist
         chunks_before = await db_service.get_document_chunks(message.document_id)
         assert len(chunks_before) == len(sample_chunks)
 
-        # Delete document
-        deleted = await db_service.delete_document(message.document_id)
+        # Delete document (workspace_id is required, #177 review -- see
+        # DatabaseService.delete_document's docstring)
+        deleted = await db_service.delete_document(
+            message.document_id, workspace_id=message.workspace_id
+        )
         assert deleted is True
 
         # Verify document is gone
@@ -378,7 +389,9 @@ class TestDocumentDeletion:
         db_service: DatabaseService,
     ):
         """Test that deleting nonexistent document returns False."""
-        deleted = await db_service.delete_document("nonexistent_doc_id")
+        deleted = await db_service.delete_document(
+            "nonexistent_doc_id", workspace_id="nonexistent_workspace"
+        )
         assert deleted is False
 
 
@@ -400,6 +413,7 @@ class TestDocumentStatusUpdates:
             chunks=sample_chunks,
             text_length=120,
             processing_time_ms=500,
+            workflow_run_id="test-run",
         )
 
         updated = await db_service.update_document_status(
@@ -429,6 +443,7 @@ class TestDocumentStatusUpdates:
             chunks=sample_chunks,
             text_length=120,
             processing_time_ms=500,
+            workflow_run_id="test-run",
         )
 
         updated = await db_service.update_document_status(
@@ -472,6 +487,7 @@ class TestProcessingStats:
             chunks=sample_chunks,
             text_length=120,
             processing_time_ms=500,
+            workflow_run_id="test-run",
         )
 
         stats = await db_service.get_processing_stats(workspace_id=message.workspace_id)
@@ -495,6 +511,7 @@ class TestProcessingStats:
             chunks=sample_chunks,
             text_length=120,
             processing_time_ms=500,
+            workflow_run_id="test-run",
         )
 
         # Query the v_workspace_stats view directly

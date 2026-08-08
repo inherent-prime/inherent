@@ -5,18 +5,23 @@ meta {
 }
 
 get {
-  url: {{ingest_base}}/dead-letter/1
+  url: {{ingest_base}}/dead-letter/1?workspace_id={{workspace_id}}
   body: none
   auth: inherit
 }
 
+params:query {
+  workspace_id: {{workspace_id}}
+}
+
 tests {
-  test("status is 200 or 404 (not found)", function() {
+  test("status is 200 or 404 (not found / not owned)", function() {
     expect([200, 404]).to.include(res.status);
   });
 }
 
 docs {
-  Get a single dead-letter job by numeric `job_id`. 404 if not found. Replace `1` with a real job
-  ID from the list.
+  Get a single dead-letter job by numeric `job_id`. `workspace_id` query param is required and
+  must own `job_id` (#177). 404 if not found or not owned. Replace `1` with a real job ID from
+  the list.
 }

@@ -80,6 +80,50 @@ def sample_upload_message() -> dict:
 
 
 @pytest.fixture
+def sample_upload_message_connector_sourced() -> dict:
+    """Upload message from a connector sync (inherent-systems/prime#187): source + connection/sync IDs."""
+    return {
+        "event_type": "document.uploaded",
+        "document_id": "test_doc_connector_001",
+        "workspace_id": "test_workspace_001",
+        "user_id": "test_user_001",
+        "filename": "1234567890-abc12345-notion-page.txt",
+        "original_filename": "notion_page.txt",
+        "content_type": "text/plain",
+        "size_bytes": 1024,
+        "storage_backend": "local",
+        "storage_path": "workspaces/test_workspace_001/notion-page.txt",
+        "storage_bucket": None,
+        "storage_url": "http://localhost:4000/api/v1/storage/documents/notion-page.txt",
+        "timestamp": datetime.now(UTC).isoformat(),
+        "source": "connector:notion",
+        "connection_id": "conn_123",
+        "sync_id": "sync_456",
+    }
+
+
+@pytest.fixture
+def sample_upload_message_public_api() -> dict:
+    """Upload message from the public API (inherent-systems/prime#187): source only, no connector IDs."""
+    return {
+        "event_type": "document.uploaded",
+        "document_id": "test_doc_public_api_001",
+        "workspace_id": "test_workspace_001",
+        "user_id": "test_user_001",
+        "filename": "1234567890-abc12345-report.pdf",
+        "original_filename": "report.pdf",
+        "content_type": "application/pdf",
+        "size_bytes": 4096,
+        "storage_backend": "local",
+        "storage_path": "workspaces/test_workspace_001/report.pdf",
+        "storage_bucket": None,
+        "storage_url": "http://localhost:4000/api/v1/storage/documents/report.pdf",
+        "timestamp": datetime.now(UTC).isoformat(),
+        "source": "public-api",
+    }
+
+
+@pytest.fixture
 def sample_upload_message_avro_wrapped() -> dict:
     """Create a sample message with Avro-wrapped union types."""
     return {

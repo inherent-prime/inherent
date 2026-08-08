@@ -91,23 +91,26 @@ clears the eval gate above.
   assembled in `SearchService.search()`.
 - Gate test: `services/inh-public-api-svc/tests/evals/test_advanced_index_gate.py`
 
-## Per-document diversification (#146) — implemented, still gated
+## Per-document diversification (#146) — implemented, on by default
 
 Unlike the three scaffolding-only methods above, per-document diversification
 (`enable_diversification`, `SearchService._diversify_by_document`) **is fully
 implemented** — no new model or index, just a wider Weaviate fetch and a
 round-robin over already-scored candidates before truncating to the page
-size. It stays gated behind the same eval-gate policy (documented eval
-improvement + maintainer approval before defaulting on) for a different
-reason than the #47 methods: it changes ranking order for every
+size. It was gated behind the same eval-gate policy as the #47 methods
+(documented eval improvement + maintainer approval before defaulting on) for
+a different reason: it changes ranking order for every
 multi-chunk-per-document query, not just crowded ones, so a caller relying on
 today's exact ranking for an already-well-served query could see it shift
-even though that query's own relevance hasn't changed. See
-[ADR 0004](adr/0004-per-document-diversification.md) for the measured
-evidence (recall@5 0.5 → 1.0 on the golden corpus's `multi_doc_crowding`
-category, no regression on any other category/mode) and why it still fell
-short of "ship on by default." Its own tunable,
-`diversification_over_fetch_multiplier` (default `5`), controls how many
-extra candidates are fetched per request when the flag is on; ignored when
-it's off. Enable in dev with `export ENABLE_DIVERSIFICATION=true` (or the
-Compose override documented inline in `docker-compose.yml`).
+even though that query's own relevance hasn't changed.
+
+**Both gate conditions are now met and the default is `True` as of
+2026-08-06.** See [ADR 0004](adr/0004-per-document-diversification.md) and
+its 2026-08-06 amendment for the measured evidence (recall@5 0.5 → 1.0 on the
+golden corpus's `multi_doc_crowding` category, no regression on any other
+category/mode) and the maintainer approval that cleared the gate. Its own
+tunable, `diversification_over_fetch_multiplier` (default `5`), controls how
+many extra candidates are fetched per request when the flag is on; ignored
+when it's off. An operator who wants the pre-2026-08-06 ranking behavior sets
+`export ENABLE_DIVERSIFICATION=false` (or the Compose override documented
+inline in `docker-compose.yml`).

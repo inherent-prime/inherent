@@ -1,0 +1,13 @@
+# Inherent sample TOML fixture (#121) -- used by upload examples and
+# extraction tests. Ingested as decoded text, no parse step.
+[service]
+name = "inherent"
+description = "Backend for turning company knowledge into something AI systems can query."
+
+[retrieval]
+modes = ["semantic", "hybrid", "keyword"]
+default_limit = 10
+
+[storage]
+database = "postgresql"
+vector_store = "weaviate"

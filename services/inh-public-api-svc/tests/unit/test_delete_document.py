@@ -246,11 +246,22 @@ class TestDeleteDocumentEndpoint:
 
     async def test_workspace_scoped_key_cannot_target_other_workspace(self):
         """A workspace-scoped key with a mismatching X-Workspace-Id is rejected
-        by the auth layer before any deletion logic runs."""
+        by the auth layer before any deletion logic runs.
+
+        ``real_auth=True`` runs the REAL ``_resolve_workspace``, which (#138
+        blocker-2) now calls ``get_database()`` unconditionally to validate
+        the key's binding — a plain internal call inside ``src/services/
+        auth.py``, not a route-level ``Depends()`` param, so
+        ``application.dependency_overrides[get_database]`` (which only
+        covers route-declared dependencies) does not reach it. Patch
+        ``src.services.auth.get_database`` directly so that internal call
+        also resolves to the mock instead of trying a real Mongo/Postgres
+        connection.
+        """
         db = _mock_db()
         app = _app_with(_key(permissions=["read", "write"]), db, real_auth=True)
         p1, p2 = _patch_deletion_services(_mock_search(), _mock_storage())
-        with p1, p2:
+        with p1, p2, patch("src.services.auth.get_database", AsyncMock(return_value=db)):
             response = await _delete(
                 app,
                 headers={"X-API-Key": "ink_test_key", "X-Workspace-Id": "other-workspace"},
@@ -388,7 +399,11 @@ class TestMcpDeleteDocument:
                 _key(permissions=["read", "write"], workspace_id=None),
             )
 
-        assert "don't have access" in result[0].text
+        # Undifferentiated not-found, not a distinguishable "you don't have
+        # access" (#138 blocker-1 follow-up: that distinction was a
+        # cross-workspace existence oracle a caller could use to learn which
+        # document ids exist in a workspace it can't read).
+        assert result[0].text == "Error: Document 'doc-001' not found"
         db.delete_document.assert_not_awaited()
 
     async def test_delete_success_returns_structured_payload(self):

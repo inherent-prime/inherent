@@ -5,7 +5,11 @@ processing workflow.
 """
 
 from src.temporal.activities.chunk import chunk_text
-from src.temporal.activities.chunk_edit import update_chunk_postgresql, update_chunk_weaviate
+from src.temporal.activities.chunk_edit import (
+    record_chunk_edit_weaviate_failure,
+    update_chunk_postgresql,
+    update_chunk_weaviate,
+)
 from src.temporal.activities.cleanup import cleanup_staging
 from src.temporal.activities.completion import publish_completion
 from src.temporal.activities.dead_letter import record_dead_letter
@@ -32,4 +36,5 @@ __all__ = [
     # Chunk edit activities
     "update_chunk_postgresql",
     "update_chunk_weaviate",
+    "record_chunk_edit_weaviate_failure",
 ]

@@ -9,6 +9,7 @@ Supports dual-namespace operation:
 """
 
 import asyncio
+import contextlib
 from collections.abc import Callable
 from typing import Any
 
@@ -25,6 +26,7 @@ from src.temporal.activities import (
     extract_text,
     fetch_document,
     publish_completion,
+    record_chunk_edit_weaviate_failure,
     record_dead_letter,
     set_document_status,
     store_in_postgresql,
@@ -46,9 +48,6 @@ from src.temporal.workflows.audit_log import WriteAuditLogWorkflow
 
 logger = structlog.get_logger(__name__)
 
-# Default task queue name for document ingestion
-TASK_QUEUE_NAME = "document-ingestion"
-
 # All activities registered with the ingestion worker
 _ALL_ACTIVITIES: list[Callable[..., Any]] = [
     create_pending_document,
@@ -63,6 +62,7 @@ _ALL_ACTIVITIES: list[Callable[..., Any]] = [
     cleanup_staging,
     update_chunk_postgresql,
     update_chunk_weaviate,
+    record_chunk_edit_weaviate_failure,
     record_dead_letter,
     publish_completion,
 ]
@@ -86,7 +86,12 @@ _AUDIT_WORKFLOWS = [
 
 
 async def _cleanup_stale_staging(settings: Settings) -> None:
-    """Delete staging rows older than 1 hour. Safety net for crashed workflows."""
+    """Delete staging rows older than 1 hour. Safety net for crashed workflows.
+
+    Called once at worker startup (below) AND repeatedly by
+    _periodic_staging_cleanup -- see that function's docstring for why a
+    startup-only sweep is not sufficient (#110 blocker 2).
+    """
     try:
         from src.services.staging import StagingService
 
@@ -95,12 +100,44 @@ async def _cleanup_stale_staging(settings: Settings) -> None:
         try:
             deleted = staging.cleanup_stale(max_age_hours=1)
             if deleted > 0:
-                logger.info("Startup: cleaned stale staging rows", deleted=deleted)
+                logger.info("Cleaned stale staging rows", deleted=deleted)
         finally:
             staging.disconnect()
     except Exception as e:
         # Non-fatal — table may not exist yet on first run
-        logger.debug("Startup staging cleanup skipped", error=str(e))
+        logger.debug("Staging cleanup skipped", error=str(e))
+
+
+# How often the periodic staging sweep (below) runs, in addition to the
+# one-shot startup sweep. #110's TERMINATE_EXISTING conflict policy lets a
+# fresh re-index terminate a still-open prior run; termination closes a
+# workflow execution server-side WITHOUT delivering another workflow task,
+# so that run's `finally: cleanup_staging` (document_ingestion.py) never
+# executes -- unlike a normal completion, failure, or even a *cancellation*
+# (which the workflow's own try/except/finally CAN observe and run). Before
+# #110, the only way to orphan a staging row was a hard worker crash, and
+# `_cleanup_stale_staging` only ran again on the next startup -- fine for
+# that case. After #110, a superseded re-index is a ROUTINE event on an
+# otherwise-healthy, long-running worker, so relying on "the worker happens
+# to restart" leaves each superseded run's `extracted_text` + `chunks` rows
+# (the very payloads staging exists for because they exceed Temporal's 4MB
+# limit -- see services/staging.py) stranded indefinitely. This interval
+# task makes the sweep actually periodic, independent of worker restarts.
+_STAGING_SWEEP_INTERVAL_SECONDS = 900  # 15 minutes
+
+
+async def _periodic_staging_cleanup(
+    settings: Settings, interval_seconds: int = _STAGING_SWEEP_INTERVAL_SECONDS
+) -> None:
+    """Run _cleanup_stale_staging on a fixed interval until cancelled.
+
+    Callers own the task's lifecycle: create with asyncio.create_task, cancel
+    (and await, suppressing CancelledError) on shutdown -- see run_worker's
+    `finally` and TemporalWorkerManager.stop().
+    """
+    while True:
+        await asyncio.sleep(interval_seconds)
+        await _cleanup_stale_staging(settings)
 
 
 async def create_temporal_client(settings: Settings) -> Client:
@@ -178,8 +215,12 @@ async def run_worker(
     # Initialize shared connection pools for activities
     shared_services.initialize(settings)
 
-    # Clean up stale staging rows on startup
+    # Clean up stale staging rows on startup, then keep sweeping periodically
+    # for the lifetime of this worker (#110 blocker 2) -- a startup-only
+    # sweep is not sufficient once a terminated (superseded) workflow can
+    # orphan staging rows during normal operation, not only on a crash.
     await _cleanup_stale_staging(settings)
+    staging_sweep_task = asyncio.create_task(_periodic_staging_cleanup(settings))
 
     client = await create_temporal_client(settings)
 
@@ -228,6 +269,15 @@ async def run_worker(
             audit_client_created_here=audit_client_created_here,
             exc_info=True,
         )
+        # Await the cancellation (consistent with the other two cancel sites
+        # in this file, #110 follow-up review item 7) -- cancel() alone only
+        # schedules cancellation, it doesn't wait for the task to actually
+        # stop. Harmless either way here (the task just stops sweeping), but
+        # inconsistency invites someone to later "fix" one site and miss the
+        # others.
+        staging_sweep_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await staging_sweep_task
         try:
             shared_services.shutdown()
         except Exception:
@@ -255,6 +305,9 @@ async def run_worker(
                 audit_worker.run(),
             )
     finally:
+        staging_sweep_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await staging_sweep_task
         shared_services.shutdown()
 
     logger.info("Temporal workers stopped")
@@ -283,6 +336,7 @@ class TemporalWorkerManager:
         self._audit_worker: Worker | None = None
         self._worker_task: asyncio.Task | None = None
         self._shutdown_event: asyncio.Event | None = None
+        self._staging_sweep_task: asyncio.Task | None = None
 
     async def start(self) -> None:
         """Start the Temporal workers (ingestion + audit)."""
@@ -295,8 +349,13 @@ class TemporalWorkerManager:
         # Initialize shared connection pools for activities
         shared_services.initialize(self.settings)
 
-        # Clean up stale staging rows on startup
+        # Clean up stale staging rows on startup, then keep sweeping
+        # periodically for as long as this manager runs (#110 blocker 2) --
+        # see _periodic_staging_cleanup's docstring for why a startup-only
+        # sweep no longer bounds the leak once TERMINATE_EXISTING can
+        # supersede (and thus orphan the staging of) a workflow run.
         await _cleanup_stale_staging(self.settings)
+        self._staging_sweep_task = asyncio.create_task(_periodic_staging_cleanup(self.settings))
 
         self._client = await create_temporal_client(self.settings)
         self._audit_client = await create_audit_temporal_client(self.settings)
@@ -362,6 +421,12 @@ class TemporalWorkerManager:
             await self._worker_task
         except asyncio.CancelledError:
             pass
+
+        if self._staging_sweep_task is not None:
+            self._staging_sweep_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._staging_sweep_task
+            self._staging_sweep_task = None
 
         self._worker_task = None
         self._worker = None

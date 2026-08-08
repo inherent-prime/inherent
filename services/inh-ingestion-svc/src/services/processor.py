@@ -18,6 +18,7 @@ ensuring proper tenant isolation in both PostgreSQL and Weaviate.
 from __future__ import annotations
 
 import time
+import uuid
 from typing import TYPE_CHECKING
 
 import structlog
@@ -700,13 +701,38 @@ class DocumentProcessor:
         # Store in PostgreSQL if available
         if self.db_service:
             try:
-                await self.db_service.store_processed_document(
+                # workflow_run_id (#110): this legacy, non-Temporal processing
+                # path (not used in production -- see DocumentIngestionWorkflow
+                # for the live path) has no real "run" concept to fence
+                # against, so a fresh id per call satisfies the now-required
+                # parameter -- but that means it can NEVER match a prior
+                # claim: on any re-index of a document a real run previously
+                # claimed, store_processed_document is guaranteed to return
+                # None (fenced out). A fresh uuid4() is a landmine here, not
+                # a real fencing decision -- this path was already dead code
+                # (no production caller, confirmed via grep) and this is not
+                # its revival: if someone DOES wire this back up, it must
+                # fail loudly on a fenced write rather than silently log
+                # success while writing nothing (#110 follow-up review).
+                doc_pk = await self.db_service.store_processed_document(
                     message=message,
                     chunks=chunks,
                     text_length=text_length,
                     processing_time_ms=processing_time_ms,
+                    workflow_run_id=str(uuid.uuid4()),
                     tenant_id=tenant_id,
                 )
+                if doc_pk is None:
+                    raise RuntimeError(
+                        f"store_processed_document returned None (fenced out) for "
+                        f"document_id={document_id!r}: this legacy processing path "
+                        "generates a fresh, unclaimed workflow_run_id per call and "
+                        "can never win the fencing check on a re-index of a "
+                        "document a real workflow run has claimed. This path is "
+                        "dead code (see class docstring / #110 follow-up review) -- "
+                        "reviving it requires giving it a real, stable run identity "
+                        "instead of a throwaway uuid4()."
+                    )
                 logger.info(
                     "Stored in PostgreSQL",
                     document_id=document_id,

@@ -45,16 +45,14 @@ _COLLIDING_USER_IDS = ["a-b", "a_b", "ab", "a.b", "a b"]
 
 def test_distinct_workspace_ids_never_collide() -> None:
     names = {get_workspace_collection_name(i) for i in _COLLIDING_WORKSPACE_IDS}
-    assert len(names) == len(_COLLIDING_WORKSPACE_IDS), (
-        f"collision: {_COLLIDING_WORKSPACE_IDS} -> {names}"
-    )
+    assert len(names) == len(
+        _COLLIDING_WORKSPACE_IDS
+    ), f"collision: {_COLLIDING_WORKSPACE_IDS} -> {names}"
 
 
 def test_distinct_user_ids_never_collide() -> None:
     names = {get_user_tenant_name(i) for i in _COLLIDING_USER_IDS}
-    assert len(names) == len(_COLLIDING_USER_IDS), (
-        f"collision: {_COLLIDING_USER_IDS} -> {names}"
-    )
+    assert len(names) == len(_COLLIDING_USER_IDS), f"collision: {_COLLIDING_USER_IDS} -> {names}"
 
 
 # --- Validity: names must satisfy Weaviate's charset rules ----------------

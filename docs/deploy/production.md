@@ -78,6 +78,14 @@ The application supports `s3`, `gcs`, and `azure` backends
    AWS_REGION=<your-region>
    ```
 
+   `AWS_REGION` configures **both** services (#132) — ingestion-svc reads it
+   directly, and public-api-svc now accepts it too (`aws_s3_region`'s
+   `AliasChoices`). Set it explicitly whenever your bucket is outside
+   `us-east-1`, the code-level default both services fall back to when the
+   var is unset. If you need public-api-svc on a *different* region than
+   ingestion-svc (uncommon), set `AWS_S3_REGION` as well — it takes
+   precedence over `AWS_REGION` for that service only.
+
 ## 4. Enable MongoDB authentication
 
 The bundled Mongo runs with no authentication, and the connection strings carry

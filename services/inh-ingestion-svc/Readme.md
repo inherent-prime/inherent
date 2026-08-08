@@ -88,15 +88,22 @@ PostgreSQL and Weaviate. All protected routes authenticate with `X-API-Key: $ING
 |---|---|---|---|
 | `GET` | `/health` | none | Liveness + Temporal worker status |
 | `GET` | `/metrics` | none | Prometheus metrics |
-| `POST` | `/ingest` | yes | Trigger ingestion. Async: **202** + `workflow_id`; `?wait=true` → **200** result; **409** if already running |
-| `GET` | `/ingest/{document_id}/status` | yes | Real-time workflow progress (`step`, `progress`, `chunks_created`) |
-| `PATCH` | `/chunks/{document_id}/{chunk_index}` | yes | Edit a chunk (updates PG + re-embeds in Weaviate) |
-| `DELETE` | `/documents/{document_id}?workspace_id=&user_id=` | yes | Delete a document from PG + Weaviate (best-effort) |
-| `GET` | `/lineage/{document_id}` | yes | Ordered ingestion pipeline events for a document |
-| `GET` | `/dead-letter` | yes | List failed-ingestion (dead-letter) jobs; filters `workspace_id`, `status`, `limit` |
-| `GET` | `/dead-letter/{job_id}` | yes | Get a single dead-letter job (404 if missing) |
-| `POST` | `/dead-letter/{job_id}/retry` | yes | Re-publish a job's original message (409 if not retriable) |
-| `POST` | `/dead-letter/{job_id}/abandon` | yes | Mark a dead-letter job permanently abandoned |
+| `POST` | `/ingest` | yes | Trigger ingestion. Async: **202** + `workflow_id`; `?wait=true` → **200** result; **403** if `storage_path` isn't prefixed by this request's own `workspace_id` (#210 — consistency check, not caller entitlement, see #177); **409** if already running |
+| `GET` | `/ingest/{document_id}/status?workspace_id=` | yes | Real-time workflow progress (`step`, `progress`, `chunks_created`). 404 if `document_id` isn't owned by `workspace_id` (#177) |
+| `PATCH` | `/chunks/{document_id}/{chunk_index}?workspace_id=` | yes | Edit a chunk (updates PG + re-embeds in Weaviate). 404 if `document_id` isn't owned by `workspace_id` or `chunk_index` is out of range (#134); 500 if PG updated but the Weaviate re-embed didn't (recorded via `GET /lineage`) |
+| `DELETE` | `/documents/{document_id}?workspace_id=&user_id=` | yes | Delete a document from PG + Weaviate (best-effort). 404 if `document_id` isn't owned by `workspace_id` (#175) |
+| `GET` | `/lineage/{document_id}?workspace_id=` | yes | Ordered ingestion pipeline events for a document. 404 if `document_id` isn't owned by `workspace_id` (#177) |
+| `GET` | `/dead-letter?workspace_id=` | yes | List failed-ingestion (dead-letter) jobs for `workspace_id` (**required**, #177); filters `status`, `limit` |
+| `GET` | `/dead-letter/{job_id}?workspace_id=` | yes | Get a single dead-letter job. 404 if missing or not owned by `workspace_id` (#177) |
+| `POST` | `/dead-letter/{job_id}/retry?workspace_id=` | yes | Re-publish a job's original message. 404 if not owned by `workspace_id` (#177); 409 if not retriable |
+| `POST` | `/dead-letter/{job_id}/abandon?workspace_id=` | yes | Mark a dead-letter job permanently abandoned. 404 if not owned by `workspace_id` (#177) |
+
+Every route above that takes a `document_id` or dead-letter `job_id` now also requires and
+verifies `workspace_id` against PostgreSQL (#134, #175, #177) -- `verify_api_key` alone only
+proves the caller holds the one shared `INGESTION_API_KEY`, not that it's entitled to a specific
+workspace's data. This is workspace<->row *consistency*, not caller<->workspace *entitlement*;
+see [`src/api/ownership.py`](src/api/ownership.py) for the full picture and why this API should
+never be exposed outside the internal network.
 
 Copy-paste curl examples for every endpoint (and a Postman collection) live in
 [`docs/examples/README.md`](../../docs/examples/README.md).

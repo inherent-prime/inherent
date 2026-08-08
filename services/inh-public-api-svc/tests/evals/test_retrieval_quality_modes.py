@@ -20,8 +20,8 @@ pytestmark = pytest.mark.retrieval_eval
 # "multi_doc_crowding" (#146): a query with 2+ genuinely relevant documents
 # where one has many more chunks than the other, so a naive score-sorted
 # top-k can crowd the shorter document out entirely -- the scenario per-
-# document diversification (enable_diversification, off by default) exists to
-# fix. See rate-limiting-deep-dive.txt (5 chunks) vs
+# document diversification (enable_diversification, on by default since
+# 2026-08-06) exists to fix. See rate-limiting-deep-dive.txt (5 chunks) vs
 # rate-limit-quick-reference.txt (1 chunk), query q14.
 KNOWN_CATEGORIES = {
     "general",

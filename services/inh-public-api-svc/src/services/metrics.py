@@ -102,6 +102,24 @@ document_compensation_exhausted_total = Counter(
     ["operation"],
 )
 
+# Workspace-ownership lookup metrics (#184)
+# `DatabaseService.get_user_workspace_ids` unions a Mongo lookup with a
+# Postgres `processed_documents` fallback, and both sub-lookups log-and-swallow
+# their own failures so the union degrades to "whichever source answered"
+# instead of erroring (appropriate for a listing convenience). That swallow
+# used to be warning-log-only, so a source degrading indefinitely was
+# invisible without grepping logs — the same failure mode
+# `AUDIT_MESSAGES_DROPPED_TOTAL` (inh-ingestion-svc, #18) exists to make
+# observable for the audit consumer's own drop-on-swallow path. `source` is a
+# small bounded set (mongo / postgres_fallback / mongo_ownership_check —
+# never a user/workspace id, #20).
+workspace_ownership_lookup_degraded_total = Counter(
+    "workspace_ownership_lookup_degraded_total",
+    "Workspace-ownership lookups that failed and fell back/degraded instead "
+    "of answering from every source (#184) — alert on a sustained increase",
+    ["source"],
+)
+
 # Health check metrics
 HEALTH_CHECK_STATUS = Gauge(
     "health_check_status",
@@ -183,6 +201,18 @@ def record_search_error(mode: str, error_type: str) -> None:
 def record_compensation_exhausted(operation: str) -> None:
     """Record a compensating mark-failed write that exhausted its retries (#99)."""
     document_compensation_exhausted_total.labels(operation=operation).inc()
+
+
+def record_workspace_ownership_lookup_degraded(source: str) -> None:
+    """Record a workspace-ownership lookup that failed and degraded (#184).
+
+    Call this from the log-and-swallow sites in
+    ``DatabaseService.get_user_workspace_ids`` (source="mongo" /
+    "postgres_fallback") and from ``user_owns_workspace_in_mongo``'s raise
+    path (source="mongo_ownership_check") — the metric emission itself must
+    never be allowed to break the caller; it is observability only.
+    """
+    workspace_ownership_lookup_degraded_total.labels(source=source).inc()
 
 
 def set_health_status(component: str, status: str) -> None:

@@ -28,11 +28,15 @@ import threading
 import httpx
 import structlog
 
+from src.config.settings import Settings
+
 logger = structlog.get_logger(__name__)
 
 
-_DEFAULT_URL = "http://text-embeddings-inference:80"
-_DEFAULT_DIM = 384
+# Sourced from Settings' own field defaults (not re-hardcoded here) so the
+# embedder's fallback can't drift from src/config/settings.py.
+_DEFAULT_URL = Settings.model_fields["embedding_service_url"].default
+_DEFAULT_DIM = Settings.model_fields["embedding_dim"].default
 _DEFAULT_TIMEOUT_S = 30.0
 _DEFAULT_BATCH_SIZE = 32
 

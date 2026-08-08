@@ -244,8 +244,11 @@ class TestEndToEndFlow:
 
         doc_id = doc["id"]
 
-        # Delete document
-        deleted = await db_service.delete_document(test_id)
+        # Delete document (workspace_id is required, #177 review -- see
+        # DatabaseService.delete_document's docstring)
+        deleted = await db_service.delete_document(
+            test_id, workspace_id=message_data["workspace_id"]
+        )
         assert deleted is True
 
         # Verify document is gone

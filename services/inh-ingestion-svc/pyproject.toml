@@ -16,6 +16,21 @@ dependencies = [
     "pypdf>=3.0.0",
     "python-docx>=1.0.0",
     "beautifulsoup4>=4.12.0",
+    # XLSX extraction (#118). Core (non-optional) dependency: the registry's
+    # xlsx spec declares degradation="hard_fail" (the default), so this must
+    # always be installed -- mirrors python-docx above, not the OCR pattern.
+    "openpyxl>=3.1.0",
+    # PPTX extraction (#119). Same OOXML family as python-docx; also a core
+    # dependency for the same hard_fail reason as openpyxl above.
+    "python-pptx>=1.0.0",
+    # RTF extraction (#126) -- tiny, pure-Python, no C extensions or system
+    # binaries, so it's a core dependency (like python-docx/pypdf above)
+    # rather than an optional extra.
+    "striprtf>=0.0.26,<0.1",
+    # Charset detection for text extraction (#117) -- replaces
+    # `errors="ignore"`, which silently DROPPED any non-UTF-8 byte instead of
+    # decoding it, with a real best-guess decode of the file's actual encoding.
+    "charset-normalizer>=3.3.0",
     "boto3>=1.34.0",
     "httpx>=0.25.0",
     # Used by operational scripts/ (migrate_schema, migrate_weaviate,

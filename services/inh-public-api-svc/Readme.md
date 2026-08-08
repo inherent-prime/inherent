@@ -41,7 +41,7 @@ SERVICE_MODE=api \
 PORT=8080 \
 DATABASE_URL=postgresql://postgres:postgres@localhost:15432/knowledge_base \
 WEAVIATE_URL=http://localhost:18080 \
-MONGODB_URI=mongodb://localhost:27018/main \
+MONGODB_URI=mongodb://localhost:27018 \
 MQ_REDIS_URL=redis://localhost:16379 \
 REDIS_URL=redis://localhost:16379 \
 AWS_S3_ENDPOINT=http://localhost:19000 \
@@ -58,7 +58,7 @@ uv run python -m src.main
 SERVICE_MODE=mcp \
 DATABASE_URL=postgresql://postgres:postgres@localhost:15432/knowledge_base \
 WEAVIATE_URL=http://localhost:18080 \
-MONGODB_URI=mongodb://localhost:27018/main \
+MONGODB_URI=mongodb://localhost:27018 \
 uv run python -m src.main
 ```
 

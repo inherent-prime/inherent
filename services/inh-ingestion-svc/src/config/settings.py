@@ -3,6 +3,7 @@
 from functools import lru_cache
 from typing import Literal
 
+from inh_contracts.defaults import DEFAULT_MONGODB_URI, DEFAULT_S3_BUCKET, DEFAULT_S3_REGION
 from inh_contracts.events import StorageBackend
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -27,7 +28,14 @@ class Settings(BaseSettings):
 
     # GCP Configuration (only needed when using GCS storage or Pub/Sub MQ)
     gcp_project_id: str = Field("", alias="GCP_PROJECT_ID")
-    storage_bucket: str = Field("", alias="STORAGE_BUCKET")
+    # Default: see inh_contracts.defaults.DEFAULT_S3_BUCKET (#176) -- the single
+    # source of truth shared with public-api-svc's aws_s3_bucket field. Most
+    # uploads carry their own bucket in the event payload
+    # (message.storage_bucket), so this default is mainly a fallback
+    # (services/storage.py's default_bucket) -- but it must still agree with
+    # public-api's default so a deployment that sets neither env var doesn't
+    # write to one bucket while public-api reads from another.
+    storage_bucket: str = Field(DEFAULT_S3_BUCKET, alias="STORAGE_BUCKET")
 
     # Storage Configuration
     # Reuse the shared contract type so this can't drift from the wire/DB enum
@@ -37,12 +45,32 @@ class Settings(BaseSettings):
     # S3-compatible storage (Hetzner Object Storage, AWS S3, MinIO, etc.)
     s3_access_key_id: str | None = Field(None, alias="AWS_ACCESS_KEY_ID")
     s3_secret_access_key: str | None = Field(None, alias="AWS_SECRET_ACCESS_KEY")
-    s3_region: str = Field("nbg1", alias="AWS_REGION")
+    # Default: see inh_contracts.defaults.DEFAULT_S3_REGION (#132) -- the single
+    # source of truth shared with public-api-svc's aws_s3_region field, which
+    # also accepts this same AWS_REGION var (see its AliasChoices, #132 blocker 1).
+    s3_region: str = Field(DEFAULT_S3_REGION, alias="AWS_REGION")
     s3_endpoint: str | None = Field(None, alias="AWS_S3_ENDPOINT")
 
     # Local Storage (for fetching files from integration service)
     local_storage_path: str = Field("", alias="LOCAL_STORAGE_PATH")
     intg_service_url: str = Field("http://localhost:4000", alias="INTG_SERVICE_URL")
+
+    # #214: storage_backend="azure" has no real Azure Blob client anywhere in
+    # this codebase (no AzureStorageBackend class, no azure-* SDK dependency)
+    # -- fetch.py/extract.py instead treat it as "fetch storage_url directly"
+    # (StorageService.read_file_from_url), completely bypassing the #210
+    # storage_path/workspace_id prefix check (there is no workspace-prefixed
+    # invariant to check a caller-supplied URL against). No in-repo caller
+    # ever sets storage_backend="azure" (public-api-svc's document_intake.py
+    # always emits "s3"), so this is dead weight from every legitimate path
+    # and reachable only as an attacker-controlled bypass via POST /ingest's
+    # caller-supplied storage_backend field. Off by default: an operator who
+    # actually needs direct-URL ingestion must opt in explicitly, at which
+    # point they are accepting that #34's SSRF guard (blocks
+    # internal/metadata/loopback targets) is the ONLY remaining check on
+    # what gets fetched into a tenant. See fetch.py/extract.py's azure
+    # branch and CHANGELOG.md for the full story.
+    allow_url_based_ingestion: bool = Field(False, alias="ALLOW_URL_BASED_INGESTION")
 
     # =========================================================================
     # Message Queue Configuration
@@ -160,7 +188,12 @@ class Settings(BaseSettings):
     # MongoDB Configuration (for audit log writes)
     # =========================================================================
 
-    mongodb_uri: str = Field("mongodb://localhost:27017", alias="MONGODB_URI")
+    # Default: see inh_contracts.defaults.DEFAULT_MONGODB_URI (#176) -- the
+    # single source of truth shared with public-api-svc's mongodb_uri field.
+    # The URI carries no database path segment on purpose: mongodb_db_name
+    # below is what actually selects the database (client[mongodb_db_name]),
+    # so the path is not a second source of truth to keep in sync.
+    mongodb_uri: str = Field(DEFAULT_MONGODB_URI, alias="MONGODB_URI")
     mongodb_db_name: str = Field("main", alias="MONGODB_DB_NAME")
 
     # =========================================================================

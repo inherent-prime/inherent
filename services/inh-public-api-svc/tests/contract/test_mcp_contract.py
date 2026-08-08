@@ -182,15 +182,32 @@ class TestToolSchemas:
         assert props["chunk_id"]["type"] == "string"
 
     async def test_upload_document_schema_types(self):
-        """content_type is optional and defaults to text/markdown (text-only,
-        binary uploads stay REST-only by design, #87)."""
+        """content_type is optional (text-only, binary uploads stay REST-only
+        by design, #87). It carries NO schema `default` (#193 coordinator
+        review): a JSON Schema `default` is advertised to the CLIENT, and
+        many MCP clients/tool-calling layers pre-fill an omitted argument
+        from its advertised default before the server ever sees the call --
+        which would turn #197's filename-extension derivation into a fixed
+        "text/markdown" for every upload regardless of the real extension,
+        the exact defect #197 fixed. The fallback-to-text/markdown behavior
+        for an unrecognized/absent extension is documented in
+        `content_type`'s description text instead, which does not get
+        auto-populated onto omitted calls. See
+        `test_omitted_content_type_derives_from_filename_extension` and
+        `test_explicit_content_type_is_never_overridden_by_extension` below
+        for the behavior this schema shape protects."""
         tools = await _list_tools()
         schema = tools["upload_document"].inputSchema
         props = schema["properties"]
         assert props["filename"]["type"] == "string"
         assert props["content"]["type"] == "string"
         assert props["content_type"]["type"] == "string"
-        assert props["content_type"]["default"] == "text/markdown"
+        assert "default" not in props["content_type"], (
+            "content_type must not carry a schema 'default' -- see the "
+            "docstring above for why a client-visible default reintroduces "
+            "#197's bug for every MCP client that auto-fills omitted args "
+            "from their advertised default."
+        )
         assert "content_type" not in schema["required"]
         assert "workspace_id" in props
 
@@ -508,7 +525,10 @@ class TestEvalsMcpTools:
             )
 
         assert content[0].text.startswith("Error:")
-        assert "not accessible" in content[0].text
+        # Wording unified with every other workspace-argument rejection
+        # (#138 follow-up: describe_workspace_denial) — a user-scoped key
+        # gets the generic "you don't have access" message.
+        assert "don't have access" in content[0].text
 
 
 # =========================================================================== #
@@ -561,7 +581,15 @@ class TestGetDocumentTool:
 
     async def test_cross_workspace_document_denies_access_without_leak(self, sample_document):
         """A document belonging to a workspace the caller does not own must not
-        leak its metadata — mirrors _resolve_document_for_user's access check."""
+        leak its metadata — mirrors _resolve_document_for_user's access check.
+
+        Answers with the SAME undifferentiated "not found" used for a document
+        that doesn't exist at all (#138 blocker-1 follow-up), not a
+        distinguishable "you don't have access" — that distinction is a
+        cross-workspace existence oracle. See
+        tests/security/test_mcp_workspace_boundaries.py for the paired
+        not-found-vs-unauthorized proof.
+        """
         foreign = sample_document.model_copy(update={"workspace_id": "ws-foreign"})
         db = AsyncMock()
         db.validate_api_key = AsyncMock(return_value=self._key())
@@ -571,8 +599,7 @@ class TestGetDocumentTool:
         with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)):
             content = await _call_tool("get_document", {"api_key": "x", "document_id": "doc-1"})
 
-        assert content[0].text.startswith("Error:")
-        assert "don't have access" in content[0].text
+        assert content[0].text == "Error: Document 'doc-1' not found"
         # No leaked document fields (e.g. the foreign workspace id) in the error.
         assert "ws-foreign" not in content[0].text
 
@@ -639,6 +666,10 @@ class TestListChunksTool:
         db.get_document_chunks_by_doc_id.assert_not_called()
 
     async def test_cross_workspace_document_denies_access_without_leak(self, sample_document):
+        """Undifferentiated not-found, matching the missing-document case
+        above — not a distinguishable "you don't have access" (#138
+        blocker-1 follow-up: that distinction was a cross-workspace
+        existence oracle)."""
         foreign = sample_document.model_copy(update={"workspace_id": "ws-foreign"})
         db = AsyncMock()
         db.validate_api_key = AsyncMock(return_value=self._key())
@@ -649,8 +680,7 @@ class TestListChunksTool:
         with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)):
             content = await _call_tool("list_chunks", {"api_key": "x", "document_id": "doc-1"})
 
-        assert content[0].text.startswith("Error:")
-        assert "don't have access" in content[0].text
+        assert content[0].text == "Error: Document 'doc-1' not found"
         db.get_document_chunks_by_doc_id.assert_not_called()
 
     async def test_denied_without_read_permission(self):
@@ -666,6 +696,19 @@ class TestListChunksTool:
         db.get_document_by_id.assert_not_called()
         db.get_document_chunks_by_doc_id.assert_not_called()
         db.eval_scorecard_counts.assert_not_called()
+
+
+def test_mcp_supported_text_mime_types_matches_registry():
+    """#117: SUPPORTED_TEXT_MIME_TYPES must be exactly the registry's
+    mcp-surfaced MIME types, not a re-derived guess. Before #117 this was a
+    ``.startswith("text/")`` filter over ALLOWED_MIME_TYPES -- correct only
+    by coincidence, since nothing enforced that every text/* type was
+    actually MCP-safe or that no non-text/* type ever should be. Pinning
+    equality here means the registry's explicit `surfaces` field is the only
+    place this can be decided."""
+    from inh_contracts.file_types import mcp_mime_types
+
+    assert mcp_server.SUPPORTED_TEXT_MIME_TYPES == mcp_mime_types()
 
 
 # =========================================================================== #
@@ -742,6 +785,296 @@ class TestUploadDocumentTool:
         mq.publish.assert_awaited_once()
         storage.upload_file.assert_awaited_once()
 
+    @pytest.mark.parametrize(
+        "filename,content_type,content",
+        [
+            # #121: structured text
+            ("config.yaml", "application/yaml", "service: inherent"),
+            ("config.toml", "application/toml", 'service = "inherent"'),
+            ("config.xml", "application/xml", "<service>inherent</service>"),
+            # #122: source code
+            ("main.py", "text/x-python", "def main():\n    pass\n"),
+            # #127: subtitle transcripts
+            (
+                "talk.srt",
+                "application/x-subrip",
+                "1\n00:00:00,000 --> 00:00:03,000\nHello there.\n",
+            ),
+            (
+                "talk.vtt",
+                "text/vtt",
+                "WEBVTT\n\n00:00:00.000 --> 00:00:03.000\nHello there.\n",
+            ),
+        ],
+    )
+    async def test_new_text_family_types_accepted(self, filename, content_type, content):
+        """#121/#122/#127: all three text-family additions are `rest+mcp` --
+        MCP `upload_document` must accept them, not just REST. Pins the MCP
+        half of each issue's 'MCP upload accepted' acceptance criterion."""
+        db = AsyncMock()
+        db.validate_api_key = AsyncMock(return_value=self._key())
+        db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
+        db.get_document_id_by_content_hash = AsyncMock(return_value=None)
+        db.get_document_id_by_filename = AsyncMock(return_value=None)
+        db.create_or_reset_pending_document = AsyncMock(return_value=None)
+
+        storage = self._storage()
+        mq = self._mq()
+        p1, p2 = self._intake_patches(storage, mq)
+
+        with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)), p1, p2:
+            result = await _call_tool(
+                "upload_document",
+                {
+                    "api_key": "x",
+                    "filename": filename,
+                    "content": content,
+                    "content_type": content_type,
+                },
+            )
+
+        assert not result[0].text.startswith(
+            "Error:"
+        ), f"{content_type} should be MCP-accepted, got: {result[0].text}"
+        mq.publish.assert_awaited_once()
+        storage.upload_file.assert_awaited_once()
+
+    @pytest.mark.parametrize(
+        "filename,expected_content_type",
+        [
+            ("notes.txt", "text/plain"),
+            ("data.csv", "text/csv"),
+            ("page.html", "text/html"),
+            ("notes.md", "text/markdown"),
+            ("notes", "text/markdown"),  # no extension -> the historical default
+            ("notes.log", "text/markdown"),  # unrecognized extension -> default
+            # #197: the "code" spec pools 22 MIME aliases across 21 distinct
+            # languages under ONE registry entry -- `mime_types[0]` used to
+            # answer "text/x-python" for every one of these regardless of
+            # the real language (the issue's own verified repro list).
+            ("app.js", "text/javascript"),
+            ("lib.go", "text/x-go"),
+            ("Main.java", "text/x-java-source"),
+            ("q.sql", "application/sql"),
+            ("s.sh", "application/x-sh"),
+            ("x.rs", "text/x-rustsrc"),
+        ],
+    )
+    async def test_omitted_content_type_derives_from_filename_extension(
+        self, filename, expected_content_type
+    ):
+        """#117 review BLOCKER 2: the schema advertises 'content_type'
+        defaulting to text/markdown, but a flat default broke itself the
+        moment the extension-consistency check landed -- calling
+        upload_document(filename="notes.txt", ...) and omitting the optional
+        content_type (exactly as the schema invites) must NOT self-reject.
+        The default is now derived from the filename's extension, falling
+        back to text/markdown only when the extension is absent/unknown.
+
+        Extended for #197 (review of #121/#122/#127): the "code" spec's
+        added multi-MIME shape broke the "one MIME type per spec" assumption
+        this default derivation previously relied on -- see
+        `_default_upload_content_type` and
+        `inh_contracts.file_types.mime_type_for_extension`.
+        """
+        db = AsyncMock()
+        db.validate_api_key = AsyncMock(return_value=self._key())
+        db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
+        db.get_document_id_by_content_hash = AsyncMock(return_value=None)
+        db.get_document_id_by_filename = AsyncMock(return_value=None)
+        db.create_or_reset_pending_document = AsyncMock(return_value=None)
+
+        storage = self._storage()
+        mq = self._mq()
+        p1, p2 = self._intake_patches(storage, mq)
+
+        with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)), p1, p2:
+            content = await _call_tool(
+                "upload_document",
+                {"api_key": "x", "filename": filename, "content": "some content"},
+            )
+
+        assert not content[0].text.startswith("Error"), content[0].text
+        assert f'"mime_type":"{expected_content_type}"' in content[0].text or (
+            f'"mime_type": "{expected_content_type}"' in content[0].text
+        )
+
+    async def test_go_file_with_omitted_content_type_is_not_labelled_python(self):
+        """#197 regression, asserted directly against the value persisted to
+        storage/DB (not just the JSON response body): a .go file with
+        `content_type` omitted must resolve to 'text/x-go', never
+        'text/x-python' -- the exact defect the issue reports. Checked at
+        `create_or_reset_pending_document`'s `content_type` kwarg (what
+        actually lands in the document's stored metadata and the MQ message
+        `extract_text` reads `content_type` from) so this can't pass on a
+        response-body coincidence alone."""
+        db = AsyncMock()
+        db.validate_api_key = AsyncMock(return_value=self._key())
+        db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
+        db.get_document_id_by_content_hash = AsyncMock(return_value=None)
+        db.get_document_id_by_filename = AsyncMock(return_value=None)
+        db.create_or_reset_pending_document = AsyncMock(return_value=None)
+
+        storage = self._storage()
+        mq = self._mq()
+        p1, p2 = self._intake_patches(storage, mq)
+
+        with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)), p1, p2:
+            content = await _call_tool(
+                "upload_document",
+                {"api_key": "x", "filename": "lib.go", "content": "package main\n"},
+            )
+
+        assert not content[0].text.startswith("Error"), content[0].text
+        stored_content_type = db.create_or_reset_pending_document.call_args.kwargs["content_type"]
+        assert stored_content_type == "text/x-go"
+        assert stored_content_type != "text/x-python"
+
+    async def test_explicit_content_type_is_never_overridden_by_extension(self):
+        """Coordinator adversarial-review regression pin (#193 blocker): an
+        EXPLICITLY declared content_type must always be honored as-is, even
+        when it disagrees with what the filename's extension would have
+        derived. This is the deliberate flip side of removing the schema's
+        `"default": "text/markdown"` -- that default was REMOVED (not just
+        left undocumented) specifically because a JSON Schema `default` is
+        advertised to the CLIENT, and several real MCP clients / tool-calling
+        layers pre-fill an omitted argument from its advertised default
+        before the server ever observes an omission. With the default
+        present, `content_type = declared_content_type or
+        _default_upload_content_type(filename)` received an explicit
+        "text/markdown" for EVERY upload whose caller omitted content_type
+        (not just genuinely-ambiguous ones), short-circuiting #197's
+        extension derivation entirely -- reproduced on this repo pre-fix:
+        uploading `main.go` this way stored content_type=text/markdown /
+        chunking_hint=prose instead of text/x-go / code.
+
+        Decision (explicit stated by review): an explicit declaration is
+        NEVER second-guessed against the filename -- this test pins that a
+        caller who legitimately wants "text/markdown" for a .go file (e.g.
+        a markdown-fenced code snippet saved with a misleading name) still
+        gets it. `check_extension_consistency` only rejects a BINARY-format
+        extension (`magic is not None`) declared under a mismatched type;
+        .go's "code" spec has no magic signature, so any declared text
+        content_type is accepted for it by design (see that function's own
+        docstring)."""
+        db = AsyncMock()
+        db.validate_api_key = AsyncMock(return_value=self._key())
+        db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
+        db.get_document_id_by_content_hash = AsyncMock(return_value=None)
+        db.get_document_id_by_filename = AsyncMock(return_value=None)
+        db.create_or_reset_pending_document = AsyncMock(return_value=None)
+
+        storage = self._storage()
+        mq = self._mq()
+        p1, p2 = self._intake_patches(storage, mq)
+
+        with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)), p1, p2:
+            content = await _call_tool(
+                "upload_document",
+                {
+                    "api_key": "x",
+                    "filename": "main.go",
+                    "content": "package main\n",
+                    "content_type": "text/markdown",
+                },
+            )
+
+        assert not content[0].text.startswith("Error"), content[0].text
+        stored_content_type = db.create_or_reset_pending_document.call_args.kwargs["content_type"]
+        assert stored_content_type == "text/markdown", (
+            "an EXPLICIT content_type must be honored as-is, never re-derived "
+            "from the filename extension"
+        )
+        assert stored_content_type != "text/x-go"
+
+    async def test_legacy_doc_rejected_with_explicit_content_type(self):
+        """#124/#126 review blocker 3: application/msword must get the same
+        actionable "convert to .docx" message as REST, not the generic
+        SUPPORTED_TEXT_MIME_TYPES allow-list dump."""
+        db = AsyncMock()
+        db.validate_api_key = AsyncMock(return_value=self._key())
+        db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
+        db.create_or_reset_pending_document = AsyncMock()
+
+        storage = self._storage()
+        mq = self._mq()
+        p1, p2 = self._intake_patches(storage, mq)
+
+        with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)), p1, p2:
+            content = await _call_tool(
+                "upload_document",
+                {
+                    "api_key": "x",
+                    "filename": "report.doc",
+                    "content": "pasted document text",
+                    "content_type": "application/msword",
+                },
+            )
+
+        assert content[0].text.startswith("Error")
+        assert ".docx" in content[0].text
+        storage.upload_file.assert_not_awaited()
+        db.create_or_reset_pending_document.assert_not_awaited()
+
+    async def test_legacy_doc_rejected_even_with_content_type_omitted(self):
+        """The exact accept-then-garble gap the review found: with
+        content_type omitted, `_default_upload_content_type("report.doc")`
+        used to fall through to 'text/markdown' (MCP-eligible) since '.doc'
+        has no FILE_TYPE_REGISTRY entry -- silently accepting and indexing
+        the exact format #126 says must be rejected. The extension itself
+        must be checked, not just a declared MIME type."""
+        db = AsyncMock()
+        db.validate_api_key = AsyncMock(return_value=self._key())
+        db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
+        db.get_document_id_by_content_hash = AsyncMock(return_value=None)
+        db.get_document_id_by_filename = AsyncMock(return_value=None)
+        db.create_or_reset_pending_document = AsyncMock()
+
+        storage = self._storage()
+        mq = self._mq()
+        p1, p2 = self._intake_patches(storage, mq)
+
+        with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)), p1, p2:
+            content = await _call_tool(
+                "upload_document",
+                {
+                    "api_key": "x",
+                    "filename": "report.doc",
+                    "content": (
+                        "Q3 revenue was 4.2M and the CEO approved the layoffs, "
+                        "pasted straight from a .doc file"
+                    ),
+                },
+            )
+
+        assert content[0].text.startswith("Error"), content[0].text
+        assert ".docx" in content[0].text
+        storage.upload_file.assert_not_awaited()
+        db.create_or_reset_pending_document.assert_not_awaited()
+
+    async def test_outlook_msg_rejected_even_with_content_type_omitted(self):
+        db = AsyncMock()
+        db.validate_api_key = AsyncMock(return_value=self._key())
+        db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
+        db.get_document_id_by_content_hash = AsyncMock(return_value=None)
+        db.get_document_id_by_filename = AsyncMock(return_value=None)
+        db.create_or_reset_pending_document = AsyncMock()
+
+        storage = self._storage()
+        mq = self._mq()
+        p1, p2 = self._intake_patches(storage, mq)
+
+        with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)), p1, p2:
+            content = await _call_tool(
+                "upload_document",
+                {"api_key": "x", "filename": "message.msg", "content": "pasted email text"},
+            )
+
+        assert content[0].text.startswith("Error"), content[0].text
+        assert ".eml" in content[0].text
+        storage.upload_file.assert_not_awaited()
+        db.create_or_reset_pending_document.assert_not_awaited()
+
     async def test_write_permission_denied(self):
         """A key without 'write' gets the standard permission error and never
         reaches storage/db."""
@@ -783,9 +1116,17 @@ class TestUploadDocumentTool:
         db.create_or_reset_pending_document.assert_not_called()
 
     async def test_unsupported_text_content_type_rejected_at_mcp_boundary(self):
-        """A text/* subtype that is NOT in the shared allow-list (e.g. text/xml)
-        is rejected at the MCP gate with the supported-types message — not passed
-        through to intake for a confusing two-step rejection (#87 review S1)."""
+        """A text/* subtype that is NOT in the shared allow-list (e.g.
+        text/rtf) is rejected at the MCP gate with the supported-types
+        message — not passed through to intake for a confusing two-step
+        rejection (#87 review S1).
+
+        text/xml was this test's original example, but #121 registered XML
+        (`application/xml`/`text/xml`) as `rest+mcp` -- it is now a
+        legitimately MCP-eligible type (see
+        TestUploadDocumentTool::test_new_text_family_types_accepted below),
+        so it no longer demonstrates "unsupported". text/rtf remains
+        genuinely unregistered."""
         db = AsyncMock()
         db.validate_api_key = AsyncMock(return_value=self._key())
         db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
@@ -796,9 +1137,9 @@ class TestUploadDocumentTool:
                 "upload_document",
                 {
                     "api_key": "x",
-                    "filename": "data.xml",
-                    "content": "<x/>",
-                    "content_type": "text/xml",
+                    "filename": "data.rtf",
+                    "content": "{\\rtf1 hello}",
+                    "content_type": "text/rtf",
                 },
             )
 

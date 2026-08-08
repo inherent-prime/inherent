@@ -5,18 +5,23 @@ meta {
 }
 
 get {
-  url: {{ingest_base}}/lineage/{{document_id}}
+  url: {{ingest_base}}/lineage/{{document_id}}?workspace_id={{workspace_id}}
   body: none
   auth: inherit
 }
 
+params:query {
+  workspace_id: {{workspace_id}}
+}
+
 tests {
-  test("status is 200", function() {
-    expect(res.status).to.equal(200);
+  test("status is 200 or 404 (not owned)", function() {
+    expect([200, 404]).to.include(res.status);
   });
 }
 
 docs {
   Get data lineage for a document: an ordered list of ingestion pipeline step events. Returns
-  `{ document_id, events: [...] }`.
+  `{ document_id, events: [...] }`. `workspace_id` query param is required and must own
+  `document_id` (#177); 404 if the document isn't found in that workspace.
 }

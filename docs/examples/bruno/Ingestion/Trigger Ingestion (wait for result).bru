@@ -37,4 +37,7 @@ tests {
 docs {
   Same as Trigger Ingestion but blocks until the workflow finishes and returns **200 OK** with the
   full result (`success`, `chunks_created`, `processing_time_ms`).
+
+  Security (#210): same storage_path/workspace_id prefix check as Trigger Ingestion --
+  see that request's docs. **403** on mismatch.
 }

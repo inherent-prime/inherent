@@ -49,7 +49,40 @@ class DocumentUploadMessage(BaseModel):
         "older messages produced without it still validate.",
     )
 
-    @field_validator("storage_bucket", "storage_url", mode="before")
+    # Ingestion source labeling (inherent-systems/prime#187). intg-svc's
+    # uploadDocument() derives one of "connector:<provider>" | "public-api" |
+    # "manual" for every upload. Optional + defaulted to None so in-flight/
+    # legacy messages produced before this field existed still validate
+    # (backward compat) — consumers treat a missing source as "unknown".
+    #
+    # max_length=500 (#141 adversarial pass): these are meant to be short IDs
+    # (UUIDs, provider-prefixed labels) that the ingestion-svc trigger attaches
+    # to a Temporal workflow memo. A pathologically oversized value here must
+    # fail LOUDLY as a validation error — which trigger.py's existing poison
+    # path (PydanticValidationError -> dead-letter, see #6) already handles —
+    # rather than being silently truncated into a plausible-looking but wrong
+    # value downstream (a truncated connection_id looks like a real one; a
+    # rejected message does not).
+    source: str | None = Field(
+        None,
+        max_length=500,
+        description="Ingestion source: connector:<provider> | public-api | manual. "
+        "Absent on messages produced before this field existed.",
+    )
+    connection_id: str | None = Field(
+        None,
+        max_length=500,
+        description="Connector connection identifier (connector-sourced uploads only)",
+    )
+    sync_id: str | None = Field(
+        None,
+        max_length=500,
+        description="Connector sync run identifier (connector-sourced uploads only)",
+    )
+
+    @field_validator(
+        "storage_bucket", "storage_url", "source", "connection_id", "sync_id", mode="before"
+    )
     @classmethod
     def unwrap_avro_union(cls, v: None | str | dict) -> str | None:
         """Unwrap Avro union type format.
@@ -85,6 +118,9 @@ class DocumentUploadMessage(BaseModel):
                 "storage_bucket": "documents",
                 "storage_url": "https://storage.googleapis.com/documents/workspaces/...",
                 "timestamp": "2024-01-15T10:30:00Z",
+                "source": "connector:notion",
+                "connection_id": "conn_123",
+                "sync_id": "sync_456",
             }
         }
     )

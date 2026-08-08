@@ -1,6 +1,6 @@
 [project]
 name = "inh-contracts"
-version = "2.0.0"
+version = "2.2.0"
 description = "Shared contracts (Weaviate naming + versioned event schemas) consumed by the ingestion and public-api services"
 readme = "Readme.md"
 requires-python = ">=3.11"
@@ -52,10 +52,19 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 python_files = ["test_*.py", "*_test.py"]
 python_functions = ["test_*"]
+# Mirrors the two services' pytest addopts (--cov=src) so `ci.yml`'s shared
+# `--cov-fail-under=${{ matrix.cov_fail_under }}` Test step works the same
+# way for this package (#132 item 4 -- this package previously ran in no
+# automation at all, so a change to a shared constant like DEFAULT_S3_REGION
+# was caught by nothing).
+addopts = "--cov=src --cov-report=term-missing"
 markers = [
     "contract: contract/schema regression tests for shared event + naming surfaces",
     "unit: fast isolated unit tests",
 ]
+
+[tool.coverage.report]
+precision = 1
 
 # Mirrors [project.optional-dependencies].dev so `uv sync --extra dev --group dev`
 # resolves to the same normalized pins regardless of which flag is used (M7 #21).

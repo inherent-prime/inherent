@@ -2,8 +2,15 @@
 
 TDD: written before SearchService._diversify_by_document existed. Exercises
 the round-robin diversification logic directly (pure function, no Weaviate/
-httpx needed) plus the settings flag's default-off gating in
+httpx needed) plus the settings flag's default-on gating in
 SearchService.search via _search_weaviate's post-filter step.
+
+The default flipped to True in #146's follow-up once both eval-gate
+conditions were met (documented eval improvement + maintainer approval,
+2026-08-06 -- see ADR 0004's amendment and settings.py). An operator can
+still set ENABLE_DIVERSIFICATION=false to restore the pre-#146 behavior;
+that off path stays covered below (TestFetchLimitComposition and the
+explicit off case in TestDiversificationSettingsGate).
 """
 
 from __future__ import annotations
@@ -104,12 +111,45 @@ class TestDiversifyByDocument:
         assert len(out) == 2
         assert {r.document_id for r in out} == {"docA", "docB"}
 
+    def test_single_document_workspace_still_fills_the_page(self) -> None:
+        """Adversarial case (#146 review, now on by default): a workspace
+        where every candidate belongs to one document must not return FEWER
+        than `limit` results just because there is nothing to diversify
+        against -- the single bucket round-robins with itself, which is
+        equivalent to a plain score-sorted truncate (documented as a
+        boundary in ADR 0004: "Not a fix for single-document corpora").
+        A regression here would silently under-fill every single-document
+        workspace's search results once diversification is the default.
+        """
+        candidates = [_result(f"a{i}", "docA", 0.9 - i * 0.01) for i in range(20)]
+        out = SearchService._diversify_by_document(candidates, limit=5)
+        assert len(out) == 5
+        assert {r.document_id for r in out} == {"docA"}
+        # Still the top-5 by score, in score order -- self-round-robin changes
+        # nothing about which candidates win or their relative order.
+        assert [r.chunk_id for r in out] == ["a0", "a1", "a2", "a3", "a4"]
+
 
 class TestDiversificationSettingsGate:
-    def test_disabled_by_default(self) -> None:
+    def test_enabled_by_default(self) -> None:
+        """Eval-gate policy cleared (#146): both conditions were met --
+        documented eval improvement (recall@5 0.5->1.0 on multi_doc_crowding,
+        ADR 0004) and maintainer approval (ADR 0004 amendment, 2026-08-06) --
+        so diversification now ships on by default.
+        """
         from src.config.settings import get_settings
 
-        assert get_settings().enable_diversification is False
+        assert get_settings().enable_diversification is True
+
+    def test_operator_can_still_disable_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An operator who wants the pre-#146 behavior sets
+        ENABLE_DIVERSIFICATION=false; Settings must still honor that override
+        (this is a real operator escape hatch, not just an internal flag).
+        """
+        from src.config.settings import Settings
+
+        monkeypatch.setenv("ENABLE_DIVERSIFICATION", "false")
+        assert Settings().enable_diversification is False  # type: ignore[call-arg]
 
 
 class TestFetchLimitComposition:

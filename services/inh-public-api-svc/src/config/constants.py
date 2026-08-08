@@ -2,18 +2,17 @@
 
 from typing import Final, Literal
 
+from inh_contracts.file_types import all_mime_types
+
 # API version
 API_VERSION: Final[str] = "v1"
 
-# Rate limits by pricing tier (requests per minute)
-PLAN_RATE_LIMITS: Final[dict[str, int]] = {
-    "starter": 100,  # $149/month
-    "pro": 500,  # $349/month
-    "team": 2000,  # $799/month
-    "enterprise": 10000,  # $2K+/month
-}
+# Default Postgres database name — single-sourced so the local DATABASE_URL
+# default and the Cloud SQL database default can't drift apart (they name
+# the same database).
+DEFAULT_DATABASE_NAME: Final[str] = "knowledge_base"
 
-# Default rate limit for keys without tier info
+# Default rate limit for keys without an explicit limit (see ApiKey.rate_limit)
 DEFAULT_RATE_LIMIT: Final[int] = 100
 
 # Rate limit window in seconds
@@ -79,16 +78,13 @@ HEALTH_STATUS_UNHEALTHY: Final[HealthStatus] = "unhealthy"
 
 # Upload limits
 MAX_UPLOAD_SIZE_BYTES: Final[int] = 50 * 1024 * 1024  # 50 MB
-ALLOWED_MIME_TYPES: Final[list[str]] = [
-    "text/plain",
-    "text/markdown",
-    "text/csv",
-    "text/html",
-    "application/pdf",
-    "application/json",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # .docx
-    "image/png",  # OCR via Tesseract (graceful fallback when OCR unavailable)
-]
+
+# Derived from the single file-type registry (#117) --
+# services/inh-contracts/src/inh_contracts/file_types.py. Do NOT hand-edit
+# this list: it used to be its own hand-maintained copy that could (and did)
+# drift from the MCP surface's own copy and from extraction's dispatch table.
+# Add/remove a supported type by editing FILE_TYPE_REGISTRY instead.
+ALLOWED_MIME_TYPES: Final[list[str]] = all_mime_types()
 
 # Search constraints
 MAX_SEARCH_QUERY_LENGTH: Final[int] = 1000
@@ -100,6 +96,10 @@ MIN_SEARCH_SCORE: Final[float] = 0.0
 MAX_PAGE_SIZE: Final[int] = 100
 DEFAULT_PAGE_SIZE: Final[int] = 20
 
-# Timeouts (in seconds)
-DATABASE_HEALTH_CHECK_TIMEOUT: Final[float] = 5.0
-WEAVIATE_HEALTH_CHECK_TIMEOUT: Final[float] = 5.0
+# Health-check timeouts (#203): moved to Settings
+# (database_health_check_timeout_seconds / weaviate_health_check_timeout_seconds)
+# so the operator-facing env vars actually reach the health endpoints. These
+# constants used to shadow that Settings field completely -- api/v1/health.py
+# read them instead, so the setting had zero call sites and setting it did
+# nothing. Do not reintroduce a hardcoded timeout constant here; add a new
+# Settings field instead.

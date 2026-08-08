@@ -21,3 +21,15 @@ def test_rate_limit_metric_not_labeled_by_key_id():
 def test_record_search_request_still_increments():
     # Must remain callable (best-effort instrumentation) after dropping the label.
     metrics.record_search_request("hybrid")
+
+
+def test_workspace_ownership_lookup_degraded_metric_labeled_by_source_only():
+    # #184: only a small bounded `source` set (mongo / postgres_fallback /
+    # mongo_ownership_check) -- never user_id/workspace_id, which are
+    # unbounded (#20).
+    assert metrics.workspace_ownership_lookup_degraded_total._labelnames == ("source",)
+
+
+def test_record_workspace_ownership_lookup_degraded_still_increments():
+    # Must remain callable (best-effort instrumentation).
+    metrics.record_workspace_ownership_lookup_degraded("mongo")

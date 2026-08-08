@@ -330,7 +330,7 @@ services:
       MCP_PORT: 8001
       ENVIRONMENT: development
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-knowledge_base}
-      MONGODB_URI: mongodb://mongodb:27017/main
+      MONGODB_URI: mongodb://mongodb:27017
       MONGODB_DB_NAME: main
       WEAVIATE_URL: http://weaviate:8080
       WEAVIATE_API_KEY: ${WEAVIATE_API_KEY:-local-dev-weaviate-key}
@@ -350,12 +350,16 @@ services:
       # exercise the ingestion→search path unthrottled. Rate-limit behavior has
       # its own offline coverage (tests/integration/test_rate_limiting.py).
       RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
-      # EXPERIMENTAL (#146), off by default -- see settings.py and
-      # docs/advanced-indexes.md. Exposed so local Compose runs can measure
-      # it against the golden corpus (tests/evals/) without editing this
-      # file: `ENABLE_DIVERSIFICATION=true docker compose up -d --force-recreate
+      # On by default since 2026-08-06 (#146, see settings.py and
+      # docs/advanced-indexes.md) -- this Compose default must track
+      # settings.py's default or this env var silently overrides it and
+      # every Compose/CI run (including the retrieval-eval gate) would keep
+      # measuring the old, off, behavior even after the code default flips.
+      # Exposed so local Compose runs can still measure the off path against
+      # the golden corpus (tests/evals/) without editing this file:
+      # `ENABLE_DIVERSIFICATION=false docker compose up -d --force-recreate
       # inh-public-api-svc`.
-      ENABLE_DIVERSIFICATION: ${ENABLE_DIVERSIFICATION:-false}
+      ENABLE_DIVERSIFICATION: ${ENABLE_DIVERSIFICATION:-true}
       LOG_LEVEL: INFO
     depends_on:
       postgres-init:

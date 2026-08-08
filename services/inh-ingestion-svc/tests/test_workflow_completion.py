@@ -189,7 +189,10 @@ class FakeWorkflowModule:
         return datetime.now(UTC)
 
     def info(self):
-        return SimpleNamespace(run_id="run-1")
+        # start_time (#110 follow-up): the real workflow.info().start_time is
+        # used to make the fencing claim monotonic (see
+        # DocumentIngestionWorkflow.run / DatabaseService.create_pending_document).
+        return SimpleNamespace(run_id="run-1", start_time=datetime.now(UTC))
 
     def execute_activity(self, activity_fn, arg, **kwargs):
         name = getattr(activity_fn, "__name__", str(activity_fn))
@@ -291,6 +294,95 @@ class TestWorkflowPublishesCompletion:
         assert len(publishes) == 1
         assert publishes[0].success is False
         assert "boom" in (publishes[0].error or "")
+
+    @pytest.mark.asyncio
+    async def test_activity_error_cause_reaches_error_message_not_generic_wrapper_text(self):
+        """Review follow-up (the exact trap CLAUDE.md/learnings.md warns
+        about): `workflow.execute_activity` wraps the activity's real
+        exception in a Temporal `ActivityError` whose OWN `str()` is always
+        the generic, hardcoded "Activity task failed" -- the actual cause
+        (here, `_extract_pdf_text`'s non-retryable `ApplicationError`) lives
+        on `.cause`. Before this fix, `run()`'s `except Exception as e:`
+        interpolated `str(e)` directly at every site (document status,
+        dead-letter row, completion event, workflow result) -- so EVERY
+        extraction failure read "Activity task failed" instead of the real
+        cause, and `_classify_error("Activity task failed")` matches none of
+        its keywords, so it classified as "unknown" and never surfaced via
+        `GET /dead-letter?error_type=extraction_failed`.
+
+        This constructs a REAL `temporalio.exceptions.ActivityError` (not a
+        hand-fed string to `_classify_error` -- that only proves the
+        classifier's own keyword matching works, not that the real error
+        ever reaches it) with `.cause` set to the ApplicationError
+        `_extract_pdf_text` actually raises, and asserts the cause -- not
+        the wrapper's generic text -- reaches every one of the four sites
+        `run()`'s except block writes to, AND that dead-letter recording
+        classifies it as "extraction_failed" through the real
+        `_record_dead_letter_best_effort` -> `_classify_error` path."""
+        from temporalio.exceptions import ActivityError, ApplicationError, RetryState
+
+        from src.temporal.workflows import document_ingestion
+
+        # The real, non-retryable ApplicationError _extract_pdf_text raises
+        # (#195) for a corrupt PDF -- this is what ends up on `.cause`.
+        real_cause = ApplicationError(
+            "PDF extraction failed: could not read the document "
+            "(PdfStreamError: Stream has ended unexpectedly). The file may "
+            "be corrupt, truncated, password-protected, or not actually a "
+            "PDF despite its declared type.",
+            type="PdfOpenFailed",
+            non_retryable=True,
+        )
+        # A real ActivityError, constructed the way the Temporal SDK
+        # constructs one -- its own message is ALWAYS this generic string,
+        # regardless of what the activity actually raised.
+        activity_error = ActivityError(
+            "Activity task failed",
+            scheduled_event_id=1,
+            started_event_id=2,
+            identity="worker-1",
+            activity_type="extract_text",
+            activity_id="1",
+            retry_state=RetryState.RETRY_POLICY_NOT_SET,
+        )
+        activity_error.__cause__ = real_cause
+        assert str(activity_error) == "Activity task failed"  # sanity: the trap is real
+
+        fake = FakeWorkflowModule(dict(HAPPY_OUTPUTS), raising={"extract_text": activity_error})
+        wf = document_ingestion.DocumentIngestionWorkflow()
+        with patch.object(document_ingestion, "workflow", fake):
+            result = await wf.run(make_workflow_input())
+
+        # The workflow result's error must be the CAUSE, not the wrapper.
+        assert result.success is False
+        assert "Activity task failed" not in (result.error or "")
+        assert "PDF extraction failed" in (result.error or "")
+        assert "PdfStreamError" in (result.error or "")
+
+        # set_document_status: same cause, not the generic wrapper text.
+        # (An earlier 'processing' status write with no error_message also
+        # happens on the happy path before extraction runs -- the FAILURE
+        # write, the last call, is the one this pins.)
+        status_calls = fake.calls_for("set_document_status")
+        failed_status_calls = [c for c in status_calls if c.status == "failed"]
+        assert len(failed_status_calls) == 1
+        assert "Activity task failed" not in failed_status_calls[0].error_message
+        assert "PDF extraction failed" in failed_status_calls[0].error_message
+
+        # record_dead_letter: same cause AND classified correctly through
+        # the real _classify_error call inside
+        # _record_dead_letter_best_effort -- not a hand-fed string.
+        dead_letter_calls = fake.calls_for("record_dead_letter")
+        assert len(dead_letter_calls) == 1
+        assert "Activity task failed" not in dead_letter_calls[0].error_message
+        assert "PDF extraction failed" in dead_letter_calls[0].error_message
+        assert dead_letter_calls[0].error_type == "extraction_failed"
+
+        # publish_completion (document.failed event): same cause.
+        publishes = fake.calls_for("publish_completion")
+        assert len(publishes) == 1
+        assert "Activity task failed" not in (publishes[0].error or "")
+        assert "PDF extraction failed" in (publishes[0].error or "")
 
     @pytest.mark.asyncio
     async def test_publish_failure_does_not_fail_successful_ingestion(self):

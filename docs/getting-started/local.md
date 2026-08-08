@@ -346,6 +346,18 @@ Or list namespaces via the Temporal UI REST API:
 curl -s http://localhost:18233/api/v1/namespaces | jq .
 ```
 
+Each `DocumentIngestionWorkflow` execution carries a `source` memo
+(`connector:<provider>` | `public-api` | `manual`) plus `connection_id`/
+`sync_id` when the document came from a connector sync. It shows in the
+workflow summary panel — no namespace search-attribute registration needed —
+so you can tell a connector sync apart from a manual/dashboard upload without
+opening the workflow input. `inh-public-api-svc` (both the REST upload route
+and the `upload_document` MCP tool) always sets `"source": "public-api"`.
+`unknown` means the publishing producer has not been updated to set `source`
+at all — either a message produced before the field existed, or a producer
+outside this repo (e.g. a source connector) that has not adopted it yet — it
+is NOT a sign of a stale deploy of `inh-public-api-svc` itself.
+
 ### Weaviate — vector store not indexing
 
 Check Weaviate readiness:

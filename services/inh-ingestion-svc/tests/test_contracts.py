@@ -40,6 +40,10 @@ CANONICAL_UPLOAD_KEYS_V1 = {
     "storage_url",
     "timestamp",
     "contract_version",
+    # Ingestion source labeling (inherent-systems/prime#187) — additive, optional, backward compatible.
+    "source",
+    "connection_id",
+    "sync_id",
 }
 
 
@@ -59,6 +63,9 @@ def _canonical_upload_event() -> dict:
         "storage_url": "https://storage.googleapis.com/documents/workspaces/doc.pdf",
         "timestamp": "2024-01-15T10:30:00Z",
         "contract_version": "1.0.0",
+        "source": "connector:notion",
+        "connection_id": "conn_123",
+        "sync_id": "sync_456",
     }
 
 

@@ -5,15 +5,15 @@ meta {
 }
 
 get {
-  url: {{ingest_base}}/dead-letter?status=pending&limit=50
+  url: {{ingest_base}}/dead-letter?workspace_id={{workspace_id}}&status=pending&limit=50
   body: none
   auth: inherit
 }
 
 params:query {
+  workspace_id: {{workspace_id}}
   status: pending
   limit: 50
-  ~workspace_id: {{workspace_id}}
 }
 
 tests {
@@ -23,6 +23,7 @@ tests {
 }
 
 docs {
-  List dead-letter jobs. Optional filters: `workspace_id`, `status` (default `pending`),
+  List dead-letter jobs. `workspace_id` is required (#177 -- it used to be an optional filter,
+  which returned every workspace's dead-letter rows). Optional: `status` (default `pending`),
   `limit` (1–200, default 50).
 }

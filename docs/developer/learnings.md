@@ -10,6 +10,160 @@ this file — read the matching entry before touching the related area. Add an
 entry when a shipped defect teaches something a rule alone can't carry: one
 entry per root cause, newest first.
 
+## #110 — A fixed workflow id turns a routine race into a ~10-minute stall, and terminating a workflow doesn't stop its work (2026-08-06)
+
+**Defect (round 1).** `DocumentIngestionWorkflow` is started with a
+deterministic id (`ingest-{document_id}`,
+`services/inh-ingestion-svc/src/temporal/trigger.py`) so a workflow can be
+addressed for status queries by document_id alone. That determinism is also
+a collision surface: re-indexing a document (edited-content re-upload, or
+the `/refresh` endpoint under load) while the prior run for the same
+document_id was still open hit Temporal's default `id_conflict_policy`
+(`UNSPECIFIED`), which raises `WorkflowAlreadyStartedError` on a same-id
+collision against a running execution. That exception propagated out of the
+MQ handler, so `RedisMQService` never ACKed the message — and every
+redelivery collided with the *same* still-open run and failed again, so the
+message effectively wasn't retried on a fixed cadence at all: it waited out
+however long the stale run took to close on its own (~10min in the CI run
+that surfaced it).
+
+**Defect (round 2 — independent review caught what round 1 missed).** The
+round-1 fix (`id_conflict_policy=WorkflowIDConflictPolicy.TERMINATE_EXISTING`
+on the MQ path) resolves the collision but was shipped with four gaps, all
+from the same wrong assumption: that terminating a Temporal WORKFLOW stops
+its work.
+
+- **It doesn't.** `grep -rn heartbeat src/` returns nothing — no activity in
+  this service heartbeats, and no `cancellation_type` is set on any
+  `execute_activity` call. Temporal only interrupts a running activity via a
+  heartbeat round-trip; termination closes the workflow execution
+  server-side and never delivers another workflow task, so an
+  already-dispatched `store_in_postgresql` / `store_in_weaviate` from the
+  terminated (superseded) run keeps running on the worker, unaware, and its
+  eventual write can land AFTER the newer run already committed — silently
+  reverting the document to stale content while reporting
+  `status='processed'`. Fixed with a fencing token
+  (`processed_documents.active_run_id`, migration 016): every run claims the
+  document as its first action, and the store activities only commit when
+  the claim still matches the run doing the write.
+- **The staging-cleanup justification for the above was itself false, and
+  would have shipped as a citation, not a check.** The PR claimed orphaned
+  staging rows were "covered by a 1-hour safety net"
+  (`StagingService.cleanup_stale`). True that it filters on a 1-hour age —
+  false that it runs periodically: it's called exactly twice in
+  `worker.py`, both at worker STARTUP. Pre-#110 that was fine (staging could
+  only orphan on a worker crash, which implies a restart, which re-triggers
+  the sweep). Post-#110, termination is a ROUTINE event on an
+  otherwise-healthy worker that never restarts, and termination skips the
+  workflow's own `finally: cleanup_staging` (termination doesn't run
+  workflow code at all — unlike cancellation, which the workflow's own
+  try/except/finally CAN observe). So every superseded re-index now orphans
+  a row with no compensating cleanup until the worker happens to restart.
+  Fixed with an actual periodic task (`_periodic_staging_cleanup`, 15 min).
+  Lesson: a citation to "existing infrastructure already handles this" is a
+  claim, not a check — read the code path, don't infer it from a comment
+  or a plausible-sounding name like "safety net."
+- **The pattern sweep checked the wrong axis.** Round 1 enumerated other
+  `start_workflow` call SITES sharing the fixed-id shape. The right axis for
+  a change to a shared METHOD (`trigger_workflow_async`) is its CALLERS —
+  there were two (`src/main.py`'s MQ handler and `src/api/app.py`'s
+  dead-letter retry), and the second was missed. A dead-letter retry replays
+  a payload that already failed once — possibly long ago, possibly
+  superseded by a since-corrected upload — so it must NOT get the same
+  supersede-on-collision behavior a fresh upload/refresh event should.
+  Fixed by making the conflict policy a per-call parameter
+  (`supersede_running`), not a shared module constant.
+- **A behavior change to a shared method changes what its OTHER callers can
+  raise.** `POST /ingest?wait=true` blocks on `handle.result()`; before
+  #110 that could never raise in practice (the workflow catches its own
+  exceptions and returns a normal result), so nothing wrapped it. After
+  #110, an unrelated concurrent MQ refresh can terminate that exact run out
+  from under the waiting caller, and `handle.result()` now raises
+  `WorkflowFailureError(cause=TerminatedError)` — an unhandled 500 without
+  this fix. When a change makes an exception newly reachable somewhere, grep
+  isn't enough to find where — trace every caller of what changed, including
+  ones several files away that don't obviously relate to the change's own
+  described scope.
+
+**Learnings.**
+
+- A deterministic Temporal workflow id is a deliberate collision surface, not
+  an incidental one — it exists so callers/queries can address a run without
+  tracking a run id. Every `start_workflow` call using one needs an explicit
+  decision about `id_conflict_policy`, made at the call site, not inherited
+  silently from the SDK default (`UNSPECIFIED` raises). Grep for `id=f"` next
+  to `start_workflow(` when auditing this pattern — the fixed-id shape is
+  visible in the string itself.
+- The right conflict policy depends on what a fresh request *means*: a
+  synchronous duplicate request (accidental double-click) should be rejected
+  fast (409) so the caller doesn't do double work — that's what `/ingest` and
+  the chunk-edit endpoint already did correctly, and what dead-letter retry
+  needed too (round 2). A re-index/refresh is different: the fresh event *is*
+  the newer truth, so it should supersede a stale in-flight run
+  (`WorkflowIDConflictPolicy.TERMINATE_EXISTING`), not queue behind it or
+  bounce off it as a conflict. Naming the same exception doesn't mean the
+  same handling is correct everywhere it's caught — and it isn't even always
+  the same handling for the same METHOD, once that method has more than one
+  caller with different intents.
+- **`TERMINATE_EXISTING` (or terminating a workflow at all) is not a
+  cancellation primitive** — it stops the workflow's orchestration, not any
+  activity already dispatched. Anything that relies on "terminating the
+  workflow stops its side effects" needs either (a) activity
+  heartbeating + `cancellation_type` wired so termination can actually reach
+  in-flight work, or (b) an application-level fencing token so the SIDE
+  EFFECT (the write), not the orchestration, is what refuses stale work.
+  This codebase chose (b) — cheaper to reason about correctly than wiring
+  heartbeats through every activity, and it doesn't depend on Temporal's
+  cancellation delivery timing.
+- A raised exception on an MQ consumer path doesn't fail fast by default — it
+  fails on whatever cadence the queue's redelivery/reclaim logic happens to
+  produce, which can be far slower and less regular than the nominal retry
+  interval suggests (see #179, filed alongside this fix: the reclaim pass
+  itself only runs when *unrelated* new traffic also arrives on the stream).
+  When a stall shows up as "roughly N minutes" in an incident, distrust that
+  as a constant until you've traced the actual mechanism producing it — here
+  it was "however long the other workflow run happens to take," not a timeout.
+- Judge/UAT review is not redundant with tests-green. UAT accepted this fix;
+  an independent judge caught four blockers a persona-driven walkthrough
+  didn't, by asking "what does termination actually stop?" and "is this
+  claim about existing infrastructure actually true?" — both questions a
+  passing test suite doesn't ask on its own.
+
+**Defect (round 3 — fencing the write is not enough if the CLAIM isn't
+ordered).** Round 2's fencing token stopped a stale write from landing, but
+the CLAIM step that sets `active_run_id` was itself a bare unconditional
+UPDATE with no ordering predicate — whichever transaction committed LAST
+owned the document, regardless of which run actually STARTED later. Concrete
+inversion this allowed, in exactly the retry window #110 exists to serve: run
+A starts, its claim activity is dispatched; ~50ms later a fresh run B
+terminates A and starts. Termination doesn't stop A's already-dispatched
+claim activity (same premise the store-side fence already accepts). If A's
+claim commits AFTER B's, the DEAD run A ends up owning `active_run_id`, and
+B — the legitimate, newest run — gets fenced out of its OWN store step. The
+newest content that's supposed to "win immediately" instead hard-fails and
+gets dead-lettered. Fixed by ordering the claim on each run's Temporal
+**start time** (`workflow.info().start_time`, deterministic and
+workflow-supplied) rather than commit order: `active_run_claimed_at`
+(migration 017), guarded with "unclaimed OR existing claim started at or
+before mine."
+
+- **A fence that protects the WRITE still needs an ordered CLAIM, or the
+  claim itself becomes the race.** Fencing tokens are usually presented as a
+  single mechanism ("check a token before writing"), but there are actually
+  two operations that both need correctness: acquiring/updating the token
+  (the claim) and checking it (the write guard). Round 2 got the second half
+  right and missed that the first half was just as exposed to the same
+  "termination doesn't stop in-flight activities" premise the whole fix is
+  built on. When you fence step N of a workflow, ask whether step N-1 (or
+  any earlier step) needs the same treatment — a fence that's airtight
+  everywhere except where the token itself is written is not airtight.
+- **Prefer a domain timestamp Temporal already gives you over inventing an
+  ordering scheme.** `workflow.info().start_time` was sitting right there,
+  deterministic and safe inside `@workflow.run` (unlike `datetime.now()`,
+  which would break workflow replay). No new coordination mechanism, no
+  clock synchronization concerns beyond what Temporal's server already
+  guarantees for workflow metadata.
+
 ## #146 — A single-probe readiness wait races the rest of the corpus it's gating (2026-07-24)
 
 **Defect.** `test_compose_retrieval_regression.py`'s corpus-readiness wait

@@ -72,6 +72,7 @@ async def test_store_processed_document_propagates_operational_error(mock_settin
             chunks=[],
             text_length=0,
             processing_time_ms=1,
+            workflow_run_id="test-run",
         )
 
     # The session must be rolled back, not committed, on failure.

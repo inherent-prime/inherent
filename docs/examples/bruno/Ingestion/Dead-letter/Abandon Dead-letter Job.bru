@@ -5,17 +5,22 @@ meta {
 }
 
 post {
-  url: {{ingest_base}}/dead-letter/1/abandon
+  url: {{ingest_base}}/dead-letter/1/abandon?workspace_id={{workspace_id}}
   body: none
   auth: inherit
 }
 
+params:query {
+  workspace_id: {{workspace_id}}
+}
+
 tests {
-  test("status is 200 or 404 (not found)", function() {
+  test("status is 200 or 404 (not found / not owned)", function() {
     expect([200, 404]).to.include(res.status);
   });
 }
 
 docs {
-  Mark a dead-letter job as permanently abandoned. 404 if the job is missing.
+  Mark a dead-letter job as permanently abandoned. `workspace_id` query param is required and
+  must own `job_id` (#177). 404 if the job is missing or not owned.
 }

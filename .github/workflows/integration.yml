@@ -170,6 +170,15 @@ jobs:
           # Slow CPU-embedding runner + queued backlog (see above): give the
           # batch time-to-searchable benchmark a generous budget.
           BENCHMARK_TIMEOUT: "600"
+          # tests/temporal/test_reindex_collision_compose.py's _wait_processed
+          # reads INTEGRATION_TIMEOUT (default 180s). This step runs LAST,
+          # after every public-api upload above has already queued behind
+          # the same CPU embedder BENCHMARK_TIMEOUT is raised for -- so its
+          # documents can plausibly take longer than the 180s default to
+          # reach 'processed' too. Match BENCHMARK_TIMEOUT so the compose
+          # collision test fails on the behavior it pins, not on a timeout
+          # budget sized for a quiet stack (#110 follow-up review item 6).
+          INTEGRATION_TIMEOUT: "600"
         run: |
           uv sync --frozen --extra dev --group dev
           uv run pytest -m compose

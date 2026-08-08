@@ -23,6 +23,10 @@ tests {
 
 docs {
   DESTRUCTIVE. Deletes the document from PostgreSQL and its chunks from Weaviate. Both
-  `workspace_id` and `user_id` query params are required. Weaviate cleanup is best-effort
-  (`weaviate_cleaned=false` if it fails). 404 if the document is not in PostgreSQL.
+  `workspace_id` and `user_id` query params are required; `workspace_id` must own `document_id`
+  (#175) -- `user_id` is accepted for backward-compatible request shape but is otherwise ignored,
+  the resolved document's own user_id always drives the Weaviate tenant lookup. Weaviate cleanup
+  is best-effort (`weaviate_cleaned=false` if it fails). 404 if the document isn't found in
+  `workspace_id` (also returned when the document exists but belongs to a different workspace --
+  no cross-tenant existence leak).
 }

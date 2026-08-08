@@ -5,18 +5,23 @@ meta {
 }
 
 get {
-  url: {{ingest_base}}/ingest/{{document_id}}/status
+  url: {{ingest_base}}/ingest/{{document_id}}/status?workspace_id={{workspace_id}}
   body: none
   auth: inherit
 }
 
+params:query {
+  workspace_id: {{workspace_id}}
+}
+
 tests {
-  test("status is 200 or 404 (no running workflow)", function() {
+  test("status is 200 or 404 (not owned / no running workflow)", function() {
     expect([200, 404]).to.include(res.status);
   });
 }
 
 docs {
   Query the real-time progress of an ingestion workflow (`step`, `progress`, `chunks_created`).
-  404 if no workflow exists or it is no longer queryable.
+  `workspace_id` query param is required and must own `document_id` (#177). 404 if the document
+  isn't found in that workspace, if no workflow exists, or if it is no longer queryable.
 }

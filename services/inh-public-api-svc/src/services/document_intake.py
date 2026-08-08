@@ -12,6 +12,15 @@ import hashlib
 import uuid
 from datetime import datetime, timezone
 
+from inh_contracts.file_types import (
+    ContentTypeMismatchError,
+    ExtensionMismatchError,
+    check_extension_consistency,
+    explicitly_unsupported_message_for_mime,
+    get_spec_for_upload,
+    sniff_content_type,
+)
+
 from src.config import settings
 from src.config.constants import ALLOWED_MIME_TYPES, MAX_UPLOAD_SIZE_BYTES
 from src.core.exceptions import BadRequestError, ServiceUnavailableError
@@ -36,25 +45,77 @@ async def intake_document(
 ) -> DocumentUploadResponse:
     """Validate, dedup, store and enqueue a document for ingestion.
 
-    Mirrors (byte for byte) the former inline body of POST /v1/documents:
+    Mirrors (byte for byte) the former inline body of POST /v1/documents,
+    plus the #117 validation steps that close real validation holes -- three
+    independent signals describe an upload (declared content type, filename,
+    actual bytes), and any pairwise disagreement among them is now caught:
 
-    1. Validate ``content_type`` against ``ALLOWED_MIME_TYPES``.
-    2. Validate size (non-empty, under ``MAX_UPLOAD_SIZE_BYTES``).
-    3. Dedup: reuse an existing ``document_id`` keyed on (workspace,
+    1. Validate ``content_type`` against ``ALLOWED_MIME_TYPES`` (derived from
+       the FILE_TYPE_REGISTRY single source of truth, see constants.py). A
+       DELIBERATELY-unsupported format with a real replacement (legacy .doc,
+       Outlook .msg -- see ``EXPLICITLY_UNSUPPORTED``) is checked FIRST and
+       rejected with a specific, actionable message naming the replacement
+       (#124/#126) -- before falling through to the generic registry lookup.
+       A GENERIC or absent content type (``application/octet-stream``, the
+       REST route's own fallback for a missing header) additionally
+       consults `filename`'s extension via ``get_spec_for_upload`` (#122) --
+       completing the design ``FileTypeSpec.extensions`` was reserved for at
+       #117. This never widens acceptance of a SPECIFIC-but-unregistered
+       declared type -- see that function's docstring for the security
+       rationale.
+    2. Cross-check the filename's extension against the declared type
+       (#117). A known BINARY-format extension (e.g. ``.pdf``, ``.docx``,
+       ``.png``) registered to a DIFFERENT type than the one declared is a
+       real disagreement. A text-format extension (``.txt``/``.md``/``.csv``/
+       ``.html``/``.json``) never triggers this -- ``text/plain`` is a
+       truthful, IANA-valid Content-Type for any of those, and real clients
+       routinely send it; an unrecognized or absent extension is likewise
+       not evidence of anything. Only a genuine binary-vs-declared
+       contradiction is rejected.
+    3. Validate size (non-empty, under the type's ``max_size_bytes`` override
+       or the global ``MAX_UPLOAD_SIZE_BYTES`` default).
+    4. Sniff: verify the bytes' magic signature agrees with the declared
+       ``content_type`` (#117). Content-Type is entirely client-supplied and
+       was previously never checked against the actual bytes, so a
+       mislabeled binary (e.g. PNG bytes declared ``text/plain``) passed
+       validation and was garbled downstream instead of rejected.
+    5. Dedup: reuse an existing ``document_id`` keyed on (workspace,
        content_hash) first, then (workspace, filename) — see #75/#60.
-    4. Upload the bytes to S3.
-    5. Persist a durable ``pending`` row before enqueueing (#7).
-    6. Publish the ``document.uploaded`` MQ message; on publish failure mark
+    6. Upload the bytes to S3.
+    7. Persist a durable ``pending`` row before enqueueing (#7).
+    8. Publish the ``document.uploaded`` MQ message; on publish failure mark
        the row ``failed`` and return a ``status="failed"`` response instead of
        raising (the file IS stored, so this is not a request failure).
 
     Raises:
-        BadRequestError: unsupported content type, empty content, or content
-            over ``MAX_UPLOAD_SIZE_BYTES``.
+        BadRequestError: unsupported content type, a filename extension that
+            contradicts the declared type, empty content, content over the
+            size limit, or bytes whose magic signature contradicts the
+            declared content type (#117).
         ServiceUnavailableError: S3 upload or pending-row persistence failed.
     """
     # --- 1. Validate content type -------------------------------------------
-    if content_type not in ALLOWED_MIME_TYPES:
+    # Checked BEFORE the generic registry lookup below (#124/#126): a format
+    # that is deliberately unsupported but has a real replacement (legacy
+    # .doc -> .docx, Outlook .msg -> .eml) gets a message naming that
+    # replacement, not the generic allow-list dump every other unrecognized
+    # type gets -- "explicit 400, never accept-then-garble" per both issues.
+    # Sourced from inh_contracts' EXPLICITLY_UNSUPPORTED table (#124/#126
+    # review blocker 3) -- a hand-maintained copy of this table lived here
+    # alone until a review caught it meant the MCP `upload_document` surface
+    # never learned about it and could accept the exact formats this is
+    # supposed to reject.
+    rejection_message = explicitly_unsupported_message_for_mime(content_type)
+    if rejection_message is not None:
+        raise BadRequestError(detail=rejection_message)
+
+    # `get_spec_for_upload` resolves the declared MIME type directly when
+    # it's registered (the common case, filename never inspected); it only
+    # falls back to `filename`'s extension when `content_type` is generic/
+    # absent (#122) -- see that function's docstring for why a SPECIFIC but
+    # unregistered MIME type is deliberately NOT widened by this fallback.
+    spec = get_spec_for_upload(content_type, filename)
+    if spec is None:
         raise BadRequestError(
             detail=(
                 f"Unsupported file type '{content_type}'. "
@@ -62,21 +123,49 @@ async def intake_document(
             ),
         )
 
-    # --- 2. Validate size ----------------------------------------------------
+    # --- 2. Cross-check the filename extension against the declared type ----
+    # (#117). Independent of the byte-level sniff below: this catches a file
+    # named "report.pdf" declared as text/plain even when its bytes ARE
+    # perfectly valid plain text (so the sniff below has nothing to object
+    # to) -- the filename itself is the contradicting signal here.
+    try:
+        check_extension_consistency(filename, spec)
+    except ExtensionMismatchError as exc:
+        raise BadRequestError(detail=str(exc)) from exc
+
+    # --- 3. Validate size ----------------------------------------------------
     size_bytes = len(content_bytes)
 
     if size_bytes == 0:
         raise BadRequestError(detail="Uploaded file is empty.")
 
-    if size_bytes > MAX_UPLOAD_SIZE_BYTES:
-        max_mb = MAX_UPLOAD_SIZE_BYTES // (1024 * 1024)
+    # `is not None` (not `or`) so a hypothetical future override of exactly 0
+    # is still honored rather than silently falling back to the global cap.
+    max_size = spec.max_size_bytes if spec.max_size_bytes is not None else MAX_UPLOAD_SIZE_BYTES
+    if size_bytes > max_size:
+        max_mb = max_size // (1024 * 1024)
         raise BadRequestError(
             detail=f"File size ({size_bytes} bytes) exceeds the {max_mb} MB limit.",
         )
 
+    # --- 4. Sniff magic bytes against the declared type (#117) ---------------
+    # `spec` above already resolved successfully, so the only failure this
+    # can raise is a mismatch -- an UnknownContentTypeError here would mean
+    # step 1's own lookup was wrong, which is a contract bug, not a valid
+    # runtime outcome for a client to trigger. `resolved_spec=spec` (#122) is
+    # required, not optional, for a GENERIC content type (e.g.
+    # "application/octet-stream"): `sniff_content_type` re-deriving from
+    # `content_type` alone would fail to find it (that's exactly why step 1
+    # needed the extension fallback in the first place), so the already-
+    # resolved spec is threaded through instead of re-looked-up.
+    try:
+        sniff_content_type(content_bytes, content_type, resolved_spec=spec)
+    except ContentTypeMismatchError as exc:
+        raise BadRequestError(detail=str(exc)) from exc
+
     content_hash = hashlib.sha256(content_bytes).hexdigest()
 
-    # --- 3. Dedup: reuse document_id rather than flood the workspace --------
+    # --- 5. Dedup: reuse document_id rather than flood the workspace --------
     # Two re-upload shapes must collapse onto an existing document_id so
     # ingestion reindexes it instead of creating a duplicate document (with
     # duplicate chunks + embeddings) that floods top-k search results (#75):
@@ -144,7 +233,7 @@ async def intake_document(
             filename=filename,
         )
 
-    # --- 4. Upload to S3 ----------------------------------------------------
+    # --- 6. Upload to S3 ----------------------------------------------------
     try:
         storage = get_storage_service()
         s3_key = storage.generate_key(workspace_id, filename)
@@ -157,7 +246,7 @@ async def intake_document(
             detail="Failed to store the uploaded file. Please try again later.",
         ) from exc
 
-    # --- 5. Persist a durable 'pending' row BEFORE enqueueing ----------------
+    # --- 7. Persist a durable 'pending' row BEFORE enqueueing ----------------
     # This makes the upload recoverable and lets GET /v1/documents/{id} return
     # the document (status='pending') immediately, instead of 404ing until
     # ingestion finishes. On re-upload of the same document_id, this resets the
@@ -188,7 +277,7 @@ async def intake_document(
             detail="Failed to record the upload. Please try again later.",
         ) from exc
 
-    # --- 6. Publish MQ message ----------------------------------------------
+    # --- 8. Publish MQ message ----------------------------------------------
     now_iso = datetime.now(timezone.utc).isoformat()
     mq_message = {
         "event_type": "document.uploaded",
@@ -205,6 +294,16 @@ async def intake_document(
         "storage_url": storage_url,
         "timestamp": now_iso,
         "contract_version": "1.0.0",
+        # Ingestion source labeling (inherent-systems/prime#187, ingestion-svc
+        # consumer side: inherent-prime/inherent#141). This function is the
+        # single intake path shared by both the REST route
+        # (POST /v1/documents, src/api/v1/documents.py) and the MCP
+        # upload_document tool (src/mcp_server/server.py) — both are the
+        # public API surface, so "public-api" is correct for every call here.
+        # Without this, ingestion-svc's Temporal memo shows "unknown" for
+        # every upload this service makes, which reads to an operator as
+        # "producer running stale code" rather than "not yet labeled".
+        "source": "public-api",
     }
 
     try:
@@ -245,7 +344,7 @@ async def intake_document(
             ),
         )
 
-    # --- 7. Return response --------------------------------------------------
+    # --- 9. Return response --------------------------------------------------
     logger.info(
         "Document upload accepted",
         document_id=document_id,

@@ -2,7 +2,7 @@
   "info": {
     "name": "Inherent API",
     "_postman_id": "b0e1a2c3-4d5e-6f70-8190-a1b2c3d4e5f6",
-    "description": "Postman collection for the Inherent stack — 23 requests across Health, Documents, Search, Chunks, and Ingestion (including dead-letter management).\n\nTwo services / two planes:\n- **Public API** (`inh-public-api-svc`) on http://localhost:18000 — read + upload plane: documents, search, chunks. Auth: `X-API-Key` (must start with `ink_`) + `X-Workspace-Id`.\n- **Ingestion API** on http://localhost:18002 — write/admin plane: it owns writes to PostgreSQL + Weaviate. Trigger/inspect ingestion, edit chunks, delete documents, read lineage, manage dead-letter jobs. Auth: its own `X-API-Key` (`INGESTION_API_KEY`, default `dev-ingestion-key`). No workspace header.\n\n## Auth model\nThe collection sets `X-API-Key = {{api_key}}` at the collection level, so public requests inherit it. The **Ingestion** folder overrides `X-API-Key = {{ingest_key}}`. Public requests still carry an explicit `X-Workspace-Id` header (tenant routing, not auth).\n\n## Setup\n1. `docker compose up --build`\n2. `make dev-seed` (creates API key `ink_dev_local_key_001` and workspace `ws_local_001`)\n3. Import the companion environment `inherent.postman_environment.json` and select it (provides `api_base`, `ingest_base`, `api_key`, `workspace_id`, `ingest_key`, `user_id`, `document_id`).\n\n## Editing the environment\nTo change a value (e.g. point at a remote host or paste a real `document_id`):\n1. Left sidebar → **Environments** → click **Inherent Local**.\n2. Edit the **Current Value** column (not Initial Value) for the row you want, then **Save** (Ctrl/Cmd+S).\n3. Make sure **Inherent Local** is selected in the top-right environment dropdown so the change applies.\n\nGotcha: import populates **Initial Value**; requests and `pm.environment.set()` (e.g. the Upload script) read/write **Current Value**. Current Value stays local to your machine and is not included when you export/share the environment — so edits here will not show up in the committed JSON.\n\n## Chaining\nRun **Documents → Upload Document** first; its test script saves the returned `document_id` to the environment, so Get / Chunks / Search-filtered / Status / Edit / Delete / Lineage resolve automatically.\n\n## Saved examples\nEvery request carries a saved example response, so you can see the expected shape in the Postman doc pane without running the stack. Examples use illustrative IDs.\n\n## Smoke testing\nEvery request asserts its expected status code in Postman's test runner. `POST /ingest` is async — it returns **202 Accepted** by default (or `?wait=true` → **200** with the full result), and **409** if a workflow is already running; the tests accept those.\n\n## Heads-up: Delete is destructive\n**Ingestion → Delete Document** removes the document from PostgreSQL and its chunks from Weaviate. It is ordered after the read requests so it does not break the other chained requests.",
+    "description": "Postman collection for the Inherent stack — 23 requests across Health, Documents, Search, Chunks, and Ingestion (including dead-letter management).\n\nTwo services / two planes:\n- **Public API** (`inh-public-api-svc`) on http://localhost:18000 — read + upload plane: documents, search, chunks. Auth: `X-API-Key` (must start with `ink_`) + `X-Workspace-Id`.\n- **Ingestion API** on http://localhost:18002 — write/admin plane: it owns writes to PostgreSQL + Weaviate. Trigger/inspect ingestion, edit chunks, delete documents, read lineage, manage dead-letter jobs. Auth: its own `X-API-Key` (`INGESTION_API_KEY`, default `dev-ingestion-key`). No `X-Workspace-Id` header. `verify_api_key` alone does not scope requests to a workspace, so every route that reads or writes a specific document/job takes `workspace_id` as a required *query param* instead (and Delete Document also `user_id`), verified against PostgreSQL before anything else happens (#134, #175, #177): Edit Chunk, Delete Document, Get Ingestion Status, Get Lineage, and all four Dead-letter routes. Trigger Ingestion has no PostgreSQL row yet to check (it creates one) -- instead it verifies its own `storage_path` body field is prefixed by its own `workspace_id` body field before dispatching the workflow (#210), which is a self-consistency check, not proof the caller is entitled to that `workspace_id`.\n\n## Auth model\nThe collection sets `X-API-Key = {{api_key}}` at the collection level, so public requests inherit it. The **Ingestion** folder overrides `X-API-Key = {{ingest_key}}`. Public requests still carry an explicit `X-Workspace-Id` header (tenant routing, not auth).\n\n## Setup\n1. `docker compose up --build`\n2. `make dev-seed` (creates API key `ink_dev_local_key_001` and workspace `ws_local_001`)\n3. Import the companion environment `inherent.postman_environment.json` and select it (provides `api_base`, `ingest_base`, `api_key`, `workspace_id`, `ingest_key`, `user_id`, `document_id`).\n\n## Editing the environment\nTo change a value (e.g. point at a remote host or paste a real `document_id`):\n1. Left sidebar → **Environments** → click **Inherent Local**.\n2. Edit the **Current Value** column (not Initial Value) for the row you want, then **Save** (Ctrl/Cmd+S).\n3. Make sure **Inherent Local** is selected in the top-right environment dropdown so the change applies.\n\nGotcha: import populates **Initial Value**; requests and `pm.environment.set()` (e.g. the Upload script) read/write **Current Value**. Current Value stays local to your machine and is not included when you export/share the environment — so edits here will not show up in the committed JSON.\n\n## Chaining\nRun **Documents → Upload Document** first; its test script saves the returned `document_id` to the environment, so Get / Chunks / Search-filtered / Status / Edit / Delete / Lineage resolve automatically.\n\n## Saved examples\nEvery request carries a saved example response, so you can see the expected shape in the Postman doc pane without running the stack. Examples use illustrative IDs.\n\n## Smoke testing\nEvery request asserts its expected status code in Postman's test runner. `POST /ingest` is async — it returns **202 Accepted** by default (or `?wait=true` → **200** with the full result), and **409** if a workflow is already running; the tests accept those.\n\n## Heads-up: Delete is destructive\n**Ingestion → Delete Document** removes the document from PostgreSQL and its chunks from Weaviate. It is ordered after the read requests so it does not break the other chained requests.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "auth": {
@@ -244,7 +244,7 @@
                   "key": "file",
                   "type": "file",
                   "src": [],
-                  "description": "Pick a file. Allowed: text/plain, text/markdown, text/csv, text/html, application/pdf, application/json, application/vnd.openxmlformats-officedocument.wordprocessingml.document. Max 50 MB. e.g. docs/examples/sample-documents/sample.txt"
+                  "description": "Pick a file. Allowed: text/plain, text/markdown, text/csv, text/html, application/pdf, application/json, application/vnd.openxmlformats-officedocument.wordprocessingml.document, image/png. See docs/reference/file-types.md for the current list. Max 50 MB. e.g. docs/examples/sample-documents/sample.txt"
                 }
               ]
             },
@@ -1173,7 +1173,7 @@
     },
     {
       "name": "Ingestion",
-      "description": "Write/admin plane on the ingestion service (http://localhost:18002). All requests here authenticate with `X-API-Key = {{ingest_key}}` (set at this folder level) and do **not** take a workspace header. Covers triggering/inspecting ingestion, editing chunks, deleting documents, lineage, and dead-letter job management.",
+      "description": "Write/admin plane on the ingestion service (http://localhost:18002). All requests here authenticate with `X-API-Key = {{ingest_key}}` (set at this folder level) and do **not** take a workspace header. Edit Chunk and Delete Document instead require `workspace_id` (Delete also `user_id`) as query params -- `verify_api_key` alone doesn't scope these writes to a workspace. Covers triggering/inspecting ingestion, editing chunks, deleting documents, lineage, and dead-letter job management.",
       "auth": {
         "type": "apikey",
         "apikey": [
@@ -1234,7 +1234,7 @@
                 "ingest"
               ]
             },
-            "description": "Manually (re-)ingest a file already in S3, bypassing the upload endpoint. Async by default: returns **202 Accepted** with a `workflow_id`. Returns **409** if a workflow is already running for this document, **503** if Temporal is unavailable."
+            "description": "Manually (re-)ingest a file already in S3, bypassing the upload endpoint. Async by default: returns **202 Accepted** with a `workflow_id`. Returns **409** if a workflow is already running for this document, **503** if Temporal is unavailable. Security (#210): `storage_path` must be prefixed by this request's own `workspace_id` (`workspaces/{workspace_id}/...` or `{workspace_id}/...`) -- **403** if it isn't. Proves the two claims are self-consistent, not that the caller is entitled to `workspace_id` (`INGESTION_API_KEY` has no key-to-workspace binding, #177)."
           },
           "response": [
             {
@@ -1325,7 +1325,7 @@
                 }
               ]
             },
-            "description": "Same as Trigger Ingestion but blocks until the workflow finishes and returns **200 OK** with the full result (`success`, `chunks_created`, `processing_time_ms`)."
+            "description": "Same as Trigger Ingestion but blocks until the workflow finishes and returns **200 OK** with the full result (`success`, `chunks_created`, `processing_time_ms`). Security (#210): same storage_path/workspace_id prefix check as Trigger Ingestion -- **403** on mismatch."
           },
           "response": [
             {
@@ -1394,7 +1394,7 @@
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{ingest_base}}/ingest/{{document_id}}/status",
+              "raw": "{{ingest_base}}/ingest/{{document_id}}/status?workspace_id={{workspace_id}}",
               "host": [
                 "{{ingest_base}}"
               ],
@@ -1402,9 +1402,15 @@
                 "ingest",
                 "{{document_id}}",
                 "status"
+              ],
+              "query": [
+                {
+                  "key": "workspace_id",
+                  "value": "{{workspace_id}}"
+                }
               ]
             },
-            "description": "Query the real-time progress of an ingestion workflow (`step`, `progress`, `chunks_created`). Returns 404 if no workflow exists or it is no longer queryable."
+            "description": "Query the real-time progress of an ingestion workflow (`step`, `progress`, `chunks_created`). `workspace_id` is required and must own `document_id` (#177). Returns 404 on a workspace mismatch or unknown document, if no workflow exists, or if it is no longer queryable."
           },
           "response": [
             {
@@ -1413,7 +1419,7 @@
                 "method": "GET",
                 "header": [],
                 "url": {
-                  "raw": "{{ingest_base}}/ingest/{{document_id}}/status",
+                  "raw": "{{ingest_base}}/ingest/{{document_id}}/status?workspace_id={{workspace_id}}",
                   "host": [
                     "{{ingest_base}}"
                   ],
@@ -1421,6 +1427,12 @@
                     "ingest",
                     "{{document_id}}",
                     "status"
+                  ],
+                  "query": [
+                    {
+                      "key": "workspace_id",
+                      "value": "{{workspace_id}}"
+                    }
                   ]
                 }
               },
@@ -1469,7 +1481,7 @@
               }
             },
             "url": {
-              "raw": "{{ingest_base}}/chunks/{{document_id}}/0",
+              "raw": "{{ingest_base}}/chunks/{{document_id}}/0?workspace_id={{workspace_id}}",
               "host": [
                 "{{ingest_base}}"
               ],
@@ -1477,9 +1489,15 @@
                 "chunks",
                 "{{document_id}}",
                 "0"
+              ],
+              "query": [
+                {
+                  "key": "workspace_id",
+                  "value": "{{workspace_id}}"
+                }
               ]
             },
-            "description": "Edit chunk #0 of a document via a Temporal workflow (updates PostgreSQL + re-embeds in Weaviate). Replace the trailing `0` with the target chunk index. Returns 409 if an edit is already in progress, 500 if the edit fails."
+            "description": "Edit chunk #0 of a document via a Temporal workflow (updates PostgreSQL + re-embeds in Weaviate). Replace the trailing `0` with the target chunk index. `workspace_id` is required and must own `document_id` (#134); returns 404 on a workspace mismatch or unknown document, 409 if an edit is already in progress, 500 if the edit fails."
           },
           "response": [
             {
@@ -1502,7 +1520,7 @@
                   }
                 },
                 "url": {
-                  "raw": "{{ingest_base}}/chunks/{{document_id}}/0",
+                  "raw": "{{ingest_base}}/chunks/{{document_id}}/0?workspace_id={{workspace_id}}",
                   "host": [
                     "{{ingest_base}}"
                   ],
@@ -1510,6 +1528,12 @@
                     "chunks",
                     "{{document_id}}",
                     "0"
+                  ],
+                  "query": [
+                    {
+                      "key": "workspace_id",
+                      "value": "{{workspace_id}}"
+                    }
                   ]
                 }
               },
@@ -1535,7 +1559,7 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('status is 200', () => pm.response.to.have.status(200));"
+                  "pm.test('status is 200 or 404 (not owned)', () => pm.expect([200, 404]).to.include(pm.response.code));"
                 ]
               }
             }
@@ -1544,16 +1568,22 @@
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{ingest_base}}/lineage/{{document_id}}",
+              "raw": "{{ingest_base}}/lineage/{{document_id}}?workspace_id={{workspace_id}}",
               "host": [
                 "{{ingest_base}}"
               ],
               "path": [
                 "lineage",
                 "{{document_id}}"
+              ],
+              "query": [
+                {
+                  "key": "workspace_id",
+                  "value": "{{workspace_id}}"
+                }
               ]
             },
-            "description": "Get data lineage for a document: an ordered list of ingestion pipeline step events (what happened during ingestion)."
+            "description": "Get data lineage for a document: an ordered list of ingestion pipeline step events (what happened during ingestion). `workspace_id` is required and must own `document_id` (#177); returns 404 on a workspace mismatch or unknown document."
           },
           "response": [
             {
@@ -1562,13 +1592,19 @@
                 "method": "GET",
                 "header": [],
                 "url": {
-                  "raw": "{{ingest_base}}/lineage/{{document_id}}",
+                  "raw": "{{ingest_base}}/lineage/{{document_id}}?workspace_id={{workspace_id}}",
                   "host": [
                     "{{ingest_base}}"
                   ],
                   "path": [
                     "lineage",
                     "{{document_id}}"
+                  ],
+                  "query": [
+                    {
+                      "key": "workspace_id",
+                      "value": "{{workspace_id}}"
+                    }
                   ]
                 }
               },
@@ -1686,7 +1722,7 @@
                 "method": "GET",
                 "header": [],
                 "url": {
-                  "raw": "{{ingest_base}}/dead-letter?status=pending&limit=50",
+                  "raw": "{{ingest_base}}/dead-letter?workspace_id={{workspace_id}}&status=pending&limit=50",
                   "host": [
                     "{{ingest_base}}"
                   ],
@@ -1696,8 +1732,7 @@
                   "query": [
                     {
                       "key": "workspace_id",
-                      "value": "{{workspace_id}}",
-                      "disabled": true
+                      "value": "{{workspace_id}}"
                     },
                     {
                       "key": "status",
@@ -1709,7 +1744,7 @@
                     }
                   ]
                 },
-                "description": "List dead-letter jobs. Optional filters: `workspace_id`, `status` (default `pending`), `limit` (1–200, default 50)."
+                "description": "List dead-letter jobs. `workspace_id` is required (#177 -- it used to be an optional filter, which returned every workspace's rows). Optional: `status` (default `pending`), `limit` (1–200, default 50)."
               },
               "response": [
                 {
@@ -1718,7 +1753,7 @@
                     "method": "GET",
                     "header": [],
                     "url": {
-                      "raw": "{{ingest_base}}/dead-letter?status=pending&limit=50",
+                      "raw": "{{ingest_base}}/dead-letter?workspace_id={{workspace_id}}&status=pending&limit=50",
                       "host": [
                         "{{ingest_base}}"
                       ],
@@ -1726,6 +1761,10 @@
                         "dead-letter"
                       ],
                       "query": [
+                        {
+                          "key": "workspace_id",
+                          "value": "{{workspace_id}}"
+                        },
                         {
                           "key": "status",
                           "value": "pending"
@@ -1768,16 +1807,22 @@
                 "method": "GET",
                 "header": [],
                 "url": {
-                  "raw": "{{ingest_base}}/dead-letter/1",
+                  "raw": "{{ingest_base}}/dead-letter/1?workspace_id={{workspace_id}}",
                   "host": [
                     "{{ingest_base}}"
                   ],
                   "path": [
                     "dead-letter",
                     "1"
+                  ],
+                  "query": [
+                    {
+                      "key": "workspace_id",
+                      "value": "{{workspace_id}}"
+                    }
                   ]
                 },
-                "description": "Get a single dead-letter job by numeric `job_id`. Returns 404 if not found. Replace `1` with a real job ID from the list."
+                "description": "Get a single dead-letter job by numeric `job_id`. `workspace_id` is required and must own `job_id` (#177). Returns 404 if not found or not owned. Replace `1` with a real job ID from the list."
               },
               "response": [
                 {
@@ -1786,13 +1831,19 @@
                     "method": "GET",
                     "header": [],
                     "url": {
-                      "raw": "{{ingest_base}}/dead-letter/1",
+                      "raw": "{{ingest_base}}/dead-letter/1?workspace_id={{workspace_id}}",
                       "host": [
                         "{{ingest_base}}"
                       ],
                       "path": [
                         "dead-letter",
                         "1"
+                      ],
+                      "query": [
+                        {
+                          "key": "workspace_id",
+                          "value": "{{workspace_id}}"
+                        }
                       ]
                     }
                   },
@@ -1827,7 +1878,7 @@
                 "method": "POST",
                 "header": [],
                 "url": {
-                  "raw": "{{ingest_base}}/dead-letter/1/retry",
+                  "raw": "{{ingest_base}}/dead-letter/1/retry?workspace_id={{workspace_id}}",
                   "host": [
                     "{{ingest_base}}"
                   ],
@@ -1835,9 +1886,15 @@
                     "dead-letter",
                     "1",
                     "retry"
+                  ],
+                  "query": [
+                    {
+                      "key": "workspace_id",
+                      "value": "{{workspace_id}}"
+                    }
                   ]
                 },
-                "description": "Retry a dead-letter job by re-publishing its original message. Only jobs with status `pending` or `retrying` can be retried (else 409). Returns 404 if the job is missing, 500 if re-trigger fails (status reset to pending)."
+                "description": "Retry a dead-letter job by re-publishing its original message. `workspace_id` is required and must own `job_id` (#177). Only jobs with status `pending` or `retrying` can be retried (else 409). Returns 404 if the job is missing or not owned, 500 if re-trigger fails (status reset to pending)."
               },
               "response": [
                 {
@@ -1846,7 +1903,7 @@
                     "method": "POST",
                     "header": [],
                     "url": {
-                      "raw": "{{ingest_base}}/dead-letter/1/retry",
+                      "raw": "{{ingest_base}}/dead-letter/1/retry?workspace_id={{workspace_id}}",
                       "host": [
                         "{{ingest_base}}"
                       ],
@@ -1854,6 +1911,12 @@
                         "dead-letter",
                         "1",
                         "retry"
+                      ],
+                      "query": [
+                        {
+                          "key": "workspace_id",
+                          "value": "{{workspace_id}}"
+                        }
                       ]
                     }
                   },
@@ -1888,7 +1951,7 @@
                 "method": "POST",
                 "header": [],
                 "url": {
-                  "raw": "{{ingest_base}}/dead-letter/1/abandon",
+                  "raw": "{{ingest_base}}/dead-letter/1/abandon?workspace_id={{workspace_id}}",
                   "host": [
                     "{{ingest_base}}"
                   ],
@@ -1896,9 +1959,15 @@
                     "dead-letter",
                     "1",
                     "abandon"
+                  ],
+                  "query": [
+                    {
+                      "key": "workspace_id",
+                      "value": "{{workspace_id}}"
+                    }
                   ]
                 },
-                "description": "Mark a dead-letter job as permanently abandoned. Returns 404 if the job is missing."
+                "description": "Mark a dead-letter job as permanently abandoned. `workspace_id` is required and must own `job_id` (#177). Returns 404 if the job is missing or not owned."
               },
               "response": [
                 {
@@ -1907,7 +1976,7 @@
                     "method": "POST",
                     "header": [],
                     "url": {
-                      "raw": "{{ingest_base}}/dead-letter/1/abandon",
+                      "raw": "{{ingest_base}}/dead-letter/1/abandon?workspace_id={{workspace_id}}",
                       "host": [
                         "{{ingest_base}}"
                       ],
@@ -1915,6 +1984,12 @@
                         "dead-letter",
                         "1",
                         "abandon"
+                      ],
+                      "query": [
+                        {
+                          "key": "workspace_id",
+                          "value": "{{workspace_id}}"
+                        }
                       ]
                     }
                   },

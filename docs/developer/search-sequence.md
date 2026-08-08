@@ -123,7 +123,7 @@ sequenceDiagram
         Note over SS: no vector needed — embedding skipped entirely
     end
 
-    SS->>SS: collection = Ws_<base32(workspace_id)>,<br/>tenant = <base32(user_id)> (shared inh_contracts naming)
+    SS->>SS: collection = Workspace_<base32(workspace_id)>,<br/>tenant = User_<base32(user_id)> (shared inh_contracts naming)
     SS->>SS: _require_safe_name() on both — explicit raise,<br/>GraphQL-injection guard that survives python -O (#33)
 
     SS->>SS: _build_graphql():<br/>• escape \ and " in query<br/>• fetch_limit = min(100, limit×3) if min_score>0 else limit (over-fetch #31)<br/>• where: document_id ContainsAny [ids] if document_ids set
@@ -248,7 +248,7 @@ sequenceDiagram
     and store_in_weaviate (temporal/activities/store.py)
         WF->>TEI: embed_texts(all chunk texts) — ONE batch,<br/>asyncio.to_thread (#19)
         TEI-->>WF: 384-dim vector per chunk
-        WF->>WV: ensure collection Ws_<base32(workspace_id)><br/>+ tenant <base32(user_id)>, then insert objects<br/>{vector + text + metadata} (Vectorizer.none —<br/>vectors always computed client-side)
+        WF->>WV: ensure collection Workspace_<base32(workspace_id)><br/>+ tenant User_<base32(user_id)>, then insert objects<br/>{vector + text + metadata} (Vectorizer.none —<br/>vectors always computed client-side)
         Note over WV: text is also BM25-indexed →<br/>serves keyword and hybrid modes too
         Note over WF,WV: Weaviate down → activity raises,<br/>Temporal retries, doc marked failed —<br/>never silently half-indexed
     end

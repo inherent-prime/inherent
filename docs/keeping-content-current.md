@@ -50,6 +50,39 @@ a vector-store hiccup can therefore leave stale chunks behind. If a superseded
 revision keeps surfacing after a successful reindex, delete the document
 (`DELETE /v1/documents/{id}`) and upload it again.
 
+### Re-indexing while a previous ingestion is still running
+
+A document is processed by one Temporal workflow run at a time, addressed by
+a fixed id (`ingest-{document_id}`). What happens when a reindex or refresh
+is triggered again while the prior run for that document is still open
+depends on which surface you use — this is per-call-site, not a blanket
+guarantee:
+
+- **Edited-content re-upload (`POST /v1/documents`) and
+  `POST /v1/documents/{id}/refresh`** (including the MCP twin
+  `refresh_stale_source`): the new run **supersedes** the old one — the stale
+  run is terminated and the fresh request runs from a clean start. The
+  newest request always wins; there is no queuing behind the older run and
+  no error back to the caller for this case. If you need the *outcome* of a
+  specific re-index rather than just its acceptance, poll
+  `GET /v1/documents/{id}` (or the workflow status endpoint) until `status`
+  leaves `pending`/`processing` rather than assuming the first request you
+  sent is the one that finished. Firing several re-indexes in quick
+  succession means only the *last* one's content survives — an in-flight
+  ingestion can be terminated by an unrelated actor's re-index for the same
+  document, not just your own.
+- **`POST /ingest` on the ingestion service itself** (lower-level than the
+  two above; not the normal upload path) rejects instead of superseding: a
+  collision returns `409 already_running`. With `?wait=true`, a run can also
+  be superseded *by one of the calls above* while you're waiting on it — that
+  returns `409 superseded_by_newer_request` instead of the result you were
+  waiting for.
+- **Dead-letter retry** (`POST /dead-letter/{job_id}/retry`) also rejects
+  instead of superseding: replaying a dead-lettered payload never terminates
+  a healthy run for the same document, since the payload being replayed may
+  be exactly the stale content that healthy run is correcting. A collision
+  there resets the job to `pending` and returns `500`.
+
 ### Correcting a corpus that already forked
 
 If old and new revisions were uploaded as separate documents:

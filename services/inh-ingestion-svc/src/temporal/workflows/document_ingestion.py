@@ -86,12 +86,18 @@ class DocumentIngestionWorkflow:
         document_id: str,
         workspace_id: str,
         status: str,
+        workflow_run_id: str,
         error_message: str | None = None,
     ) -> None:
         """Write a document status transition without failing the workflow.
 
         Status writes ('processing'/'failed') are observability signals, not
         the source of truth, so a failure here is swallowed and logged.
+
+        workflow_run_id (#110 follow-up): fences the write so a terminated
+        (superseded) run's status write can't land after a newer run
+        finished and leave a stale status with no self-heal -- see
+        DatabaseService.update_document_status.
         """
         try:
             await workflow.execute_activity(
@@ -101,6 +107,7 @@ class DocumentIngestionWorkflow:
                     workspace_id=workspace_id,
                     status=status,
                     error_message=error_message,
+                    workflow_run_id=workflow_run_id,
                 ),
                 start_to_close_timeout=timedelta(seconds=10),
                 retry_policy=RetryPolicy(
@@ -253,12 +260,39 @@ class DocumentIngestionWorkflow:
         """
         start_time = workflow.now()
         workflow_run_id = workflow.info().run_id
+        # Deterministic, workflow-supplied (safe inside @workflow.run, unlike
+        # datetime.now()) -- used to make the fencing CLAIM monotonic in
+        # START order rather than commit order (#110 follow-up, migration
+        # 017). See CreatePendingDocumentInput / DatabaseService
+        # .create_pending_document's docstrings for the failure this closes.
+        workflow_start_time = workflow.info().start_time
 
         try:
             # Create a minimal 'processing' row up front so the document is
             # observable via the status API before the store step; a failure in
             # fetch/extract/chunk then shows as 'failed', not 'not found' (#10).
-            # Best-effort: a create failure must not fail the workflow.
+            # ALSO claims this run's fencing token (active_run_id +
+            # active_run_claimed_at, #110) -- this must run as early as
+            # possible so a fresh run that just superseded a stale one
+            # (TERMINATE_EXISTING) claims the document before the stale run's
+            # own store step can commit. Best-effort: a create/claim failure
+            # must not fail the workflow (unchanged from #10) -- but note the
+            # residual risk this now carries is NOT symmetric with before
+            # (#110 follow-up): pre-#110, a failed claim write was harmless
+            # (nothing depended on it). Now, if THIS call's claim never lands
+            # (both retry attempts fail) while an OLDER run's claim is still
+            # on the row, THIS run's own later store commit will find
+            # active_run_id pointing at that older, dead run and be fenced
+            # out -- turning a ~15s transient DB blip at the very start of a
+            # run into a guaranteed hard failure of a run that would
+            # otherwise have succeeded minutes later. Only bites on a
+            # RE-INDEX (a first-ever ingest has no prior claim to lose to;
+            # active_run_id/active_run_claimed_at start NULL, which the fence
+            # permits). Accepted for the same reason as before: a DB outage
+            # severe enough to fail two lightweight single-row writes in a
+            # row is very likely to also fail this run's later store step on
+            # its own merits, so the dead-letter outcome is not novel, just
+            # earlier.
             try:
                 await workflow.execute_activity(
                     create_pending_document,
@@ -272,6 +306,8 @@ class DocumentIngestionWorkflow:
                         size_bytes=input.size_bytes,
                         storage_backend=input.storage_backend,
                         storage_path=input.storage_path,
+                        workflow_run_id=workflow_run_id,
+                        workflow_start_time=workflow_start_time,
                         storage_bucket=input.storage_bucket,
                         storage_url=input.storage_url,
                     ),
@@ -284,7 +320,7 @@ class DocumentIngestionWorkflow:
                     ),
                 )
             except Exception:
-                workflow.logger.warning("Failed to create pending document row (non-fatal)")
+                workflow.logger.warning("Failed to create/claim pending document row (non-fatal)")
 
             # Mark the document as 'processing' before heavy work begins.
             # Best-effort: a status-write failure must not fail the workflow.
@@ -292,6 +328,7 @@ class DocumentIngestionWorkflow:
                 document_id=input.document_id,
                 workspace_id=input.workspace_id,
                 status="processing",
+                workflow_run_id=workflow_run_id,
             )
 
             # Step 1: Ensure tenant infrastructure is ready (10%)
@@ -385,6 +422,10 @@ class DocumentIngestionWorkflow:
                     max_chunk_size=input.max_chunk_size,
                     chunk_overlap=input.chunk_overlap,
                     workspace_id=input.workspace_id,
+                    # Format-aware chunking (#129): lets the activity resolve
+                    # the registry chunking_hint when no explicit per-document
+                    # strategy override was given.
+                    content_type=input.content_type,
                 ),
                 start_to_close_timeout=timedelta(minutes=2),
                 retry_policy=RetryPolicy(
@@ -457,6 +498,7 @@ class DocumentIngestionWorkflow:
                     document_id=input.document_id,
                     workspace_id=input.workspace_id,
                     status="failed",
+                    workflow_run_id=workflow_run_id,
                     error_message=pg_error,
                 )
                 await self._record_dead_letter_best_effort(
@@ -494,6 +536,7 @@ class DocumentIngestionWorkflow:
                     document_id=input.document_id,
                     workspace_id=input.workspace_id,
                     status="failed",
+                    workflow_run_id=workflow_run_id,
                     error_message=wv_error,
                 )
                 await self._record_dead_letter_best_effort(
@@ -562,7 +605,26 @@ class DocumentIngestionWorkflow:
             self._current_step = "failed"
             processing_time_ms = int((workflow.now() - start_time).total_seconds() * 1000)
 
-            workflow.logger.error(f"Workflow failed: {str(e)}")
+            # `workflow.execute_activity` wraps the activity's real exception
+            # in a Temporal `ActivityError` whose OWN message is always the
+            # generic, hardcoded "Activity task failed" -- the SDK puts the
+            # actual cause (e.g. the `ApplicationError` `_extract_pdf_text`
+            # raises, or the `ApplicationError` type name/message any other
+            # activity raises) on `.cause`. Interpolating `e` directly (as
+            # every site below originally did) throws away all diagnostic
+            # content: the document's `error_message`, the dead-letter row,
+            # the completion event, and the workflow result would all read
+            # "Activity task failed" for every failure, indistinguishable
+            # from each other -- and `_classify_error` below matches none of
+            # its keywords against that generic string, so every one of
+            # these failures classified as "unknown" and never surfaced via
+            # `GET /dead-letter?error_type=extraction_failed` (etc). Same
+            # defect, same fix as `chunk_edit.py`'s `cause_message` (see that
+            # module's comment for the fuller trap explanation) -- this
+            # workflow never got the equivalent treatment.
+            cause_message = str(getattr(e, "cause", None) or e)
+
+            workflow.logger.error(f"Workflow failed: {cause_message}")
 
             # Best-effort: mark the document as failed so it isn't stuck
             # in 'processing'. A status-write failure must not mask the
@@ -571,7 +633,8 @@ class DocumentIngestionWorkflow:
                 document_id=input.document_id,
                 workspace_id=input.workspace_id,
                 status="failed",
-                error_message=str(e),
+                workflow_run_id=workflow_run_id,
+                error_message=cause_message,
             )
 
             # Best-effort: record the terminal failure in the dead-letter table
@@ -580,21 +643,21 @@ class DocumentIngestionWorkflow:
             await self._record_dead_letter_best_effort(
                 input=input,
                 workflow_run_id=workflow_run_id,
-                error_message=str(e),
+                error_message=cause_message,
             )
 
             # Tell the platform the document failed (#88).
             await self._publish_completion_best_effort(
                 input,
                 success=False,
-                error=str(e),
+                error=cause_message,
                 processing_time_ms=processing_time_ms,
             )
 
             return WorkflowResult(
                 document_id=input.document_id,
                 success=False,
-                error=str(e),
+                error=cause_message,
                 processing_time_ms=processing_time_ms,
             )
 

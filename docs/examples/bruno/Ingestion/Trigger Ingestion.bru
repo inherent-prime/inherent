@@ -33,4 +33,10 @@ tests {
 docs {
   Manually (re-)ingest a file already in S3. Async: returns **202 Accepted** with a `workflow_id`.
   **409** if a workflow is already running for this document, **503** if Temporal is unavailable.
+
+  Security (#210): `storage_path` must be prefixed by the `workspace_id` in this same
+  request body (`workspaces/{workspace_id}/...` or `{workspace_id}/...`) -- **403** if
+  it isn't. This proves the two claims are self-consistent, not that the caller is
+  entitled to `workspace_id` -- `INGESTION_API_KEY` is one shared secret with no
+  key-to-workspace binding (#177).
 }

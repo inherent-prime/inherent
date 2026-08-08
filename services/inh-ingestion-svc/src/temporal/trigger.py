@@ -12,17 +12,96 @@ from typing import TYPE_CHECKING
 import structlog
 from pydantic import ValidationError as PydanticValidationError
 from temporalio.client import Client
+from temporalio.common import WorkflowIDConflictPolicy
 
 from src.config.settings import Settings
 from src.models.document import DocumentUploadMessage, ProcessingResult
 from src.temporal.models import DocumentIngestionInput, WorkflowResult
 from src.temporal.workflows import DocumentIngestionWorkflow
 
+# Both start_workflow call sites below use a fixed, deterministic workflow id
+# (f"ingest-{document_id}") so status queries and dedup can address a run by
+# document_id. That determinism means a re-index/refresh enqueued while the
+# prior run for the same document_id is still open collides on the id.
+#
+# Temporal's default id_conflict_policy (UNSPECIFIED) treats a same-id
+# collision against a RUNNING execution as an error: start_workflow raises
+# WorkflowAlreadyStartedError. On the MQ-driven path (trigger_workflow_async)
+# that exception propagates out of the handler, so the message is never
+# ACKed and RedisMQService leaves it pending for redelivery (see
+# src/services/mq/redis_mq.py) -- but every redelivery collides with the
+# same still-open run and fails again, so the caller is stuck waiting for
+# however long that stale run takes to close on its own (#110; ~10min was
+# observed in CI, not a fixed timeout -- see docs/developer/learnings.md).
+#
+# Fix: supersede instead of collide, BUT only for callers whose fresh event
+# genuinely represents newer content. TERMINATE_EXISTING tells Temporal to
+# terminate the same-id running execution and start the new one atomically
+# instead of raising. That is correct for the MQ upload/refresh path (the
+# default here) -- but WRONG for a dead-letter retry of a *stale* payload
+# racing a healthy, newer run for the same document: superseding there would
+# silently discard the newer content in favor of the old dead-letter one
+# (#110 follow-up review, blocker 3). So this is a per-call parameter, not a
+# module constant -- callers must decide, not inherit a default silently.
+# See DocumentIngestionWorkflow's store activities (store.py) for the second
+# half of the fix this alone is not sufficient for: terminating a workflow
+# does not stop an activity it already dispatched (no heartbeat/cancellation
+# is wired), so a fencing check at commit time is what actually prevents a
+# superseded run's late write from clobbering the newer one.
+_SUPERSEDE_CONFLICT_POLICY = WorkflowIDConflictPolicy.TERMINATE_EXISTING
+_REJECT_CONFLICT_POLICY = WorkflowIDConflictPolicy.UNSPECIFIED  # SDK default: raise on collision
+
 if TYPE_CHECKING:
     from src.services.database import DatabaseService
     from src.services.mq import BaseMQService
 
 logger = structlog.get_logger(__name__)
+
+
+def build_ingestion_source_memo(
+    source: str | None,
+    connection_id: str | None = None,
+    sync_id: str | None = None,
+) -> dict[str, str]:
+    """Build the Temporal memo every ``DocumentIngestionWorkflow.run`` start
+    site attaches, describing where an ingestion came from
+    (inherent-systems/prime#187, and its #178 extension below).
+
+    Extracted out of ``TemporalWorkflowTrigger._build_source_memo`` (#178) so
+    the memo SHAPE lives in exactly one place. #141 added this memo to the
+    two MQ-driven start sites in this module; ``POST /ingest``
+    (``src/api/app.py``) was a third start site #141 didn't cover, because
+    its request model (``IngestRequest``) carries no ``source``/
+    ``connection_id``/``sync_id`` fields to build one from -- there was
+    nothing to port #141's fix onto without inventing something. Rather than
+    have the REST route hand-roll its own ``{"source": ...}`` dict (drifting
+    from this shape the moment either one changes independently), it calls
+    this same function directly with a hardcoded ``source="api-direct"``
+    (see ``app.py``'s ``_DIRECT_API_INGESTION_SOURCE``) -- a manual/API-direct
+    trigger has no connector to attribute the memo to, so
+    ``connection_id``/``sync_id`` are always omitted on that path.
+
+    Args:
+        source: The ingestion source label, e.g. ``"connector:notion"`` or
+            ``"api-direct"``. ``None``/empty maps to ``"unknown"`` rather
+            than an empty memo value, so every started workflow always shows
+            SOME label in the Temporal UI summary panel.
+        connection_id: Connector connection id, if this ingestion came from
+            a connector sync. Omitted from the memo entirely when absent.
+        sync_id: Connector sync-run id, same omission rule as
+            ``connection_id``.
+
+    Returns:
+        A ``dict[str, str]`` suitable for ``Client.start_workflow(...,
+        memo=...)``. Always has a ``"source"`` key; ``connection_id``/
+        ``sync_id`` keys are present only when their argument was truthy.
+    """
+    memo: dict[str, str] = {"source": source or "unknown"}
+    if connection_id:
+        memo["connection_id"] = connection_id
+    if sync_id:
+        memo["sync_id"] = sync_id
+    return memo
 
 
 class TemporalWorkflowTrigger:
@@ -93,6 +172,48 @@ class TemporalWorkflowTrigger:
             return "fetch_failed"
         return "unknown"
 
+    @staticmethod
+    def _build_source_memo(upload_message: DocumentUploadMessage) -> dict[str, str]:
+        """Build the Temporal memo describing where an ingestion came from
+        (inherent-systems/prime#187).
+
+        Memo needs no namespace search-attribute registration and renders
+        directly in the Temporal UI workflow summary panel, so operators can
+        tell a connector sync apart from a manual or public-API upload.
+
+        Backward compatible: messages produced before the ``source`` field
+        existed have it as None, which maps to "unknown" rather than crashing
+        the consumer. ``connection_id``/``sync_id`` are omitted entirely when
+        absent (only set for connector-sourced uploads).
+
+        Oversized-value handling (#141 adversarial pass): source/connection_id/
+        sync_id carry ``max_length=500`` on ``DocumentUploadMessage`` itself
+        (services/inh-contracts/src/inh_contracts/events.py), so a
+        pathologically large value never reaches this method at all --
+        ``DocumentUploadMessage(**message)`` raises ``PydanticValidationError``
+        first, in both trigger paths, before ``_build_source_memo`` is ever
+        called. ``trigger_workflow_async`` treats that exception as poison: it
+        dead-letters via ``_record_dead_letter`` and returns normally so the MQ
+        consumer ACKs the message (the redelivery loop in
+        services/inh-ingestion-svc/src/services/mq/redis_mq.py never sees this
+        failure mode). ``trigger_workflow`` (the synchronous, wait-for-result
+        path) returns a failed ``ProcessingResult`` for the same exception
+        instead of dead-lettering -- it has no production caller today (see
+        ``trigger_workflow_async`` for the path the MQ consumer actually
+        uses). Either way, this keeps the memo a value that is always correct
+        or entirely absent -- never a truncated, misleadingly-plausible one.
+
+        Delegates to the module-level ``build_ingestion_source_memo`` (#178)
+        so this MQ-message-shaped extraction and ``POST /ingest``'s
+        hardcoded-source call share one memo-shape implementation instead of
+        drifting independently.
+        """
+        return build_ingestion_source_memo(
+            source=upload_message.source,
+            connection_id=upload_message.connection_id,
+            sync_id=upload_message.sync_id,
+        )
+
     async def _record_dead_letter(
         self,
         document_id: str,
@@ -131,7 +252,9 @@ class TemporalWorkflowTrigger:
                 error=str(e),
             )
 
-    async def trigger_workflow(self, message: dict) -> ProcessingResult:
+    async def trigger_workflow(
+        self, message: dict, *, supersede_running: bool = True
+    ) -> ProcessingResult:
         """Trigger a document ingestion workflow from an MQ message.
 
         This method:
@@ -146,6 +269,13 @@ class TemporalWorkflowTrigger:
 
         Args:
             message: Raw message dictionary from MQ
+            supersede_running: When True (default), a same-id run already open
+                for this document_id is terminated and superseded (#110) --
+                correct when `message` is fresh content that should win. Pass
+                False when replaying a message that may be *stale* relative to
+                a run already in flight (e.g. a dead-letter retry, #110 blocker
+                3): a collision then raises WorkflowAlreadyStartedError instead
+                of silently discarding the newer run's work.
 
         Returns:
             ProcessingResult with success status
@@ -203,11 +333,19 @@ class TemporalWorkflowTrigger:
 
             workflow_id = f"ingest-{upload_message.document_id}"
 
+            # Supersede a still-open prior run for this document_id instead of
+            # colliding with it (#110) -- see module comment above. The caller
+            # decides via supersede_running whether this message's content
+            # should win a collision (default) or lose one (dead-letter retry).
             handle = await self._client.start_workflow(
                 DocumentIngestionWorkflow.run,
                 workflow_input,
                 id=workflow_id,
                 task_queue=self.settings.temporal_task_queue,
+                memo=self._build_source_memo(upload_message),
+                id_conflict_policy=(
+                    _SUPERSEDE_CONFLICT_POLICY if supersede_running else _REJECT_CONFLICT_POLICY
+                ),
             )
 
             logger.info(
@@ -256,7 +394,7 @@ class TemporalWorkflowTrigger:
                 error=str(e),
             )
 
-    async def trigger_workflow_async(self, message: dict) -> str:
+    async def trigger_workflow_async(self, message: dict, *, supersede_running: bool = True) -> str:
         """Trigger a workflow without waiting for completion.
 
         This method starts a workflow and returns immediately with the
@@ -264,6 +402,18 @@ class TemporalWorkflowTrigger:
 
         Args:
             message: Raw message dictionary from Pub/Sub
+            supersede_running: When True (default), a same-id run already open
+                for this document_id is terminated and superseded (#110) --
+                correct for the MQ upload/refresh path this method normally
+                serves, where `message` is always fresh content that should
+                win. Pass False when `message` may be *stale* relative to a
+                run already in flight -- e.g. dead-letter retry
+                (`POST /dead-letter/{id}/retry`, src/api/app.py): replaying an
+                old failed payload must never silently clobber a healthy,
+                newer run for the same document (#110 blocker 3). With False,
+                a collision raises WorkflowAlreadyStartedError as before this
+                fix, so the caller's existing handling (reset to pending,
+                surface an error) still applies unchanged.
 
         Returns:
             Workflow ID for tracking
@@ -324,11 +474,27 @@ class TemporalWorkflowTrigger:
         # Start the workflow without awaiting its result. If Temporal is
         # transiently unavailable this raises and propagates so the MQ
         # consumer does NOT ack the message (it stays pending → redelivered).
+        #
+        # Supersede a still-open prior run for this document_id instead of
+        # colliding with it (#110) -- see module comment above. Without this,
+        # a re-index/refresh enqueued while the previous run is still open
+        # raises WorkflowAlreadyStartedError here, which (like any other
+        # exception in this method) also propagates for MQ redelivery -- but
+        # every redelivery hits the same collision until the stale run closes
+        # on its own, stalling the caller for however long that takes.
+        #
+        # supersede_running=False (dead-letter retry) keeps the original
+        # raise-on-collision behavior so a stale replay can't silently
+        # terminate a healthy newer run (#110 blocker 3).
         await self._client.start_workflow(
             DocumentIngestionWorkflow.run,
             workflow_input,
             id=workflow_id,
             task_queue=self.settings.temporal_task_queue,
+            memo=self._build_source_memo(upload_message),
+            id_conflict_policy=(
+                _SUPERSEDE_CONFLICT_POLICY if supersede_running else _REJECT_CONFLICT_POLICY
+            ),
         )
 
         # Record admission latency: MQ-receive → Temporal-accepted.

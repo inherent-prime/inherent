@@ -63,6 +63,18 @@ COMPLETION_PUBLISH_FAILURES_TOTAL = Counter(
     "Completion notifications that failed to publish",
 )
 
+# A chunk-edit's compensating "mark-failed" write (record_chunk_edit_
+# weaviate_failure -- the durable ingestion_events row recording a PG/vector
+# divergence) exhausted its own retries and never landed (#137 follow-up,
+# matching docs/developer/learnings.md's #99 pattern: compensation is itself
+# fallible and its exhaustion must be loud, not a plain warning log). Each
+# increment is one PG/vector divergence recorded NOWHERE -- alert on any
+# increase, same as the public-API's document_compensation_exhausted_total.
+CHUNK_EDIT_COMPENSATION_EXHAUSTED_TOTAL = Counter(
+    "ingestion_chunk_edit_compensation_exhausted_total",
+    "Chunk-edit Weaviate-failure compensation writes that exhausted retries",
+)
+
 # ── Backpressure / MQ Metrics (#18) ──────────────────────────────────
 
 # Latency from receiving a message off the MQ to Temporal accepting the

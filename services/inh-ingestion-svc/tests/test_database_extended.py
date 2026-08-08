@@ -34,7 +34,12 @@ class TestDatabaseServiceExtended:
         )
 
         await db_service.store_processed_document(
-            message=msg, chunks=[], text_length=0, processing_time_ms=0, tenant_id=tenant_id
+            message=msg,
+            chunks=[],
+            text_length=0,
+            processing_time_ms=0,
+            tenant_id=tenant_id,
+            workflow_run_id="test-run",
         )
 
         # Test get_documents_by_tenant
@@ -77,7 +82,11 @@ class TestDatabaseServiceExtended:
         ]
 
         await db_service.store_processed_document(
-            message=msg, chunks=chunks, text_length=4, processing_time_ms=0
+            message=msg,
+            chunks=chunks,
+            text_length=4,
+            processing_time_ms=0,
+            workflow_run_id="test-run",
         )
 
         # Test get_chunks_by_workspace
@@ -115,7 +124,11 @@ class TestDatabaseServiceExtended:
         ]
 
         await db_service.store_processed_document(
-            message=msg, chunks=chunks, text_length=50, processing_time_ms=0
+            message=msg,
+            chunks=chunks,
+            text_length=50,
+            processing_time_ms=0,
+            workflow_run_id="test-run",
         )
 
         # Search
@@ -146,7 +159,12 @@ class TestDatabaseServiceExtended:
         )
 
         await db_service.store_processed_document(
-            message=msg, chunks=[], text_length=0, processing_time_ms=0, tenant_id=tenant_id
+            message=msg,
+            chunks=[],
+            text_length=0,
+            processing_time_ms=0,
+            tenant_id=tenant_id,
+            workflow_run_id="test-run",
         )
 
         stats = await db_service.get_tenant_stats(tenant_id)
@@ -175,7 +193,11 @@ class TestDatabaseServiceExtended:
         )
 
         await db_service.store_processed_document(
-            message=msg, chunks=[], text_length=0, processing_time_ms=0
+            message=msg,
+            chunks=[],
+            text_length=0,
+            processing_time_ms=0,
+            workflow_run_id="test-run",
         )
 
         count = await db_service.delete_workspace_documents("ws_del_test")

@@ -321,7 +321,7 @@ services:
       MCP_PORT: 8001
       ENVIRONMENT: development
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-knowledge_base}
-      MONGODB_URI: mongodb://mongodb:27017/main
+      MONGODB_URI: mongodb://mongodb:27017
       MONGODB_DB_NAME: main
       WEAVIATE_URL: http://weaviate:8080
       WEAVIATE_API_KEY: ${WEAVIATE_API_KEY:?WEAVIATE_API_KEY must be set}

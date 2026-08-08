@@ -1,0 +1,11 @@
+1
+00:00:00,000 --> 00:00:03,000
+Welcome to the Inherent product walkthrough.
+
+2
+00:00:03,500 --> 00:00:07,000
+Today we'll cover ingestion, indexing, and retrieval.
+
+3
+00:00:07,500 --> 00:00:11,000
+Let's start with how documents get uploaded.

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Inherent sample XML fixture (#121) -- used by upload examples and
+     extraction tests. Tags are stripped; attribute VALUES are dropped
+     along with them, only element text content is kept. -->
+<service name="inherent">
+  <description>Backend for turning company knowledge into something AI systems can query.</description>
+  <retrieval>
+    <mode>semantic</mode>
+    <mode>hybrid</mode>
+    <mode>keyword</mode>
+  </retrieval>
+</service>

@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from src.config import settings
 from src.models.api_key import APIKeyInfo
 from src.models.document import Document, DocumentChunk
+from src.services.metrics import record_workspace_ownership_lookup_degraded
 from src.utils import get_logger
 
 if TYPE_CHECKING:
@@ -779,7 +780,14 @@ class DatabaseService:
 
         We also union with the PG-side workspaces (any workspace the user has
         ever ingested into) as a defensive fallback for legacy data created
-        before the workspaces collection was canonical.
+        before the workspaces collection was canonical. Both lookups
+        log-and-swallow their own failures rather than raise, so a Mongo or
+        Postgres outage degrades this to "whichever source answered" instead
+        of erroring — appropriate for a listing convenience, NOT for
+        validating a specific binding (#138 blocker-2: do not use this to
+        check "does user X still own workspace Y" — a transferred workspace's
+        old ``processed_documents`` rows are never deleted, so this method
+        would keep saying yes. Use ``user_owns_workspace_in_mongo`` for that).
         """
         from src.services.mongo_client import get_mongo_client
 
@@ -809,6 +817,11 @@ class DatabaseService:
                 user_id=user_id,
                 error=str(exc),
             )
+            # Make the degraded lookup observable (#184) — a warning log
+            # alone can run degraded indefinitely with nothing to alert on,
+            # the same gap AUDIT_MESSAGES_DROPPED_TOTAL (inh-ingestion-svc,
+            # #18) closed for the audit consumer's own drop-on-swallow path.
+            record_workspace_ownership_lookup_degraded(source="mongo")
 
         # Fallback: any workspace the user has uploaded to in PG. Catches
         # legacy data + cushions a transient Mongo outage.
@@ -832,8 +845,79 @@ class DatabaseService:
                 user_id=user_id,
                 error=str(exc),
             )
+            # Same observability gap as the Mongo branch above (#184).
+            record_workspace_ownership_lookup_degraded(source="postgres_fallback")
 
         return list(ws_ids)
+
+    async def user_owns_workspace_in_mongo(self, user_id: str, workspace_id: str) -> bool:
+        """Authoritative, MONGO-ONLY ownership check for ONE (user, workspace)
+        pair (#138 blocker-2 fix).
+
+        This is deliberately NOT ``workspace_id in await
+        self.get_user_workspace_ids(user_id)``. ``get_user_workspace_ids``
+        unions Mongo with a PostgreSQL ``processed_documents`` fallback (any
+        workspace the user has EVER ingested into) for listing convenience —
+        useful for "which workspaces can I browse", wrong for "does this key's
+        binding still hold". A workspace transferred away from a user in
+        Mongo does not delete that user's old ``processed_documents`` rows,
+        so the union would keep re-granting a workspace-scoped key access to
+        a workspace its owner no longer owns — exactly the hole this method
+        exists to close. If a workspace is worth protecting it has content,
+        so the union's blind spot (workspaces with zero ingested documents)
+        is irrelevant here and its false-positive risk (stale rows for
+        transferred workspaces) is the case that matters most.
+
+        Any Mongo failure RAISES — this method does NOT log-and-swallow like
+        ``get_user_workspace_ids`` does. A workspace-scoped key's binding is
+        an authorization decision; failing open (silently granting) or
+        silently falling back to a decision made on incomplete information
+        during a Mongo outage would let revocation stop being enforced
+        without anyone noticing. Callers (``get_authorized_workspace_ids``)
+        let the exception propagate so the request fails loudly (REST 5xx /
+        MCP `Error: ...`) instead of granting or denying access on stale
+        information.
+        """
+        from bson import ObjectId
+        from bson.errors import InvalidId
+
+        from src.services.mongo_client import get_mongo_client
+
+        # Mongoose stores ObjectId-typed refs as bson.ObjectId, not strings,
+        # for BOTH the document's own _id and the user_id field — OR both
+        # shapes for each so the check is robust to either schema (mirrors
+        # get_user_workspace_ids's handling of user_id above).
+        user_id_filters: list[Any] = [user_id]
+        try:
+            user_id_filters.append(ObjectId(user_id))
+        except (InvalidId, TypeError, ValueError):
+            pass
+
+        workspace_id_filters: list[Any] = [workspace_id]
+        try:
+            workspace_id_filters.append(ObjectId(workspace_id))
+        except (InvalidId, TypeError, ValueError):
+            pass
+
+        client = get_mongo_client()
+        db = client[settings.mongodb_db_name]
+        try:
+            doc = await db["workspaces"].find_one(
+                {
+                    "_id": {"$in": workspace_id_filters},
+                    "user_id": {"$in": user_id_filters},
+                }
+            )
+        except Exception:
+            # Still propagates — a Mongo failure must reach the caller (see
+            # docstring); this is NOT a swallow. Only makes the failure
+            # observable as a RATE (#184) before the bare `raise` re-raises
+            # the original exception with its original traceback, so callers
+            # (get_authorized_workspace_ids) see the exact same exception as
+            # before this metric existed.
+            record_workspace_ownership_lookup_degraded(source="mongo_ownership_check")
+            raise
+        return doc is not None
 
     # Multi-workspace document queries
     async def get_documents_multi_workspace(

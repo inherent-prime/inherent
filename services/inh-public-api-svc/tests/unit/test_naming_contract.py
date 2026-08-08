@@ -1,10 +1,14 @@
 """Weaviate naming contract test (#12) — anti-drift.
 
-The public API and the ingestion service each derive Weaviate collection and
-tenant names from raw workspace/user ids. The two implementations MUST agree
-byte-for-byte or search will query the wrong collection/tenant. These GOLDEN
-assertions are duplicated on the ingestion side; if either implementation drifts
-from these values, CI fails.
+The public API and the ingestion service both derive Weaviate collection and
+tenant names by calling the single shared implementation in
+``inh_contracts.naming`` (base32-encoded, injective — see ADR 0002's
+2026-07-04 amendment and #1). They MUST still agree byte-for-byte with each
+other and with the ingestion side's own pin
+(``services/inh-ingestion-svc/tests/test_naming_contract.py``) — these GOLDEN
+assertions are pinned independently on both services (belt-and-suspenders
+against the shared package itself regressing); if either drifts from these
+values, CI fails.
 """
 
 from __future__ import annotations

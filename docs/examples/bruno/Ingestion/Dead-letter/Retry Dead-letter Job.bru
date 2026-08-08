@@ -5,18 +5,23 @@ meta {
 }
 
 post {
-  url: {{ingest_base}}/dead-letter/1/retry
+  url: {{ingest_base}}/dead-letter/1/retry?workspace_id={{workspace_id}}
   body: none
   auth: inherit
 }
 
+params:query {
+  workspace_id: {{workspace_id}}
+}
+
 tests {
-  test("status is 200, 404 (not found), 409 (bad status), or 500 (retry failed)", function() {
+  test("status is 200, 404 (not found / not owned), 409 (bad status), or 500 (retry failed)", function() {
     expect([200, 404, 409, 500]).to.include(res.status);
   });
 }
 
 docs {
-  Retry a dead-letter job by re-publishing its original message. Only jobs with status `pending`
-  or `retrying` can be retried (else 409). 404 if missing, 500 if the re-trigger fails.
+  Retry a dead-letter job by re-publishing its original message. `workspace_id` query param is
+  required and must own `job_id` (#177). Only jobs with status `pending` or `retrying` can be
+  retried (else 409). 404 if missing or not owned, 500 if the re-trigger fails.
 }

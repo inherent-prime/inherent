@@ -16,19 +16,34 @@ logger = structlog.get_logger(__name__)
 
 
 def _risk_metadata(chunk_dict: dict) -> dict | None:
-    """Build chunk metadata carrying the RAG-poisoning risk signal (#44).
+    """Build chunk metadata carrying the RAG-poisoning risk signal (#44) and
+    the format-aware chunking strategy attribution (#129).
 
-    Only emitted when a risk level is present in the staged chunk so benign
-    chunks keep a clean/None metadata payload. Additive: any future metadata
-    keys can be merged here.
+    Additive: each signal is only added to the dict when the staged chunk
+    actually carries it, so a chunk with neither keeps a clean/None metadata
+    payload (name kept as `_risk_metadata` -- it predates #129 and callers
+    already import it by this name; the #44 risk signal is still its
+    primary purpose, chunking_strategy just rides along in the same JSONB
+    write rather than needing a second column/migration).
     """
+    metadata: dict = {}
+
     risk = chunk_dict.get("content_risk")
-    if not risk or risk == "none":
-        return None
-    return {
-        "content_risk": risk,
-        "content_risk_reasons": list(chunk_dict.get("content_risk_reasons") or []),
-    }
+    if risk and risk != "none":
+        metadata["content_risk"] = risk
+        metadata["content_risk_reasons"] = list(chunk_dict.get("content_risk_reasons") or [])
+
+    # Which strategy (#129: "rows" | "sections" | "prose_header" |
+    # "sentences" | "paragraphs" | "tokens") actually produced this chunk --
+    # lets the #34 eval suite attribute retrieval quality per strategy, not
+    # just per file type. Empty string (a chunk that somehow bypassed the
+    # chunk activity's dispatch, e.g. an older staged chunk from before this
+    # field existed) is treated as "nothing to record", not a real value.
+    strategy = chunk_dict.get("chunking_strategy")
+    if strategy:
+        metadata["chunking_strategy"] = strategy
+
+    return metadata or None
 
 
 @activity.defn
@@ -89,15 +104,53 @@ async def store_in_postgresql(input: StoreDocumentInput) -> StoreDocumentOutput:
             timestamp="",  # Not needed for storage
         )
 
-        await db_service.store_processed_document(
+        doc_pk = await db_service.store_processed_document(
             message=message,
             chunks=chunks,
             text_length=input.text_length,
             processing_time_ms=input.processing_time_ms,
+            workflow_run_id=input.workflow_run_id,
             tenant_id=input.tenant_id,
         )
 
         duration_ms = int((time.monotonic() - start) * 1000)
+
+        if doc_pk is None:
+            # Fenced out (#110): a newer workflow run claimed this document
+            # since this run started -- most likely this run was terminated
+            # (TERMINATE_EXISTING) and this activity, already dispatched
+            # before that happened, is only completing now. Not an error:
+            # return normally (do NOT raise) so Temporal's RetryPolicy does
+            # not retry an outcome that can never change. By the time this
+            # can happen the owning workflow has already been terminated, so
+            # nothing consumes this result -- it exists for the lineage
+            # event below and for tests.
+            logger.warning(
+                "PostgreSQL store skipped: superseded by a newer workflow run",
+                document_id=input.document_id,
+                workflow_run_id=input.workflow_run_id,
+            )
+            try:
+                await db_service.record_ingestion_event(
+                    workflow_run_id=input.workflow_run_id,
+                    document_id=input.document_id,
+                    workspace_id=input.workspace_id,
+                    event_type="stored_postgresql",
+                    status="superseded",
+                    duration_ms=duration_ms,
+                )
+            except Exception as rec_err:
+                logger.warning(
+                    "Failed to record lineage event",
+                    event_type="stored_postgresql",
+                    error=str(rec_err),
+                )
+            return StoreDocumentOutput(
+                success=False,
+                chunks_stored=0,
+                error="superseded_by_newer_workflow_run",
+                superseded=True,
+            )
 
         logger.info(
             "Stored document in PostgreSQL",
@@ -220,6 +273,55 @@ async def store_in_weaviate(input: StoreDocumentInput) -> StoreDocumentOutput:
             # transient reconnect window; the RetryPolicy should get a shot
             # before the doc is failed/dead-lettered (#2).
             raise RuntimeError("Weaviate not connected")
+
+        # Fencing check (#110), immediately before the destructive delete+write
+        # below -- as close to the mutation as possible to minimize the window.
+        # Weaviate has no transactional WHERE-on-write like the Postgres upsert
+        # in store_processed_document, so this is a plain check-then-write with
+        # an inherent race, narrowed but not closed: check -> delete really is
+        # one DB round trip immediately followed by the delete call, so that
+        # part of the window is tight. But delete -> write is NOT immediate --
+        # store_chunks_with_tenant (weaviate.py) embeds the chunk batch (a
+        # blocking HTTP call to the TEI sidecar, offloaded via
+        # asyncio.to_thread) AFTER the delete and BEFORE the actual write, so
+        # there is a real gap -- tens of seconds on a full batch -- between
+        # the old vectors being deleted and the new ones landing, during
+        # which the document has NO vectors at all. A run that got past this
+        # check still owes its whole embed+write before it can commit, so a
+        # DIFFERENT, even-newer run could in principle claim and supersede it
+        # again inside that gap; exposure in practice is small (whoever wins
+        # the check has already survived the same race everyone else does),
+        # but this is a real, not hypothetical, TOCTOU window -- not "one
+        # round trip" the way the Postgres-side fence is.
+        db_service = get_db_service()
+        if not await db_service.is_active_run(input.document_id, input.workflow_run_id):
+            duration_ms = int((time.monotonic() - start) * 1000)
+            logger.warning(
+                "Weaviate store skipped: superseded by a newer workflow run",
+                document_id=input.document_id,
+                workflow_run_id=input.workflow_run_id,
+            )
+            try:
+                await db_service.record_ingestion_event(
+                    workflow_run_id=input.workflow_run_id,
+                    document_id=input.document_id,
+                    workspace_id=input.workspace_id,
+                    event_type="stored_weaviate",
+                    status="superseded",
+                    duration_ms=duration_ms,
+                )
+            except Exception as rec_err:
+                logger.warning(
+                    "Failed to record lineage event",
+                    event_type="stored_weaviate",
+                    error=str(rec_err),
+                )
+            return StoreDocumentOutput(
+                success=False,
+                chunks_stored=0,
+                error="superseded_by_newer_workflow_run",
+                superseded=True,
+            )
 
         # Convert chunk dicts to DocumentChunk objects. metadata carries the
         # per-chunk risk signal (#44) so it can be written as Weaviate properties.

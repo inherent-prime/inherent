@@ -122,8 +122,27 @@ Upload registers a file in storage and queues it for ingestion. The returned `do
 
 Allowed MIME types: `text/plain`, `text/markdown`, `text/csv`, `text/html`,
 `application/pdf`, `application/json`,
-`application/vnd.openxmlformats-officedocument.wordprocessingml.document`.
-Max size: 50 MB.
+`application/vnd.openxmlformats-officedocument.wordprocessingml.document` (DOCX),
+`application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` (XLSX),
+`application/vnd.openxmlformats-officedocument.presentationml.presentation` (PPTX),
+`image/png` (OCR), `message/rfc822` (EML), `application/epub+zip` (EPUB),
+`application/rtf` / `text/rtf` (RTF), `application/vnd.oasis.opendocument.text`
+(ODT), `application/yaml`/`text/yaml`, `application/toml`,
+`application/xml`/`text/xml`, source code (`text/x-python` and other
+language-specific aliases — see the extension allowlist below),
+`application/x-subrip` (SRT), `text/vtt` (WebVTT) — see the full
+[supported file types](../reference/file-types.md) reference for extensions,
+chunking strategy, and optional-dependency notes.
+Max size: 50 MB. Binary formats are magic-byte sniffed against the declared
+`Content-Type` at upload; a mismatch (e.g. PNG bytes declared `text/plain`)
+is rejected with `400 Bad Request`. Legacy `application/msword` (.doc) and
+Outlook `application/vnd.ms-outlook` (.msg) are explicitly rejected with a
+`400` naming the supported replacement (.docx / .eml) rather than accepted
+and garbled. A generic or absent `Content-Type` (`application/octet-stream`)
+falls back to the filename's extension when that extension is registered
+(e.g. uploading `main.py` with no declared type) — see
+[supported file types](../reference/file-types.md) for the full extension
+list this fallback consults.
 
 ### Upload plain text
 
@@ -195,6 +214,47 @@ curl -s -X POST "$API_BASE/v1/documents" \
   | jq .
 ```
 
+### Upload XLSX
+
+```bash
+curl -s -X POST "$API_BASE/v1/documents" \
+  -H "X-API-Key: $API_KEY" \
+  -H "X-Workspace-Id: $WORKSPACE_ID" \
+  -F "file=@docs/examples/sample-documents/sample.xlsx;type=application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" \
+  | jq .
+```
+
+Extracted text is row-aware and sheet-boundary-preserving (`## Sheet: <name>`
+headers, pipe-delimited rows) — see [supported file types](../reference/file-types.md).
+
+### Upload PPTX
+
+```bash
+curl -s -X POST "$API_BASE/v1/documents" \
+  -H "X-API-Key: $API_KEY" \
+  -H "X-Workspace-Id: $WORKSPACE_ID" \
+  -F "file=@docs/examples/sample-documents/sample.pptx;type=application/vnd.openxmlformats-officedocument.presentationml.presentation" \
+  | jq .
+```
+
+Extracted text preserves slide boundaries (`## Slide <n>: <title>` headers),
+table rows, and speaker notes (under a `Notes:` line) — see
+[supported file types](../reference/file-types.md).
+
+### Upload PNG (OCR)
+
+```bash
+curl -s -X POST "$API_BASE/v1/documents" \
+  -H "X-API-Key: $API_KEY" \
+  -H "X-Workspace-Id: $WORKSPACE_ID" \
+  -F "file=@docs/examples/sample-documents/sample.png;type=image/png" \
+  | jq .
+```
+
+Text is extracted via Tesseract OCR. If the `ocr` extra or the `tesseract`
+system binary isn't installed, extraction degrades to a placeholder instead
+of failing the upload — see [supported file types](../reference/file-types.md).
+
 **Expected response (201):**
 
 ```json
@@ -233,7 +293,36 @@ curl -s -X POST "$API_BASE/v1/documents" \
   "type": "https://api.inherent.systems/errors/bad-request",
   "title": "Bad Request",
   "status": 400,
-  "detail": "Unsupported file type 'application/octet-stream'. Allowed types: text/plain, text/markdown, text/csv, text/html, application/pdf, application/json, application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+  "detail": "Unsupported file type 'application/octet-stream'. Allowed types: text/plain, text/markdown, text/csv, text/html, application/pdf, application/json, application/vnd.openxmlformats-officedocument.wordprocessingml.document, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.openxmlformats-officedocument.presentationml.presentation, image/png, message/rfc822, application/epub+zip, application/rtf, text/rtf, application/vnd.oasis.opendocument.text, application/yaml, text/yaml, application/toml, application/xml, text/xml, text/x-python, application/javascript, text/javascript, application/typescript, text/x-go, text/x-java-source, text/x-rustsrc, text/x-csrc, text/x-chdr, text/x-c++src, text/x-csharp, text/x-ruby, text/x-php, text/x-swift, text/x-kotlin, text/x-scala, application/x-sh, text/x-sh, application/sql, text/x-sql, text/x-r-source, text/x-lua, application/x-subrip, text/vtt"
+}
+```
+
+Note: `application/octet-stream` above is what a missing `Content-Type` header
+resolves to by default; the 400 in this example comes from `/etc/hosts`
+having no filename extension the registry recognizes, so the fallback
+described above has nothing to consult either.
+
+**Mislabeled file — bytes don't match the declared type (400, #117):**
+
+The `Content-Type` you declare is checked against the file's actual magic
+bytes, not trusted blindly. A binary file declared as a text type, or a file
+declared as one binary format whose bytes don't match that format's
+signature, is rejected before anything is stored:
+
+```bash
+curl -s -X POST "$API_BASE/v1/documents" \
+  -H "X-API-Key: $API_KEY" \
+  -H "X-Workspace-Id: $WORKSPACE_ID" \
+  -F "file=@docs/examples/sample-documents/sample.png;type=text/plain" \
+  | jq .
+```
+
+```json
+{
+  "type": "https://api.inherent.systems/errors/bad-request",
+  "title": "Bad Request",
+  "status": 400,
+  "detail": "File content does not match the declared content type 'text/plain': the bytes match the 'png' file signature instead."
 }
 ```
 
@@ -568,6 +657,13 @@ Use when you need to re-ingest a file already in S3 without going through the up
 Ingestion runs as a Temporal workflow, so this endpoint is **asynchronous by default**: it returns
 **202 Accepted** immediately with a `workflow_id`. Poll progress with section 8.
 
+`storage_path` must be prefixed by this same request's `workspace_id`
+(`workspaces/{workspace_id}/...` or `{workspace_id}/...`) — **403** if it isn't (#210). This
+endpoint has no existing PostgreSQL row to check ownership against (it creates one), so it checks
+the one thing that IS knowable up front: that the two claims in the same request are consistent
+with each other. It does **not** prove the caller is entitled to `workspace_id` — `INGESTION_API_KEY`
+is one shared secret with no key-to-workspace binding (#177 follow-up).
+
 ```bash
 curl -s -X POST "$INGEST_BASE/ingest" \
   -H "X-API-Key: $INGEST_KEY" \
@@ -631,16 +727,19 @@ curl -s -X POST "$INGEST_BASE/ingest?wait=true" \
 }
 ```
 
-Returns **409** if a workflow is already running for this `document_id`, **503** if Temporal is unavailable.
+Returns **403** if `storage_path` isn't prefixed by `workspace_id` (#210), **409** if a workflow is
+already running for this `document_id`, **503** if Temporal is unavailable.
 
 ---
 
 ## 8. Get Ingestion Status
 
-Query the real-time progress of a running (or recently completed) ingestion workflow.
+Query the real-time progress of a running (or recently completed) ingestion workflow. The
+`workspace_id` query param is **required** and must be the workspace that actually owns
+`document_id` (#177).
 
 ```bash
-curl -s "$INGEST_BASE/ingest/$DOC_ID/status" \
+curl -s "$INGEST_BASE/ingest/$DOC_ID/status?workspace_id=$WORKSPACE_ID" \
   -H "X-API-Key: $INGEST_KEY" \
   | jq .
 ```
@@ -657,17 +756,21 @@ curl -s "$INGEST_BASE/ingest/$DOC_ID/status" \
 }
 ```
 
-Returns **404** if no workflow exists for the document (or it is no longer queryable).
+Returns **404** if `document_id` isn't found in `workspace_id` (also returned when the document
+exists but belongs to a different workspace — no cross-tenant existence leak), if no workflow
+exists for the document, or if it is no longer queryable.
 
 ---
 
 ## 9. Edit a Chunk
 
 Replace the content of a single chunk. Runs a Temporal workflow that updates PostgreSQL and
-re-embeds the chunk in Weaviate. The path index is the chunk's `chunk_index` (0-based).
+re-embeds the chunk in Weaviate. The path index is the chunk's `chunk_index` (0-based). The
+`workspace_id` query param is **required** and must be the workspace that actually owns
+`document_id` (#134) — the vector write is tenant-scoped to it.
 
 ```bash
-curl -s -X PATCH "$INGEST_BASE/chunks/$DOC_ID/0" \
+curl -s -X PATCH "$INGEST_BASE/chunks/$DOC_ID/0?workspace_id=$WORKSPACE_ID" \
   -H "X-API-Key: $INGEST_KEY" \
   -H "Content-Type: application/json" \
   -d '{ "content": "Updated chunk text goes here." }' \
@@ -684,17 +787,42 @@ curl -s -X PATCH "$INGEST_BASE/chunks/$DOC_ID/0" \
 }
 ```
 
-Returns **409** if an edit is already in progress for that chunk, **500** if the edit fails.
+Returns **404** if `document_id` isn't found in `workspace_id` (also returned when the document
+exists but belongs to a different workspace — no cross-tenant existence leak, and when
+`chunk_index` is out of range for the document), **409** if an edit
+is already in progress for that chunk, **500** if PostgreSQL updated successfully but the
+Weaviate re-embed did not (even after retries) — the chunk's new text is durable, but search
+results for it may stay stale until a retry succeeds; the failure is also recorded as an
+`ingestion_events` row visible via `GET /lineage/{document_id}`.
+
+Note: an edit does not recompute `start_char`/`end_char` in either store, so after a
+length-changing edit they no longer bracket the chunk's actual content.
+
+**Note (#129):** for a chunk produced by the `tabular` or `structured`
+format-aware strategies, `start_char`/`end_char` (surfaced on `Citation` and
+`SearchResult`) bracket only the chunk's own REAL row/section span in the
+source document — they do NOT cover any injected context (a table header
+row, an XLSX sheet heading, a section heading) that was prepended to
+`content` to keep the fragment self-describing. This relaxes the offset
+invariant other chunking strategies (`sentences`/`paragraphs`/`tokens`)
+hold exactly (`text[start_char:end_char] == content`): for `rows`/`sections`
+chunks, `text[start_char:end_char]` is a SUBSTRING of `content`, not equal
+to it, whenever context was injected. A citation/highlight consumer that
+slices the source document at `[start_char, end_char)` still gets exactly
+the chunk's own real content — it just won't include the (separately
+present, at its own real position elsewhere in the document) injected
+header/heading text. See `chunk.py`'s module docstring for the full design.
 
 ---
 
 ## 10. Document Lineage
 
 Get the ordered list of ingestion pipeline events for a document — what happened, step by step,
-during its ingestion.
+during its ingestion. The `workspace_id` query param is **required** and must be the workspace
+that actually owns `document_id` (#177).
 
 ```bash
-curl -s "$INGEST_BASE/lineage/$DOC_ID" \
+curl -s "$INGEST_BASE/lineage/$DOC_ID?workspace_id=$WORKSPACE_ID" \
   -H "X-API-Key: $INGEST_KEY" \
   | jq .
 ```
@@ -731,14 +859,20 @@ curl -s "$INGEST_BASE/lineage/$DOC_ID" \
 }
 ```
 
+Returns **404** if `document_id` isn't found in `workspace_id` (also returned when the document
+exists but belongs to a different workspace — no cross-tenant existence leak, #177).
+
 ---
 
 ## 11. Delete a Document
 
 > **Destructive.** Removes the document from PostgreSQL and its chunks from Weaviate.
 
-Both `workspace_id` and `user_id` query params are **required**. Weaviate cleanup is best-effort:
-if it fails, the PostgreSQL delete still succeeds and `weaviate_cleaned` is `false`.
+Both `workspace_id` and `user_id` query params are **required**. `workspace_id` must be the
+workspace that actually owns `document_id` (#175) — `user_id` is accepted for backward-compatible
+request shape but is otherwise ignored; the resolved document's own `user_id` always drives the
+Weaviate tenant lookup. Weaviate cleanup is best-effort: if it fails, the PostgreSQL delete still
+succeeds and `weaviate_cleaned` is `false`.
 
 ```bash
 curl -s -X DELETE \
@@ -757,7 +891,8 @@ curl -s -X DELETE \
 }
 ```
 
-Returns **404** if the document is not found in PostgreSQL.
+Returns **404** if `document_id` isn't found in `workspace_id` (also returned when the document
+exists but belongs to a different workspace — no cross-tenant existence leak, #175).
 
 ---
 
@@ -768,10 +903,13 @@ endpoints live on the ingestion service (write/admin plane) and use `$INGEST_KEY
 
 ### List dead-letter jobs
 
-Optional filters: `workspace_id`, `status` (default `pending`), `limit` (1–200, default 50).
+`workspace_id` is **required** (#177 — it used to be an optional filter, which meant omitting it
+returned every workspace's dead-letter rows, including a genuine `document_id` pair a caller could
+then present to `PATCH /chunks/{document_id}/{chunk_index}`). Optional: `status` (default
+`pending`), `limit` (1–200, default 50).
 
 ```bash
-curl -s "$INGEST_BASE/dead-letter?status=pending&limit=50" \
+curl -s "$INGEST_BASE/dead-letter?workspace_id=$WORKSPACE_ID&status=pending&limit=50" \
   -H "X-API-Key: $INGEST_KEY" \
   | jq .
 ```
@@ -802,20 +940,25 @@ curl -s "$INGEST_BASE/dead-letter?status=pending&limit=50" \
 
 ### Get a single job
 
+`workspace_id` is **required** and must be the workspace that actually owns `job_id` (#177).
+
 ```bash
-curl -s "$INGEST_BASE/dead-letter/1" \
+curl -s "$INGEST_BASE/dead-letter/1?workspace_id=$WORKSPACE_ID" \
   -H "X-API-Key: $INGEST_KEY" \
   | jq .
 ```
 
-Returns **404** if job `1` does not exist.
+Returns **404** if job `1` does not exist, or exists but isn't owned by `workspace_id` (no
+cross-tenant existence leak).
 
 ### Retry a job
 
-Re-publishes the job's original message. Only jobs with status `pending` or `retrying` can be retried.
+Re-publishes the job's original message. Only jobs with status `pending` or `retrying` can be
+retried. `workspace_id` is **required** and must be the workspace that actually owns `job_id`
+(#177).
 
 ```bash
-curl -s -X POST "$INGEST_BASE/dead-letter/1/retry" \
+curl -s -X POST "$INGEST_BASE/dead-letter/1/retry?workspace_id=$WORKSPACE_ID" \
   -H "X-API-Key: $INGEST_KEY" \
   | jq .
 ```
@@ -830,14 +973,16 @@ curl -s -X POST "$INGEST_BASE/dead-letter/1/retry" \
 }
 ```
 
-Returns **409** if the job is not in a retriable status, **404** if missing, **500** if the re-trigger fails.
+Returns **409** if the job is not in a retriable status, **404** if missing or not owned by
+`workspace_id`, **500** if the re-trigger fails.
 
 ### Abandon a job
 
-Mark a job as permanently abandoned (no further retries).
+Mark a job as permanently abandoned (no further retries). `workspace_id` is **required** and must
+be the workspace that actually owns `job_id` (#177).
 
 ```bash
-curl -s -X POST "$INGEST_BASE/dead-letter/1/abandon" \
+curl -s -X POST "$INGEST_BASE/dead-letter/1/abandon?workspace_id=$WORKSPACE_ID" \
   -H "X-API-Key: $INGEST_KEY" \
   | jq .
 ```
@@ -850,6 +995,8 @@ curl -s -X POST "$INGEST_BASE/dead-letter/1/abandon" \
   "job_id": 1
 }
 ```
+
+Returns **404** if missing or not owned by `workspace_id`.
 
 ---
 
@@ -864,7 +1011,7 @@ curl -s -X POST "$INGEST_BASE/dead-letter/1/abandon" \
 | 401 | Both | Missing API key | Set `X-API-Key` header |
 | 403 | Both | Invalid key / lacks required permission | Use a valid key with the needed permission (ingestion: match `INGESTION_API_KEY`) |
 | 404 | Public API | Document not found in workspace | Check document ID and workspace |
-| 404 | Ingestion | Document not in PostgreSQL (delete), no queryable workflow (status), or dead-letter job not found | Check the document ID / job ID; for status, ensure a workflow has run |
+| 404 | Ingestion | Document/job not owned by the claimed `workspace_id` (status, lineage, delete, dead-letter get/retry/abandon -- #134/#175/#177), or no queryable workflow (status) | Check `workspace_id` matches the document/job's actual owner, and the document ID / job ID; for status, ensure a workflow has run |
 | 409 | Ingestion | Workflow or chunk edit already running, or dead-letter job not in a retriable status | Wait for the in-flight workflow to finish, or check the job status, then retry |
 | 429 | Public API | Rate limit exceeded | Wait and retry; check `Retry-After` header |
 | 503 | Both | Backing service unavailable (Public API: PostgreSQL/Weaviate; Ingestion: Temporal) | Check `GET /health/ready` (public) or `GET /health` (ingestion) |
@@ -982,8 +1129,16 @@ depend on it.
 | `sample.json` | `application/json` | `docs/examples/sample-documents/sample.json` |
 | `sample.csv` | `text/csv` | `docs/examples/sample-documents/sample.csv` |
 | `sample.html` | `text/html` | `docs/examples/sample-documents/sample.html` |
-| `sample.pdf` | `application/pdf` | Generate with any PDF tool; not committed (binary) |
-| `sample.docx` | `application/vnd.openxmlformats-officedocument.wordprocessingml.document` | Generate with LibreOffice/Word; not committed (binary) |
+| `sample.pdf` | `application/pdf` | `docs/examples/sample-documents/sample.pdf` |
+| `sample.docx` | `application/vnd.openxmlformats-officedocument.wordprocessingml.document` | `docs/examples/sample-documents/sample.docx` |
+| `sample.xlsx` | `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` | `docs/examples/sample-documents/sample.xlsx` |
+| `sample.pptx` | `application/vnd.openxmlformats-officedocument.presentationml.presentation` | `docs/examples/sample-documents/sample.pptx` |
+| `sample.png` | `image/png` | `docs/examples/sample-documents/sample.png` |
+| `sample.yaml` | `application/yaml` | `docs/examples/sample-documents/sample.yaml` |
+| `sample.toml` | `application/toml` | `docs/examples/sample-documents/sample.toml` |
+| `sample.xml` | `application/xml` | `docs/examples/sample-documents/sample.xml` |
+| `sample.srt` | `application/x-subrip` | `docs/examples/sample-documents/sample.srt` |
+| `sample.vtt` | `text/vtt` | `docs/examples/sample-documents/sample.vtt` |
 
 ### Generate sample PDF (requires `enscript` + `ps2pdf`)
 

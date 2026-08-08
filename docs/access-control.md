@@ -11,16 +11,29 @@ top of Inherent.
 
 | Layer | Mechanism | Where |
 | --- | --- | --- |
-| Key → workspace | A workspace-scoped key is bound to one workspace; a mismatching `X-Workspace-Id` is `403`. A user-scoped key may name any workspace the user owns; anything else is `403` | `services/inh-public-api-svc/src/services/auth.py` (`_resolve_workspace`) |
+| Key → workspace | A workspace-scoped key is bound to one workspace; a mismatching `X-Workspace-Id` (REST) or `workspace_id` argument (MCP) is rejected. A user-scoped key may name any workspace the user owns; anything else is rejected | `services/inh-public-api-svc/src/services/auth.py` (`get_authorized_workspace_ids`, consumed by `_resolve_workspace` for REST and `src/mcp_server/server.py` for MCP) |
 | Workspace → storage | One Weaviate collection per workspace (`Workspace_<encoded id>`), one tenant per user inside it (`User_<encoded id>`). Names are derived deterministically and injectively from the raw ids, so distinct ids can never collide onto one collection | `services/inh-contracts/src/inh_contracts/naming.py` |
 | Query → tenant | Every Weaviate query carries the caller's tenant and targets a single workspace collection. A single-workspace search cannot read another workspace's collection | `services/inh-public-api-svc/src/services/search.py` (`_search_weaviate`) |
-| Fan-out → authorized set | With no `X-Workspace-Id`, read/search fan out only over `get_user_workspace_ids(user_id)` — the caller's authorized set — so merged results cannot cross authorization | `services/inh-public-api-svc/src/api/v1/search.py` |
+| Fan-out → authorized set | With no `X-Workspace-Id` / `workspace_id`, read/search fan out only over `get_authorized_workspace_ids(key_info, database)` — the caller's authorized set (the key's own workspace when scoped, otherwise every workspace the user owns) — so merged results cannot cross authorization | `services/inh-public-api-svc/src/api/v1/search.py` (REST), `services/inh-public-api-svc/src/mcp_server/server.py` (MCP) |
 
-Cross-workspace documents read as `404`, not `403`, so a caller cannot probe
-for the existence of content outside their workspaces. See the
-[REST API reference](reference/rest-api.md#workspace-scoping) for the exact
-status codes and [ADR 0002](adr/0002-weaviate-multi-tenancy-scale.md) for the
-tenancy model.
+The REST and MCP surfaces share one implementation of the key-scoping rule
+(`get_authorized_workspace_ids` in `src/services/auth.py`) — neither surface
+derives workspace access from the user's full owned-workspace set on its own,
+so a workspace-scoped key binds identically everywhere it is used
+([#138](https://github.com/inherent-prime/inherent/issues/138)).
+
+A document that exists in a workspace the caller isn't authorized for and a
+document id that doesn't exist at all are answered IDENTICALLY on both
+surfaces — REST's `404 "Document not found"`, MCP's
+`Error: Document '<id>' not found` — so a caller cannot probe for the
+existence of content outside their workspaces on either transport. (MCP's
+document-scoped tools closed this identically in #138's follow-up; before
+that they had a separate "you don't have access to document" message for the
+unauthorized case, which was a working cross-workspace existence oracle a
+scoped key could use to enumerate ids in a workspace it couldn't read.) See
+the [REST API reference](reference/rest-api.md#workspace-scoping) for the
+exact status codes and [ADR 0002](adr/0002-weaviate-multi-tenancy-scale.md)
+for the tenancy model.
 
 ## What tenant scoping does not do
 
@@ -58,8 +71,9 @@ provisioning is script- or SQL-driven (see
 [Production hardening §8](deploy/production.md#8-provision-workspaces-and-api-keys)):
 
 - **Contractor key** — workspace-scoped to `ws_tier1`. Sending
-  `X-Workspace-Id: ws_tier2` returns `403`. Tier 2 and Tier 3 content is not
-  in the collection the key can query, so it cannot be retrieved at any
+  `X-Workspace-Id: ws_tier2` (REST) or `workspace_id: "ws_tier2"` on an MCP
+  tool call returns an error on both surfaces. Tier 2 and Tier 3 content is
+  not in the collection the key can query, so it cannot be retrieved at any
   `limit` or `min_score`.
 - **Employee key** — user-scoped to a user owning `ws_tier1` and `ws_tier2`.
   Omitting `X-Workspace-Id` fans out over exactly those two.

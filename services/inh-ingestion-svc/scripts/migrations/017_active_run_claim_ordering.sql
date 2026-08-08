@@ -1,0 +1,46 @@
+-- Migration 017: Add active_run_claimed_at to make the #110 fencing claim monotonic
+--
+-- Migration 016 added active_run_id so the store activities could refuse to
+-- commit once a NEWER workflow run had claimed the document (blocker 1 of
+-- the #110 remediation). But the CLAIM step itself
+-- (DatabaseService.create_pending_document) was a bare unconditional UPDATE
+-- with no ordering predicate -- whichever transaction committed LAST owned
+-- the document, regardless of which run actually STARTED later.
+--
+-- Concrete failure this allowed (found in follow-up review): run A starts,
+-- dispatches its create_pending_document activity, and is then terminated
+-- (TERMINATE_EXISTING) by a fresh run B for the same document -- exactly
+-- the rapid-retry scenario #110 exists to serve. Termination does not stop
+-- A's already-dispatched activity (the same premise the store-side fencing
+-- already accepts). If A's claim UPDATE happens to commit AFTER B's, A (a
+-- dead run) ends up owning active_run_id, and B -- the legitimate, newest
+-- run -- gets fenced out of its OWN store step. The newest content that
+-- #110 promises should "win immediately" instead hard-fails and gets
+-- dead-lettered.
+--
+-- Fix: make the claim ordering-aware using each run's *start time* rather
+-- than commit order. workflow.info().start_time is deterministic and
+-- workflow-supplied (safe to read inside @workflow.run, unlike
+-- datetime.now()), so it reflects when Temporal actually started the run --
+-- not when its activity happened to reach the database. The claim UPDATE's
+-- new WHERE guard (services/database.py::create_pending_document) only
+-- applies when the document is unclaimed OR the currently-recorded claim's
+-- start time is <= the claiming run's own start time: an earlier-starting
+-- run's late-arriving claim can no longer overwrite a later-starting run's.
+--
+-- Nullable, no default: existing rows (predating this migration, or a
+-- document whose claim step never ran) have active_run_claimed_at IS NULL,
+-- which the guard treats as unclaimed (permitted) -- consistent with how
+-- active_run_id IS NULL is already treated.
+--
+-- A NEW migration rather than editing 016: 016 may already be recorded as
+-- applied in `_migrations` on a database that ran it before this fix
+-- shipped (this repo's own migration runner treats a migration as applied
+-- exactly once, keyed by filename -- see scripts/migrations/README.md).
+-- Editing 016 in place would silently skip active_run_claimed_at on any
+-- such database forever, since the runner would see "016 already applied"
+-- and never re-run it. A new file guarantees every database -- fresh or
+-- already on 016 -- picks up the column exactly once.
+
+ALTER TABLE processed_documents
+    ADD COLUMN IF NOT EXISTS active_run_claimed_at TIMESTAMPTZ;

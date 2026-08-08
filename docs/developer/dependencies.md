@@ -46,6 +46,33 @@ either the extra or the group alone still produces the documented toolchain.
 > When you change a dev tool version, update **both** lists in **all three**
 > services so they cannot drift.
 
+### The root-level `pytest` pin is a fourth, separate copy
+
+`tests/` (repo root, #183) has no `pyproject.toml` of its own — it isn't one
+of the three services above, so it can't read the pin from any of their
+lockfiles. It runs via an ephemeral `uvx 'pytest==<version>' tests/`, which
+hardcodes the version as a literal string in **four** places outside the
+service pyproject files. Bumping `pytest` above therefore means updating
+**seven** locations total, not three — the usual three services' `pyproject.toml`
+pairs, plus these:
+
+1. `.github/workflows/ci.yml` — the `root-tests` job's `Test` step (`uvx
+   'pytest==X.Y.Z' tests/ -q`).
+2. `Makefile` — the `test` target's root-suite line (same `uvx` command).
+3. `Makefile` — the `test-fast` target's root-suite line. Easy to miss: it is
+   a second copy in the same file as the one above.
+4. `docs/testing.md` — the root-level suite's `uvx 'pytest==X.Y.Z' tests/`
+   example in the intro list.
+
+Verify with `grep -rn "pytest==" .github/workflows/ Makefile docs/` rather than
+by memory — this list has already gone stale once, in the same change that
+introduced it.
+
+This is a known structural gap (#204 tracks replacing the hardcoded copies
+with a single source of truth, e.g. reading the version out of one service's
+`pyproject.toml`); until that lands, keep all four in sync by hand whenever
+`pytest`'s row in the table above changes.
+
 ## Normalized tool versions
 
 Dev tooling is pinned to exact versions and aligned across all three services
@@ -81,7 +108,9 @@ Service-specific dev deps stay local to the service that needs them, e.g.
 ## Updating tool versions
 
 1. Bump the version in **both** `[project.optional-dependencies].dev` and
-   `[dependency-groups].dev` of **all three** services to the same value.
+   `[dependency-groups].dev` of **all three** services to the same value. If
+   the tool is `pytest`, also bump the three root-level pin copies listed
+   above (`ci.yml`, `Makefile`, `docs/testing.md`).
 2. `uv --project services/<svc> sync --extra dev --group dev` for each service.
 3. Verify nothing broke (per service):
    ```bash

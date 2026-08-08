@@ -108,19 +108,22 @@ def test_no_advanced_method_enabled_by_default() -> None:
     assert enabled == [], f"advanced methods enabled by default (gate violated): {enabled}"
 
 
-def test_diversification_defaults_off() -> None:
-    """Eval-gate policy (#146): per-document diversification is OFF by default.
+def test_diversification_defaults_on() -> None:
+    """Eval-gate policy (#146): per-document diversification is ON by default.
 
     Unlike the three ADVANCED_FLAGS above, diversification IS implemented (see
-    ADR 0004 and SearchService._diversify_by_document) -- it is gated for a
+    ADR 0004 and SearchService._diversify_by_document) -- it was gated for a
     different reason: it changes ranking order for every multi-chunk-per-
-    document query, not just crowded ones, so it needs the same documented
+    document query, not just crowded ones, so it needed the same documented
     eval improvement + maintainer approval before defaulting on, same as any
-    #47 method. See docs/adr/0004-per-document-diversification.md for the
-    measured evidence (recall@5 0.5->1.0 on the multi_doc_crowding golden
-    corpus category) that still fell short of "ship on by default."
+    #47 method. Both conditions are now met -- see
+    docs/adr/0004-per-document-diversification.md for the measured evidence
+    (recall@5 0.5->1.0 on the multi_doc_crowding golden corpus category) and
+    its 2026-08-06 amendment recording maintainer approval and the default
+    flip. An operator who wants the pre-flip behavior sets
+    ENABLE_DIVERSIFICATION=false.
     """
     settings = Settings()  # type: ignore[call-arg]
     assert (
-        settings.enable_diversification is False
-    ), "enable_diversification must default to False (off by default, #146)"
+        settings.enable_diversification is True
+    ), "enable_diversification must default to True (on by default, #146)"
