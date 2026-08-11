@@ -10,6 +10,30 @@ this file — read the matching entry before touching the related area. Add an
 entry when a shipped defect teaches something a rule alone can't carry: one
 entry per root cause, newest first.
 
+## #121 — A merged backlog batch does not close issues without `Closes #N` (2026-08-11)
+
+**What happened.** Structured text (YAML/TOML/XML) shipped on `main` via the
+#202 backlog batch (`2907220` / `feat(ingestion): structured text, source
+code and subtitle formats`). Registry entries, MCP+REST surfaces, sample
+fixtures, XML tag-strip tests, docs, and CHANGELOG all matched the
+acceptance criteria — but [#121](https://github.com/inherent-prime/inherent/issues/121)
+stayed **Open** because the merge did not carry a `Closes #121` /
+`Fixes #121` keyword GitHub could act on.
+
+**Learnings.**
+
+- "Shipped in code" and "closed on GitHub" are separate states. Agents and
+  humans scanning Issues will re-implement finished work if the tracker
+  stays open.
+- Multi-issue backlog PRs are especially prone to this: one squashed body
+  lists many numbers in prose (`(#121, #122, #127)`) without the closing
+  keyword form GitHub requires per issue.
+
+**Mandatory pattern.** Every issue a PR finishes must appear as its own
+`Closes #N` (or `Fixes #N`) line in the PR body — including backlog
+batches. After merge, spot-check with `gh issue view N --json state` for
+each claimed issue; reopen-and-fix only if the AC truly regressed.
+
 ## #225 — A green test suite says nothing about the image when the two resolve dependencies differently (2026-08-09)
 
 **What happened.** The integration workflow went red on `main` with no code
