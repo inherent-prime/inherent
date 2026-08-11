@@ -423,6 +423,51 @@ class TestIntakeDocumentMagicByteSniffing:
             )
         assert "empty" in str(exc_info.value).lower()
 
+    @pytest.mark.parametrize(
+        ("content", "filename", "content_type"),
+        [
+            (b"\xff\xd8\xff fake jpeg", "scan.jpg", "image/jpeg"),
+            (b"RIFF\x00\x00\x00\x00WEBP fake", "scan.webp", "image/webp"),
+            (b"II*\x00 fake tiff", "scan.tiff", "image/tiff"),
+            (b"MM\x00* fake tiff be", "scan.tif", "image/tiff"),
+            (b"BM fake bmp", "scan.bmp", "image/bmp"),
+        ],
+        ids=["jpeg", "webp", "tiff-le", "tiff-be", "bmp"],
+    )
+    async def test_image_ocr_siblings_accepted(
+        self, mock_db, mock_storage, mock_mq, content, filename, content_type
+    ):
+        """#120: JPEG/WebP/TIFF/BMP pass intake (REST OCR path)."""
+        p1, p2 = _patches(mock_storage, mock_mq)
+        with p1, p2:
+            result = await document_intake.intake_document(
+                database=mock_db,
+                workspace_id="test-workspace-id",
+                user_id="test-user-id",
+                content_bytes=content,
+                filename=filename,
+                content_type=content_type,
+            )
+        assert result.status == "pending"
+        assert result.mime_type == content_type
+
+    async def test_jpeg_bytes_declared_as_text_plain_rejected(
+        self, mock_db, mock_storage, mock_mq
+    ):
+        """#120: mislabeled JPEG is rejected at sniff, same as PNG."""
+        p1, p2 = _patches(mock_storage, mock_mq)
+        with p1, p2, pytest.raises(BadRequestError) as exc_info:
+            await document_intake.intake_document(
+                database=mock_db,
+                workspace_id="test-workspace-id",
+                user_id="test-user-id",
+                content_bytes=b"\xff\xd8\xff fake jpeg",
+                filename="notes.txt",
+                content_type="text/plain",
+            )
+        detail = str(exc_info.value).lower()
+        assert "jpeg" in detail or "mismatch" in detail or "signature" in detail
+
 
 class TestIntakeDocumentExtensionConsistency:
     """#117: the filename's extension is cross-checked against the declared

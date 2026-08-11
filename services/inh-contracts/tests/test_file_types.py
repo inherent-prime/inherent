@@ -72,7 +72,7 @@ class TestRegistryShape:
                 )
 
     def test_current_registered_formats_are_exactly_these(self):
-        """Pins the full registered format set (20 as of #121/#122/#127).
+        """Pins the full registered format set (24 as of #120).
 
         The eight pre-#117 formats migrated with no
         loss (acceptance criterion: 'All 8 current formats migrate to
@@ -89,6 +89,10 @@ class TestRegistryShape:
             "xlsx",
             "pptx",
             "png",
+            "jpeg",
+            "webp",
+            "tiff",
+            "bmp",
             "eml",
             "epub",
             "rtf",
@@ -227,6 +231,37 @@ class TestLookups:
         assert get_spec_by_key("png").mime_types == ("image/png",)
         assert get_spec_by_key("does-not-exist") is None
 
+    def test_image_ocr_siblings_registered_rest_only(self):
+        """#120: JPEG/WebP/TIFF/BMP share png's extractor/extra/degradation
+        and stay REST-only (binary bytes cannot cross MCP upload_document)."""
+        expected = {
+            "jpeg": (("image/jpeg",), (".jpg", ".jpeg"), b"\xff\xd8\xff"),
+            "webp": (("image/webp",), (".webp",), b"WEBP"),
+            "tiff": (("image/tiff",), (".tif", ".tiff"), b"II*\x00"),
+            "bmp": (("image/bmp",), (".bmp",), b"BM"),
+        }
+        for key, (mimes, exts, magic) in expected.items():
+            spec = get_spec_by_key(key)
+            assert spec is not None, key
+            assert spec.mime_types == mimes
+            assert spec.extensions == exts
+            assert spec.magic == magic
+            assert spec.surfaces == frozenset({"rest"})
+            assert spec.extractor == "image_ocr"
+            assert spec.chunking_hint == "media"
+            assert spec.optional_extra == "ocr"
+            assert spec.degradation == "placeholder"
+
+    def test_tiff_accepts_both_endian_magics(self):
+        """#120: TIFF LE (II) is primary; BE (MM) is an alternate so sniffing
+        does not reject a legitimately big-endian TIFF declared image/tiff."""
+        spec = get_spec_by_key("tiff")
+        assert spec.magic == b"II*\x00"
+        assert spec.magic_alternates == (b"MM\x00*",)
+        # Both endiannesses must sniff-accept under image/tiff.
+        assert sniff_content_type(b"II*\x00" + b"le-tiff", "image/tiff").key == "tiff"
+        assert sniff_content_type(b"MM\x00*" + b"be-tiff", "image/tiff").key == "tiff"
+
     def test_all_mime_types_exact_set_and_order(self):
         """Pins the FULL registered MIME list, set AND order.
 
@@ -255,6 +290,11 @@ class TestLookups:
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             "application/vnd.openxmlformats-officedocument.presentationml.presentation",
             "image/png",
+            # #120: image OCR siblings (JPEG/WebP/TIFF/BMP)
+            "image/jpeg",
+            "image/webp",
+            "image/tiff",
+            "image/bmp",
             # #124/#125/#126: long-tail formats
             "message/rfc822",
             "application/epub+zip",
@@ -732,6 +772,28 @@ class TestSniffContentType:
         with pytest.raises(ContentTypeMismatchError) as exc_info:
             sniff_content_type(png_magic, "text/plain")
         assert "png" in str(exc_info.value)
+
+    def test_jpeg_bytes_declared_as_text_plain_are_rejected(self):
+        """#120: images are the canonical mislabeled-binary case -- JPEG
+        magic under a text declaration must fail sniff the same way PNG does."""
+        jpeg_magic = b"\xff\xd8\xff" + b"rest of a fake jpeg"
+        with pytest.raises(ContentTypeMismatchError) as exc_info:
+            sniff_content_type(jpeg_magic, "text/plain")
+        assert "jpeg" in str(exc_info.value)
+
+    def test_webp_bytes_accept_when_WEBP_at_offset_8(self):
+        """#120: WebP signature lives at byte 8 inside a RIFF container."""
+        webp = b"RIFF\x00\x00\x00\x00WEBP" + b"fake"
+        assert sniff_content_type(webp, "image/webp").key == "webp"
+
+    def test_bmp_prose_mention_does_not_false_positive(self):
+        """#120: BMP's 'BM' magic is anchored to the first 2 bytes so a
+        prose sentence containing 'BM' later in a text/plain upload is not
+        rejected as a BMP (same RTF lesson as #126 review item 5)."""
+        prose = b"Hello world. The BM marker appears mid-sentence."
+        # text/plain has no own magic; check 2 must NOT claim these bytes
+        # are BMP just because 'BM' appears past offset 0.
+        assert sniff_content_type(prose, "text/plain").key == "txt"
 
     def test_png_bytes_declared_as_pdf_are_rejected(self):
         png_magic = b"\x89PNG\r\n\x1a\n" + b"rest of a fake png"

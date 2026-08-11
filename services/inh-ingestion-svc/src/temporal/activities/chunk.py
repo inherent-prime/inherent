@@ -59,7 +59,7 @@ rather than one strategy per format:
   it positionally. Format-agnostic by design (keyed on TEXT SHAPE, not on
   "this is specifically an .eml"), so the vast majority of prose documents
   that have no such block chunk byte-for-byte as before #129.
-- ``media`` (png) -> plain size-based chunking. OCR/placeholder output is
+- ``media`` (png/jpeg/webp/tiff/bmp) -> plain size-based chunking. OCR/placeholder output is
   short and unstructured; there is no header/section shape to preserve.
 
 Every chunk records which strategy actually produced it in

@@ -7,7 +7,8 @@ systems can actually query: a self-hostable ingestion, indexing, storage,
 and retrieval layer for a private RAG system, exposed over REST and MCP.
 
 You connect sources — plain text, Markdown, CSV, HTML, PDF, JSON, DOCX,
-XLSX, PPTX, PNG (OCR), EML, EPUB, RTF, ODT, YAML/TOML/XML, source code
+XLSX, PPTX, images via OCR (PNG/JPEG/WebP/TIFF/BMP), EML, EPUB, RTF, ODT,
+YAML/TOML/XML, source code
 (Python, JS/TS, Go, Java, Rust, and more), SRT/WebVTT transcripts — see the
 full [supported file types](reference/file-types.md) list — and Inherent
 extracts, chunks, embeds, stores, and serves retrieval with citations,

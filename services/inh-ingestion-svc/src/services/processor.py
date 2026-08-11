@@ -36,6 +36,22 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
+# MIME types / extensions the legacy processor routes to OCR (#61/#120).
+# Mirrors the FILE_TYPE_REGISTRY entries whose extractor is ``image_ocr``.
+# Kept as a local frozenset (not a live registry lookup) so this deprecated
+# module stays free of an inh_contracts import it did not previously need;
+# the live Temporal path dispatches via the registry.
+_IMAGE_OCR_MIME_TYPES = frozenset(
+    {
+        "image/png",
+        "image/jpeg",
+        "image/webp",
+        "image/tiff",
+        "image/bmp",
+    }
+)
+_IMAGE_OCR_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp")
+
 
 class DocumentProcessor:
     """Document processor for handling ingestion tasks with multi-tenancy support."""
@@ -377,8 +393,9 @@ class DocumentProcessor:
             if content_type == "text/html" or filename.endswith(".html"):
                 return self._extract_html_text(content)
 
-            # PNG images (OCR with graceful fallback)
-            if content_type == "image/png" or filename.endswith(".png"):
+            # Images routed through OCR (PNG/JPEG/WebP/TIFF/BMP, #61/#120)
+            # with graceful placeholder fallback when the ocr extra is missing.
+            if content_type in _IMAGE_OCR_MIME_TYPES or filename.endswith(_IMAGE_OCR_EXTENSIONS):
                 return self._extract_image_text(content, message.original_filename)
 
             # Default: try to decode as text
@@ -451,56 +468,19 @@ class DocumentProcessor:
             return ""
 
     def _extract_image_text(self, content: bytes, original_filename: str) -> str:
-        """Extract text from a PNG image via Tesseract OCR with graceful fallback.
+        """Extract text from an image via Tesseract OCR with graceful fallback.
 
-        OCR is optional (requires the ``ocr`` extra plus the ``tesseract``
-        system binary). When OCR is unavailable -- libraries not installed,
-        the tesseract binary is missing, or no readable text in the image --
-        this returns a minimal placeholder instead of raising, so a missing
-        OCR install never crashes ingestion (0 useful chunks, not a hard
-        failure).
+        Delegates to the live Temporal helper so PNG/JPEG/WebP/TIFF/BMP and
+        multi-page TIFF behavior (#61/#120) cannot drift between this
+        deprecated processor and ``extract.py``. See the module docstring:
+        this class is not on the live path; the delegate keeps its OCR tests
+        covering the same implementation the workflow uses.
         """
-        placeholder = f"[image: {original_filename}, no text extracted]"
+        from src.temporal.activities.extract import (
+            _extract_image_text as extract_image_text,
+        )
 
-        try:
-            import io
-
-            import pytesseract
-            from PIL import Image
-        except ImportError:
-            logger.warning(
-                "OCR libraries not available (install the 'ocr' extra: pytesseract, pillow); "
-                "returning placeholder for image",
-                filename=original_filename,
-            )
-            return placeholder
-
-        try:
-            image = Image.open(io.BytesIO(content))
-            text = pytesseract.image_to_string(image)
-        except pytesseract.TesseractNotFoundError:
-            logger.warning(
-                "Tesseract binary not found; install the 'tesseract-ocr' system package. "
-                "Returning placeholder for image",
-                filename=original_filename,
-            )
-            return placeholder
-        except Exception as e:
-            logger.warning(
-                "OCR failed for image; returning placeholder",
-                filename=original_filename,
-                error=str(e),
-            )
-            return placeholder
-
-        if not text.strip():
-            logger.warning(
-                "OCR produced no text for image; returning placeholder",
-                filename=original_filename,
-            )
-            return placeholder
-
-        return text
+        return extract_image_text(content, original_filename)
 
     def _extract_html_text(self, content: bytes) -> str:
         """Extract text from HTML content."""

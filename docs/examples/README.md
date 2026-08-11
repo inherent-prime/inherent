@@ -125,7 +125,8 @@ Allowed MIME types: `text/plain`, `text/markdown`, `text/csv`, `text/html`,
 `application/vnd.openxmlformats-officedocument.wordprocessingml.document` (DOCX),
 `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` (XLSX),
 `application/vnd.openxmlformats-officedocument.presentationml.presentation` (PPTX),
-`image/png` (OCR), `message/rfc822` (EML), `application/epub+zip` (EPUB),
+`image/png` / `image/jpeg` / `image/webp` / `image/tiff` / `image/bmp` (OCR),
+`message/rfc822` (EML), `application/epub+zip` (EPUB),
 `application/rtf` / `text/rtf` (RTF), `application/vnd.oasis.opendocument.text`
 (ODT), `application/yaml`/`text/yaml`, `application/toml`,
 `application/xml`/`text/xml`, source code (`text/x-python` and other
@@ -241,7 +242,7 @@ Extracted text preserves slide boundaries (`## Slide <n>: <title>` headers),
 table rows, and speaker notes (under a `Notes:` line) — see
 [supported file types](../reference/file-types.md).
 
-### Upload PNG (OCR)
+### Upload image (OCR)
 
 ```bash
 curl -s -X POST "$API_BASE/v1/documents" \
@@ -251,9 +252,12 @@ curl -s -X POST "$API_BASE/v1/documents" \
   | jq .
 ```
 
-Text is extracted via Tesseract OCR. If the `ocr` extra or the `tesseract`
-system binary isn't installed, extraction degrades to a placeholder instead
-of failing the upload — see [supported file types](../reference/file-types.md).
+Accepted image MIME types: `image/png`, `image/jpeg`, `image/webp`,
+`image/tiff`, `image/bmp`. Text is extracted via Tesseract OCR. Multi-page
+TIFF emits per-page text with `## Page N` markers (capped at 50 pages). If
+the `ocr` extra or the `tesseract` system binary isn't installed, extraction
+degrades to a placeholder instead of failing the upload — see
+[supported file types](../reference/file-types.md).
 
 **Expected response (201):**
 
@@ -293,7 +297,7 @@ curl -s -X POST "$API_BASE/v1/documents" \
   "type": "https://api.inherent.sh/errors/bad-request",
   "title": "Bad Request",
   "status": 400,
-  "detail": "Unsupported file type 'application/octet-stream'. Allowed types: text/plain, text/markdown, text/csv, text/html, application/pdf, application/json, application/vnd.openxmlformats-officedocument.wordprocessingml.document, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.openxmlformats-officedocument.presentationml.presentation, image/png, message/rfc822, application/epub+zip, application/rtf, text/rtf, application/vnd.oasis.opendocument.text, application/yaml, text/yaml, application/toml, application/xml, text/xml, text/x-python, application/javascript, text/javascript, application/typescript, text/x-go, text/x-java-source, text/x-rustsrc, text/x-csrc, text/x-chdr, text/x-c++src, text/x-csharp, text/x-ruby, text/x-php, text/x-swift, text/x-kotlin, text/x-scala, application/x-sh, text/x-sh, application/sql, text/x-sql, text/x-r-source, text/x-lua, application/x-subrip, text/vtt"
+  "detail": "Unsupported file type 'application/octet-stream'. Allowed types: text/plain, text/markdown, text/csv, text/html, application/pdf, application/json, application/vnd.openxmlformats-officedocument.wordprocessingml.document, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.openxmlformats-officedocument.presentationml.presentation, image/png, image/jpeg, image/webp, image/tiff, image/bmp, message/rfc822, application/epub+zip, application/rtf, text/rtf, application/vnd.oasis.opendocument.text, application/yaml, text/yaml, application/toml, application/xml, text/xml, text/x-python, application/javascript, text/javascript, application/typescript, text/x-go, text/x-java-source, text/x-rustsrc, text/x-csrc, text/x-chdr, text/x-c++src, text/x-csharp, text/x-ruby, text/x-php, text/x-swift, text/x-kotlin, text/x-scala, application/x-sh, text/x-sh, application/sql, text/x-sql, text/x-r-source, text/x-lua, application/x-subrip, text/vtt"
 }
 ```
 
