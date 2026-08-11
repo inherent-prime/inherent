@@ -173,9 +173,7 @@ class TestActivityImageOCR:
         assert _extract_image_text(content, filename) == "Sibling OCR text"
 
         _block_ocr_imports(monkeypatch)
-        assert _extract_image_text(content, filename) == (
-            f"[image: {filename}, no text extracted]"
-        )
+        assert _extract_image_text(content, filename) == (f"[image: {filename}, no text extracted]")
 
     def test_multipage_tiff_joins_pages_with_markers(self, monkeypatch):
         """#120: multi-frame TIFF yields per-page text with ``## Page N`` markers."""
@@ -221,7 +219,9 @@ class TestProcessorImageOCR:
         proc._initialized = True
         return proc
 
-    def _message(self, *, content_type: str = "image/png", filename: str = FILENAME) -> DocumentUploadMessage:
+    def _message(
+        self, *, content_type: str = "image/png", filename: str = FILENAME
+    ) -> DocumentUploadMessage:
         return DocumentUploadMessage(
             event_type="document.uploaded",
             document_id="doc-png-1",

@@ -781,7 +781,7 @@ class TestSniffContentType:
             sniff_content_type(jpeg_magic, "text/plain")
         assert "jpeg" in str(exc_info.value)
 
-    def test_webp_bytes_accept_when_WEBP_at_offset_8(self):
+    def test_webp_bytes_accept_when_webp_at_offset_8(self):
         """#120: WebP signature lives at byte 8 inside a RIFF container."""
         webp = b"RIFF\x00\x00\x00\x00WEBP" + b"fake"
         assert sniff_content_type(webp, "image/webp").key == "webp"

@@ -395,8 +395,7 @@ class TestUploadDocumentValidation:
                 )
 
         assert response.status_code == 201, (
-            f"{content_type} should be accepted but got {response.status_code}: "
-            f"{response.text}"
+            f"{content_type} should be accepted but got {response.status_code}: " f"{response.text}"
         )
         assert response.json()["mime_type"] == content_type
         application.dependency_overrides.clear()

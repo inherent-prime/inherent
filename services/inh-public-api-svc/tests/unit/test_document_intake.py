@@ -451,9 +451,7 @@ class TestIntakeDocumentMagicByteSniffing:
         assert result.status == "pending"
         assert result.mime_type == content_type
 
-    async def test_jpeg_bytes_declared_as_text_plain_rejected(
-        self, mock_db, mock_storage, mock_mq
-    ):
+    async def test_jpeg_bytes_declared_as_text_plain_rejected(self, mock_db, mock_storage, mock_mq):
         """#120: mislabeled JPEG is rejected at sniff, same as PNG."""
         p1, p2 = _patches(mock_storage, mock_mq)
         with p1, p2, pytest.raises(BadRequestError) as exc_info:

@@ -982,11 +982,15 @@ def _extract_image_text(content: bytes, original_filename: str) -> str:
     chunks, but not a hard failure) so a missing OCR install never crashes
     ingestion.
 
-    Multi-page TIFF (#120): iterates frames via ``PIL.ImageSequence``, OCRs
+    Multi-page TIFF (#120): only when Pillow reports ``format == "TIFF"``
+    and ``n_frames > 1``. Iterates frames via ``PIL.ImageSequence``, OCRs
     each page up to ``_MAX_IMAGE_OCR_PAGES``, and joins non-empty results
     with ``## Page N`` markers (same section-marker style as PPTX slides).
-    Single-frame images (PNG/JPEG/WebP/BMP, or a 1-page TIFF) keep the
-    original bare-text return shape so existing PNG behavior is unchanged.
+    Animated non-TIFF formats (APNG, animated WebP) deliberately stay on
+    the single-frame path -- frame iteration is for document pages, not
+    animation frames. Single-frame images (PNG/JPEG/WebP/BMP, or a 1-page
+    TIFF) keep the original bare-text return shape so existing PNG
+    behavior is unchanged.
 
     Args:
         content: Raw image bytes.
@@ -1012,9 +1016,11 @@ def _extract_image_text(content: bytes, original_filename: str) -> str:
     try:
         image = Image.open(io.BytesIO(content))
         n_frames = getattr(image, "n_frames", 1)
-        if n_frames > 1:
-            # Multi-page TIFF (or any multi-frame still): per-page OCR with
-            # markers so a downstream chunker can see page boundaries.
+        # Gate multipage OCR to TIFF only. Pillow also sets n_frames > 1 for
+        # animated WebP/APNG; OCRing those frames would burn CPU and emit
+        # misleading ``## Page N`` markers for animation, not document pages.
+        is_multipage_tiff = image.format == "TIFF" and n_frames > 1
+        if is_multipage_tiff:
             from PIL import ImageSequence
 
             page_parts: list[str] = []
