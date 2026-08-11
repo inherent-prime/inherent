@@ -1019,7 +1019,8 @@ def _extract_image_text(content: bytes, original_filename: str) -> str:
         # Gate multipage OCR to TIFF only. Pillow also sets n_frames > 1 for
         # animated WebP/APNG; OCRing those frames would burn CPU and emit
         # misleading ``## Page N`` markers for animation, not document pages.
-        is_multipage_tiff = image.format == "TIFF" and n_frames > 1
+        # getattr: test fakes (and odd Pillow objects) may omit ``format``.
+        is_multipage_tiff = getattr(image, "format", None) == "TIFF" and n_frames > 1
         if is_multipage_tiff:
             from PIL import ImageSequence
 

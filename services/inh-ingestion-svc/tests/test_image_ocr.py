@@ -54,6 +54,7 @@ def _install_fake_ocr(
     image_to_string_exc: type[BaseException] | None = None,
     n_frames: int = 1,
     page_texts: list[str] | None = None,
+    image_format: str | None = None,
 ) -> None:
     """Install fake ``pytesseract`` and ``PIL`` modules into sys.modules.
 
@@ -63,6 +64,9 @@ def _install_fake_ocr(
         n_frames: Simulated ``Image.n_frames`` (``>1`` exercises multi-page TIFF).
         page_texts: Per-page OCR strings when ``n_frames > 1``. Defaults to
             repeating ``return_text`` for each frame.
+        image_format: Simulated ``Image.format``. Defaults to ``"TIFF"`` when
+            ``n_frames > 1`` (so the multipage TIFF gate in extract.py opens),
+            otherwise ``"PNG"``.
     """
 
     class TesseractNotFoundError(Exception):
@@ -83,9 +87,14 @@ def _install_fake_ocr(
 
     fake_pytesseract.image_to_string = _image_to_string
 
+    resolved_format = (
+        image_format if image_format is not None else ("TIFF" if n_frames > 1 else "PNG")
+    )
+
     class _FakeImage:
         def __init__(self):
             self.n_frames = n_frames
+            self.format = resolved_format
 
     fake_pil = types.ModuleType("PIL")
     fake_pil_image = types.ModuleType("PIL.Image")
@@ -200,6 +209,18 @@ class TestActivityImageOCR:
         text = _extract_image_text(TIFF_LE_BYTES, "huge.tiff")
         assert f"## Page {_MAX_IMAGE_OCR_PAGES}\ntext-{_MAX_IMAGE_OCR_PAGES}" in text
         assert f"## Page {_MAX_IMAGE_OCR_PAGES + 1}" not in text
+
+    def test_animated_webp_stays_on_single_frame_path(self, monkeypatch):
+        """#120: n_frames > 1 on non-TIFF must not emit ``## Page N`` markers."""
+        _install_fake_ocr(
+            monkeypatch,
+            return_text="First frame only",
+            n_frames=3,
+            image_format="WEBP",
+        )
+        text = _extract_image_text(WEBP_BYTES, "anim.webp")
+        assert text == "First frame only"
+        assert "## Page" not in text
 
 
 # ---------------------------------------------------------------------------
