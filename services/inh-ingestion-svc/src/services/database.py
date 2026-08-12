@@ -1437,6 +1437,9 @@ class DatabaseService:
             raise RuntimeError("Database not connected")
 
         with self.get_session() as session:
+            # `where_clause` is one of two in-code string literals -- never a
+            # caller value -- and the workspace_id itself is a bound parameter,
+            # so the f-string below interpolates no untrusted input.
             where_clause = ""
             params = {}
             if workspace_id:
@@ -1456,7 +1459,7 @@ class DatabaseService:
                     SUM(size_bytes) as total_size_bytes
                 FROM processed_documents
                 {where_clause}
-            """
+            """  # nosec B608 -- where_clause is a literal; see comment above
             )
 
             result = session.execute(stats_query, params).fetchone()

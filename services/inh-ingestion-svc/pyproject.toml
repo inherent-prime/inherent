@@ -97,6 +97,30 @@ warn_unused_configs = true
 disallow_untyped_defs = false
 ignore_missing_imports = true
 
+# Baselined [no-any-return] debt, tracked in #247. mypy started running for
+# this service in CI (it previously ran for inh-public-api-svc only) and found
+# 15 sites where a function annotated `-> str` / `-> bool` / `-> int` /
+# `-> dict[str, Any]` returns an untyped value straight out of a stubless
+# third-party client (weaviate, motor, boto3, temporal).
+#
+# `warn_return_any` is switched off HERE, per module, rather than globally the
+# way inh-public-api-svc does it, so the rest of the service keeps the check
+# and this list stays a punch-list: annotate/cast the returns in a module,
+# then delete the module from `module` below. Every OTHER mypy check still
+# runs on these modules -- only the Any-return warning is suppressed. When the
+# list is empty, delete this whole block.
+[[tool.mypy.overrides]]
+module = [
+    "src.api.ownership",             # 2
+    "src.services.database",         # 1
+    "src.services.embedder",         # 1
+    "src.services.processor",        # 1
+    "src.services.weaviate",         # 7
+    "src.temporal.activities.extract",  # 1
+    "src.temporal.activities.status",   # 2
+]
+warn_return_any = false
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py", "*_test.py"]

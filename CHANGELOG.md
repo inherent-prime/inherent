@@ -262,6 +262,35 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Changed
 
+- **CI now type-checks and security-scans all three services, not just one.**
+  `mypy` and `bandit` ran for `inh-public-api-svc` only; the ingestion service
+  — the largest of the three, and the one that parses untrusted uploaded files
+  — and the shared `inh-contracts` package had no type or security signal at
+  all. Both are now in the `service-checks` matrix (`uv run mypy src`,
+  `uv run bandit -r src -ll`). `inh-contracts` was already clean under both.
+  Ingestion had 20 mypy errors and 5 medium-severity bandit findings: 5 mypy
+  errors were real and are fixed here (a `Redis | None` deref in
+  `_delivery_count`, an SSRF-guard `getaddrinfo` result typed `str | int`, two
+  attribute accesses on a `slide: object` in the PPTX notes path, and an
+  `int | None` index in the subtitle-cue parser); the other 15 are all
+  `[no-any-return]` from stubless clients and are baselined via a **per-module**
+  `warn_return_any = false` override rather than a service-wide one, so every
+  other check still applies to those modules. The 5 bandit findings each carry
+  an inline `# nosec` with a justification — `0.0.0.0` bind and an f-string
+  whose only interpolation is an in-code literal are permanent; the three
+  `xml.etree` parses of customer-uploaded EPUB/ODT XML should move to
+  `defusedxml`. Both baselines are tracked in #247.
+
+- **CI runs are least-privilege, deduplicated and time-boxed.** `ci.yml` now
+  declares `permissions: contents: read` at the workflow level (it previously
+  inherited whatever the repository default grants), cancels superseded
+  in-flight runs per pull request via a `concurrency` group — while leaving
+  push-to-`main` runs uncancelled, since that history is the merge-gate record
+  — and sets `timeout-minutes` on every job (30 for `service-checks` and
+  `Required tests before merge`, 10 for `root tests/`). Previously a hung
+  Postgres service container or a wedged `uvx` resolve could hold a job — soon
+  to be a required status check — pending for the runner's 6-hour default.
+
 - **⚠️ `GET /v1/chunks/{document_id}/context` is now bounded and pageable
   (#219).** The endpoint concatenated every chunk with no limit: one
   169-chunk contract returned 298 KB / 117,086 chars (~29,300 tokens) in a

@@ -294,6 +294,7 @@ class RedisMQService(BaseMQService):
 
     async def _delivery_count(self, stream: str, group: str, message_id: str) -> int:
         """Return how many times ``message_id`` has been delivered (>=1)."""
+        assert self._redis is not None  # only reached from a connected consumer
         try:
             pending = await self._redis.xpending_range(
                 stream, group, min=message_id, max=message_id, count=1
