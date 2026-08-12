@@ -474,6 +474,23 @@ All notable changes to Inherent are documented here. The format follows
   change, so it can confirm the live check-run names on an actual PR first —
   registering the wrong name would leave `main` requiring a check that can
   never report, which blocks every PR permanently.
+  A verification pass against a long-lived local stack surfaced two more
+  gaps in this lane, fixed on the same branch. `test_compose_mcp.py`'s
+  `_structured_payload` test helper parsed the appended `` ```json `` block
+  with a naive `str.find("```")` for the closing fence; once the shared dev
+  workspace accumulated enough documents, one contained a literal
+  triple-backtick inside its indexed content, which that naive search
+  matched before the block's real closing fence and truncated the JSON
+  mid-string (`test_compose_tenancy.py`, which imports the same helper,
+  failed identically). It now decodes with `json.JSONDecoder.raw_decode`,
+  which parses exactly one JSON value from the given offset and so cannot
+  mistake an embedded backtick for a fence. Second, "exactly 6 smoke
+  tests" — the invariant that keeps `e2e-smoke.yml` inside its 40-minute
+  budget — was enforced only by comments; a new repo-root guard test
+  (`tests/test_smoke_lane_size.py`) counts `@pytest.mark.smoke` occurrences
+  across `services/*/tests/` and pins the count, so growing the lane now
+  requires a conscious update to the pinned constant rather than a silent
+  addition.
 
 - **⚠️ `GET /v1/chunks/{document_id}/context` is now bounded and pageable
   (#219).** The endpoint concatenated every chunk with no limit: one

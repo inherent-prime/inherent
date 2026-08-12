@@ -269,14 +269,30 @@ def _text(result: CallToolResult) -> str:
 
 
 def _structured_payload(result: CallToolResult) -> dict:
-    """Parse the ```json block ``server.py::_structured`` appends to its text."""
+    """Parse the ```json block ``server.py::_structured`` appends to its text.
+
+    Decodes with ``json.JSONDecoder.raw_decode`` instead of searching for a
+    closing ``` ``` `` fence with ``str.find``: the payload can embed a chunk
+    of indexed document content that itself contains a literal triple
+    backtick (perfectly legal inside a JSON string), and a naive fence
+    search matches THAT occurrence instead of the block's real closing
+    fence, truncating the JSON mid-string
+    (``json.decoder.JSONDecodeError: Unterminated string``). ``raw_decode``
+    parses exactly one JSON value starting at the given offset and reports
+    where it ended, so backticks embedded inside JSON string content can
+    never be mistaken for a fence.
+    """
     text = _text(result)
     start = text.find("```json")
     assert start != -1, f"no structured JSON block in tool output: {text[:400]}"
-    body = text[start + len("```json") :]
-    end = body.find("```")
-    assert end != -1, f"unterminated structured JSON block: {text[:400]}"
-    return json.loads(body[:end])["structured"]
+    body = text[start + len("```json") :].lstrip()
+    try:
+        parsed, _ = json.JSONDecoder().raw_decode(body)
+    except json.JSONDecodeError as exc:
+        raise AssertionError(
+            f"could not parse structured JSON block: {exc}\nbody[:400]={body[:400]!r}"
+        ) from exc
+    return parsed["structured"]
 
 
 def _json_body(result: CallToolResult) -> dict:
