@@ -95,6 +95,7 @@ async def test_delete_returns_deleted_chunk_and_does_not_reindex():
     # No UPDATE of sibling chunk_index values — only DELETE of this row.
     sql_texts = [str(c.args[0]) for c in mock_session.execute.await_args_list]
     assert any("DELETE FROM document_chunks" in s for s in sql_texts)
+    assert any("DELETE FROM document_chunks" in s and "workspace_id" in s for s in sql_texts)
     assert not any("UPDATE document_chunks" in s and "chunk_index" in s for s in sql_texts)
 
 

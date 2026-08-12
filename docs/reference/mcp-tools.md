@@ -29,7 +29,7 @@ claude mcp add --transport http inherent https://api.inherent.sh/mcp \
   a tool argument removes that surface entirely. Missing/invalid/expired
   keys get the same 401 REST returns, before any JSON-RPC request is even
   parsed.
-- **Tool surface: 13, not 16.** `verify_claim`, `search_memory`, and
+- **Tool surface: 13, not 17.** `verify_claim`, `search_memory`, and
   `get_citations` are not advertised and cannot be called by name over HTTP
   (see [Surface difference](#surface-difference-http-vs-stdio) below) —
   unchanged on stdio. `report_feedback` is also HTTP-excluded.
@@ -58,14 +58,14 @@ claude mcp add --transport http inherent https://api.inherent.sh/mcp \
   exactly its one workspace — a `workspace_id` naming any other workspace
   is rejected, even one the key's owner also owns. A user-scoped key
   (`workspace_id` unset on the key) may use any workspace its owner owns.
-- **All 16 tools** are advertised and callable, including the tools excluded
+- **All 17 tools** are advertised and callable, including the tools excluded
   from HTTP (below) — unaffected by the HTTP transport's existence.
 
 ## Surface difference: HTTP vs stdio
 
 | | stdio | Streamable HTTP |
 | --- | --- | --- |
-| Tool count | 16 | 13 |
+| Tool count | 17 | 13 |
 | API key | `api_key` schema argument | `X-API-Key` / `Authorization` header |
 | `verify_claim` | ✅ | ❌ excluded |
 | `search_memory` | ✅ | ❌ excluded |
@@ -96,7 +96,7 @@ name list maintained separately):
 
 ## Tools
 
-The full, stdio-side catalogue (all 16 tools). The **HTTP** column marks
+The full, stdio-side catalogue (all 17 tools). The **HTTP** column marks
 whether a tool is also on the Streamable HTTP surface (see
 [Surface difference](#surface-difference-http-vs-stdio) above) —
 `report_feedback` is stdio/REST-only too (not part of the issue #220's

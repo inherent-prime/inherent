@@ -14,8 +14,10 @@ All notable changes to Inherent are documented here. The format follows
   `max(chunk_index)+1`, delete leaves gaps (`chunk_index` is a stable id).
   Writes run synchronously in public-api (PG + Weaviate with embedding);
   vector failure compensates (Create rolls back PG; Update restores prior
-  content; Delete aborts before PG). Failure parity pinned in
-  `test_failure_parity.py`.
+  content; Delete aborts before PG). PG delete is workspace-scoped and
+  aborts (no `chunk_count` decrement) when `DELETE` rowcount ≠ 1 under
+  concurrent races. Failure parity pinned in `test_failure_parity.py`.
+  MCP surface is stdio 17 / HTTP 13.
 
 - **Streamable HTTP transport for the MCP server (#220).** The same
   `_TOOLS` registry stdio serves is now mounted at `POST /mcp` inside

@@ -1014,10 +1014,12 @@ class DatabaseService:
     ) -> DocumentChunk | None:
         """Hard-delete one chunk by ``chunk_index`` (#133 Option A).
 
-        Leaves gaps (no sibling re-index). Workspace-scoped via join on
-        ``processed_documents``. Returns the deleted chunk for callers /
-        compensation, or None when absent. Decrements document and workspace
-        ``chunk_count`` (clamped at zero).
+        Leaves gaps (no sibling re-index). Workspace-scoped via join /
+        ``USING processed_documents``. Returns the deleted chunk for callers /
+        compensation, or None when absent. After DELETE, requires
+        ``rowcount == 1`` before decrementing document/workspace
+        ``chunk_count`` (clamped at zero) — a concurrent lost race rolls
+        back and returns None so counters cannot drift.
         """
         async with self.session() as session:
             select_result = await session.execute(
