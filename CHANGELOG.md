@@ -347,7 +347,18 @@ All notable changes to Inherent are documented here. The format follows
   because the second key is under-privileged. Both principals are fully
   provisioned on purpose — pointing one key at an invented workspace id is
   refused at the key-binding check and proves nothing about whether one real
-  tenant can reach another's content. A uuid sentinel, fresh per module run so
+  tenant can reach another's content. **The second principal is gated**: it is
+  seeded only when `API_KEY` is the local dev default or `SEED_PRINCIPAL_B=1`
+  is passed. README and `docs/deploy/production.md` §8 both document running
+  this script against real deployments with `API_KEY` overridden, and
+  `hetzner-e2e.yml` pipes it onto a VM with a public IP, so an unconditional
+  second seed would have planted a publicly-known active read/write/search key
+  there; `make bootstrap`, `e2e-smoke.yml` and `integration.yml` all bootstrap
+  with the defaults and keep getting it (the tenancy tests fail, not skip,
+  without it). `KEY_ID`/`KEY_ID_B` now default to empty and mint a uuid rather
+  than a literal — `key_id` is `UNIQUE` while the upsert arbitrates on
+  `key_hash`, so a pinned id made re-running with a rotated key value fail on
+  the unique constraint. A uuid sentinel, fresh per module run so
   a dirty stack cannot false-pass, is uploaded by A and then hunted by B over
   REST and MCP: search, `GET /v1/documents/{id}`, `GET /v1/chunks/{id}`,
   `/chunks/{id}/context`, `DELETE`, and the MCP `search_documents` tool. The
@@ -356,11 +367,17 @@ All notable changes to Inherent are documented here. The format follows
   404 for every cross-workspace document read or delete (a 403 there would be
   an existence oracle, the #138 follow-up's bug) — and the delete test
   re-reads the document and its chunks as A afterwards, since a handler that
-  deleted before checking the workspace would also answer 404. Each surface
-  carries its own negative control (A's search must FIND the sentinel over
-  that same transport) so a total retrieval outage reads as failure rather
-  than as perfect isolation. All four tests pass against the live stack, and
-  all four fail loudly when B is pointed at A's credentials. The
+  deleted before checking the workspace would also answer 404. B uploads a
+  decoy document of its own first, so its workspace has a real Weaviate
+  collection and tenant: without it every "B finds nothing" answer comes from
+  the missing-collection short-circuit in `search.py` rather than from scoped
+  retrieval, and the smoke-lane test would stay green on a build with tenant
+  scoping removed outright. Every surface and verb carries a negative control —
+  the owner must FIND the sentinel over that same transport, READ the same
+  route, and successfully DELETE the probe on teardown — so a retrieval outage
+  or a broken route reads as failure rather than as perfect isolation. All four
+  tests pass against the live stack, and all four fail loudly when B is pointed
+  at A's credentials. The
   retrieval-baseline hard gate is deliberately excluded: its baseline is
   ratcheted only by runs on `main`, so enforcing it per-PR would block merges
   on metric drift unrelated to the PR. Unlike the other lanes this one sets

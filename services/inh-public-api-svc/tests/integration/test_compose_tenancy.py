@@ -110,6 +110,18 @@ SEED_CONTENT = (
 )
 SEED_QUERY = f"tenancy isolation probe {SENTINEL}"
 
+# B's own content. Its marker is independent of A's sentinel, and it is never
+# mentioned in A's document, so neither can match the other by accident.
+DECOY_MARKER = f"ZZDECOY{uuid.uuid4().hex.upper()}"
+DECOY_FILENAME = f"tenancy-decoy-{DECOY_MARKER}.md"
+DECOY_CONTENT = (
+    f"# Tenancy decoy {DECOY_MARKER}\n\n"
+    f"This document belongs to workspace {WORKSPACE_B}. It exists so that "
+    f"workspace has a real vector collection and tenant of its own. "
+    f"Marker: {DECOY_MARKER}.\n"
+)
+DECOY_QUERY = f"tenancy decoy {DECOY_MARKER}"
+
 
 def _require_stack(client: httpx.Client) -> None:
     """Skip (don't fail) when no healthy stack is reachable."""
@@ -160,49 +172,100 @@ def _search(client: httpx.Client, headers: dict[str, str], query: str) -> httpx.
     )
 
 
-@pytest.fixture(scope="module")
-def seeded_document(client: httpx.Client) -> Iterator[str]:
-    """Upload the sentinel document as A and wait until A can retrieve it.
+def _upload_and_await(
+    client: httpx.Client,
+    headers: dict[str, str],
+    filename: str,
+    content: str,
+    query: str,
+    owner: str,
+) -> str:
+    """Upload a document and block until its OWNER can retrieve it by search.
 
-    Waiting for A to SEE it is what makes every "B cannot see it" assertion
-    meaningful: without it, an empty result for B could just mean ingestion
-    had not finished yet, and the whole file would pass vacuously against a
-    stack with a total retrieval outage.
+    Waiting for the owner to SEE it is what makes every "the other tenant
+    cannot see it" assertion meaningful: without it, an empty result could just
+    mean ingestion had not finished, and the whole file would pass vacuously
+    against a stack with a total retrieval outage.
     """
     resp = client.post(
         f"{API_URL}/v1/documents",
-        headers=HEADERS_A,
-        files={"file": (SEED_FILENAME, SEED_CONTENT.encode("utf-8"), "text/markdown")},
+        headers=headers,
+        files={"file": (filename, content.encode("utf-8"), "text/markdown")},
     )
-    assert resp.status_code == 201, f"seed upload failed: {resp.status_code} {resp.text}"
+    assert resp.status_code == 201, f"{owner} upload failed: {resp.status_code} {resp.text}"
     document_id = resp.json()["document_id"]
     assert document_id
 
     deadline = time.monotonic() + TIMEOUT
     last: dict = {}
     while time.monotonic() < deadline:
-        search = _search(client, HEADERS_A, SEED_QUERY)
-        assert search.status_code == 200, f"owner search failed: {search.status_code} {search.text}"
+        search = _search(client, headers, query)
+        assert (
+            search.status_code == 200
+        ), f"{owner} search failed: {search.status_code} {search.text}"
         last = search.json()
         if document_id in {r["document_id"] for r in last["results"]}:
-            break
+            return document_id
         time.sleep(3)
-    else:
-        pytest.fail(
-            f"seed document {document_id} did not become searchable to its OWNER within "
-            f"{TIMEOUT}s (last total_results={last.get('total_results')}) -- cannot assert "
-            f"isolation against content that is not retrievable at all"
-        )
+    pytest.fail(
+        f"{owner}'s document {document_id} did not become searchable to its OWNER within "
+        f"{TIMEOUT}s (last total_results={last.get('total_results')}) -- cannot assert "
+        f"isolation against content that is not retrievable at all"
+    )
 
+
+def _cleanup(client: httpx.Client, headers: dict[str, str], document_id: str) -> None:
+    """Delete a probe document, asserting the owner's DELETE actually worked.
+
+    Asserted, not best-effort. Both probe documents carry a per-run uuid, so
+    without a working delete the workspaces grow by two documents on every run.
+    It also gives the DELETE verb the owner-side positive control that
+    ``test_cross_workspace_delete_blocked`` otherwise lacks: that test asserts
+    B's delete is refused with a 404, which proves nothing if DELETE happens to
+    be broken for everybody. Here the SAME verb, on the SAME document, by its
+    owner, must return 204.
+    """
+    resp = client.delete(f"{API_URL}/v1/documents/{document_id}", headers=headers)
+    assert resp.status_code == 204, (
+        f"owner DELETE of probe document {document_id} returned {resp.status_code}, expected 204 "
+        f"-- the cross-tenant 404 asserted elsewhere means nothing if DELETE is broken for "
+        f"everyone: {resp.text}"
+    )
+
+
+@pytest.fixture(scope="module")
+def decoy_document(client: httpx.Client) -> Iterator[str]:
+    """A document of B's OWN, uploaded before anything is asserted about B.
+
+    Without this, B's workspace has never been written to, so it has no
+    Weaviate collection at all -- and every "B finds nothing" result comes from
+    the missing-collection short-circuit in ``search.py`` (``_is_missing_
+    collection`` -> empty), not from scoped retrieval. The smoke-lane test would
+    then be green on a build where tenant scoping had been removed entirely.
+    Seeding B first forces B's collection and per-user tenant into existence, so
+    the search that must not see A's content is a REAL query against a REAL
+    collection. It doubles as B's owner-side positive control.
+    """
+    document_id = _upload_and_await(
+        client, HEADERS_B, DECOY_FILENAME, DECOY_CONTENT, DECOY_QUERY, owner="principal B"
+    )
     yield document_id
+    _cleanup(client, HEADERS_B, document_id)
 
-    # Best-effort cleanup: the sentinel is unique per run, so without this the
-    # workspace grows by one document every run. Never fatal -- a cleanup
-    # failure must not turn a green isolation result red.
-    try:
-        client.delete(f"{API_URL}/v1/documents/{document_id}", headers=HEADERS_A)
-    except httpx.HTTPError:  # pragma: no cover - cleanup only
-        pass
+
+@pytest.fixture(scope="module")
+def seeded_document(client: httpx.Client, decoy_document: str) -> Iterator[str]:
+    """A's sentinel document -- the content B must never reach.
+
+    Depends on ``decoy_document`` so B's workspace is always populated first;
+    ordering matters only in that every B-side assertion in this file then runs
+    against a workspace that really exists in the vector store.
+    """
+    document_id = _upload_and_await(
+        client, HEADERS_A, SEED_FILENAME, SEED_CONTENT, SEED_QUERY, owner="principal A"
+    )
+    yield document_id
+    _cleanup(client, HEADERS_A, document_id)
 
 
 def _sentinel_hits(payload: dict, document_id: str) -> list[dict]:
@@ -219,8 +282,17 @@ def _sentinel_hits(payload: dict, document_id: str) -> list[dict]:
 # every-PR lane (`-m "smoke and compose"`) because a regression here is not
 # something to discover on the nightly compose run.
 @pytest.mark.smoke
-def test_cross_workspace_search_is_empty(client: httpx.Client, seeded_document: str) -> None:
+def test_cross_workspace_search_is_empty(
+    client: httpx.Client, seeded_document: str, decoy_document: str
+) -> None:
     """B searching its OWN workspace never surfaces A's document.
+
+    ``decoy_document`` is not decoration: it puts real content of B's own in
+    B's workspace, so B's collection and tenant exist and this search is
+    genuinely scoped retrieval rather than the missing-collection
+    short-circuit. The first assertion below confirms B's retrieval is alive
+    right now -- if B could not find its OWN document, "B found nothing of A's"
+    would mean nothing.
 
     Then the mismatch case: B's key naming A's workspace in the header. Per
     docs/reference/rest-api.md#workspace-scoping that is a 403 -- unlike a
@@ -229,6 +301,13 @@ def test_cross_workspace_search_is_empty(client: httpx.Client, seeded_document: 
     names B's own workspace, revealing nothing about A), while a 404 on a
     document hides whether the id exists at all.
     """
+    own = _search(client, HEADERS_B, DECOY_QUERY)
+    assert own.status_code == 200, f"B's decoy search failed: {own.status_code} {own.text}"
+    assert decoy_document in {r["document_id"] for r in own.json()["results"]}, (
+        f"principal B cannot retrieve its OWN document {decoy_document} -- B's retrieval path "
+        f"is not working, so the isolation assertions below would pass vacuously: {own.text}"
+    )
+
     resp = _search(client, HEADERS_B, SEED_QUERY)
     assert (
         resp.status_code == 200
@@ -295,7 +374,12 @@ def test_cross_workspace_delete_blocked(client: httpx.Client, seeded_document: s
     afterwards. Destroying data you cannot read is a leak in the other
     direction.
     """
-    before = client.get(f"{API_URL}/v1/documents/{seeded_document}", headers=HEADERS_A).json()
+    before_resp = client.get(f"{API_URL}/v1/documents/{seeded_document}", headers=HEADERS_A)
+    assert before_resp.status_code == 200, (
+        f"pre-read of A's own document failed: {before_resp.status_code} {before_resp.text} "
+        f"-- nothing below can be interpreted without a known-good starting state"
+    )
+    before = before_resp.json()
 
     resp = client.delete(f"{API_URL}/v1/documents/{seeded_document}", headers=HEADERS_B)
     assert (
@@ -317,7 +401,7 @@ def test_cross_workspace_delete_blocked(client: httpx.Client, seeded_document: s
 
 
 async def test_mcp_cross_workspace_search_is_empty(
-    client: httpx.Client, seeded_document: str
+    client: httpx.Client, seeded_document: str, decoy_document: str
 ) -> None:
     """The same boundary over MCP, the transport an agent actually uses.
 
@@ -326,6 +410,11 @@ async def test_mcp_cross_workspace_search_is_empty(
     it through their own call sites. The two surfaces share
     ``get_authorized_workspace_ids`` (#138) -- this asserts that sharing still
     holds end to end, over the wire, rather than by reading the code.
+
+    ``decoy_document`` is requested explicitly (``seeded_document`` already
+    pulls it in) to make the dependency visible: B's search here has to run
+    against a workspace that really exists in the vector store, not one whose
+    collection was never created.
     """
     async with mcp_http_session(API_KEY_B) as session:
         own = await session.call_tool(
