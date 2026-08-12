@@ -248,10 +248,31 @@ def _resolve_check_tolerance(args: argparse.Namespace, baseline: MetricsByMode) 
     queries from a qrels file, excluding ``category == "abstention"``); with
     neither, ``--tolerance`` is used as the original flat value for every
     metric, unchanged from before #236.
+
+    An explicit ``--num-queries``/``--qrels`` that resolves to zero (a
+    missing/invalid/empty qrels file, an all-abstention corpus, or a literal
+    ``--num-queries 0``) is a caller error, not a reason to quietly fall back
+    to the flat ``--tolerance``: opting into derivation and silently getting
+    the un-derived behavior instead is exactly the kind of surprise this gate
+    exists to prevent. Raises ``ValueError`` in that case; the caller decides
+    how to surface it. Omitting both flags is unaffected -- that is the
+    intentional "keep the pre-#236 flat tolerance" path.
     """
     num_queries = args.num_queries
+    qrels_source: str | None = None
     if num_queries is None and args.qrels:
+        qrels_source = args.qrels
         num_queries = load_qrels_query_count(Path(args.qrels))
+
+    explicitly_requested = qrels_source is not None or args.num_queries is not None
+    if explicitly_requested and not num_queries:
+        source = f"--qrels {qrels_source!r}" if qrels_source else "--num-queries"
+        raise ValueError(
+            f"{source} yielded {num_queries!r} gated queries -- refusing to silently fall "
+            "back to the flat --tolerance. Point --qrels at a qrels.jsonl with at least one "
+            "non-abstention query, pass a positive --num-queries, or omit both to use "
+            "--tolerance as a flat value for every metric."
+        )
     if not num_queries:
         return args.tolerance
     metric_names = {metric for metrics in baseline.values() for metric in metrics}
@@ -264,7 +285,11 @@ def _resolve_check_tolerance(args: argparse.Namespace, baseline: MetricsByMode) 
 def _cmd_check(args: argparse.Namespace) -> int:
     current = load_metrics(Path(args.report))
     baseline = load_metrics(Path(args.baseline))
-    tolerance = _resolve_check_tolerance(args, baseline)
+    try:
+        tolerance = _resolve_check_tolerance(args, baseline)
+    except ValueError as exc:
+        print(f"[eval-gate] {exc}")
+        return 2
     regressions = find_regressions(current, baseline, tolerance=tolerance)
     print(format_regressions(regressions))
     return 1 if regressions else 0

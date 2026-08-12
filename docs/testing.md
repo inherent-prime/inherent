@@ -228,6 +228,20 @@ overlapping numbers — so it must not fail on the difference. Raising
 `EVAL_GATE_TOLERANCE` still works as a floor for a larger/noisier corpus; it
 just can no longer be set *below* what the corpus can resolve.
 
+**The honest trade-off:** widening the tolerance to match resolution also
+widens what counts as "not a regression." At `n = 13`, `recall@5`'s derived
+tolerance is `1 / 13 ≈ 0.0769` — a real recall regression up to ~7.7
+percentage points on a single query can now pass the gate silently, over 3.5x
+the old fixed `0.02` (2 percentage points). This is the same
+one-rank-slip-shaped noise the fix is closing for `mrr`/`ndcg@5`, applied to
+`recall@5`'s coarser (binary hit/miss, not rank-weighted) step size, so it
+isn't a new risk the fix introduces so much as the existing risk's exact size
+made visible. `min_detectable_delta` shrinks as `1/n`, so growing the golden
+corpus's gated-query count is the direct lever to tighten it back down — e.g.
+doubling `n` to 26 halves every metric's derived tolerance. This is a
+standing incentive to keep expanding `corpus/qrels.jsonl`, not a one-time
+trade to forget about.
+
 `min_detectable_delta` and `effective_tolerance` live in `tests/evals/eval_gate.py`
 and are unit-tested (hand-computed values) in `tests/evals/test_eval_gate.py`.
 The compose test derives `n` from the same in-memory query/category mapping it

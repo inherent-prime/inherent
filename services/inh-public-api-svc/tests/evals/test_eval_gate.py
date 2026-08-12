@@ -332,3 +332,142 @@ def test_load_qrels_query_count_dedupes_multi_line_queries(tmp_path):
 
 def test_load_qrels_query_count_missing_file_returns_zero(tmp_path):
     assert load_qrels_query_count(tmp_path / "nope.jsonl") == 0
+
+
+# ---------------------------------------------------------------------------
+# `check` CLI subcommand: derivation wiring + loud-error-on-empty-derivation
+# (code review fix round 1, finding 1) -- nothing previously exercised
+# `main(["check", ...])` directly, so the CLI's own tolerance-resolution path
+# (`_resolve_check_tolerance`) had no coverage at all.
+#
+# All scenarios share one baseline/report pair: baseline mrr .70, current
+# .62 (delta -0.08). Under the flat DEFAULT_TOLERANCE (0.02) that is a
+# regression; under a derived tolerance with n=5 gated queries
+# (min_detectable_delta("mrr", 5) == 0.5/5 == 0.1) it is not -- so a passing
+# exit code demonstrates derivation actually changed the outcome, not just
+# that the CLI didn't crash.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _check_fixture_paths(tmp_path):
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(json.dumps({"hybrid": {"mrr": 0.70}}))
+    report = tmp_path / "report.json"
+    report.write_text(json.dumps({"hybrid": {"mrr": 0.62}}))
+    return baseline, report
+
+
+def test_cli_check_without_derivation_flags_flags_the_regression(_check_fixture_paths, capsys):
+    """Control case: omitting --num-queries/--qrels keeps the pre-#236 flat behavior."""
+    baseline, report = _check_fixture_paths
+    exit_code = main(["check", "--report", str(report), "--baseline", str(baseline)])
+    assert exit_code == 1
+    assert "hybrid.mrr" in capsys.readouterr().out
+
+
+def test_cli_check_with_num_queries_derives_tolerance_and_passes(_check_fixture_paths, capsys):
+    baseline, report = _check_fixture_paths
+    exit_code = main(
+        [
+            "check",
+            "--report",
+            str(report),
+            "--baseline",
+            str(baseline),
+            "--num-queries",
+            "5",
+        ]
+    )
+    assert exit_code == 0
+    assert "no regressions" in capsys.readouterr().out.lower()
+
+
+def test_cli_check_with_valid_qrels_derives_tolerance_and_passes(
+    _check_fixture_paths, tmp_path, capsys
+):
+    baseline, report = _check_fixture_paths
+    qrels = tmp_path / "qrels.jsonl"
+    qrels.write_text(
+        "\n".join(
+            json.dumps({"query_id": f"q{i}", "query": "x", "document_id": "d", "relevance": 3})
+            for i in range(5)
+        )
+    )
+    exit_code = main(
+        ["check", "--report", str(report), "--baseline", str(baseline), "--qrels", str(qrels)]
+    )
+    assert exit_code == 0
+    assert "no regressions" in capsys.readouterr().out.lower()
+
+
+def test_cli_check_with_bad_qrels_path_errors_loudly_instead_of_silently_falling_back(
+    _check_fixture_paths, tmp_path, capsys
+):
+    """An explicit --qrels that resolves to 0 gated queries must not silently degrade
+
+    to the flat --tolerance -- that would defeat the entire point of asking for
+    derivation. It must fail loud instead (distinct exit code, explanatory message).
+    """
+    baseline, report = _check_fixture_paths
+    missing_qrels = tmp_path / "does-not-exist.jsonl"
+    exit_code = main(
+        [
+            "check",
+            "--report",
+            str(report),
+            "--baseline",
+            str(baseline),
+            "--qrels",
+            str(missing_qrels),
+        ]
+    )
+    assert exit_code == 2
+    out = capsys.readouterr().out
+    assert "--qrels" in out
+    assert str(missing_qrels) in out
+    assert "0" in out
+
+
+def test_cli_check_with_all_abstention_qrels_errors_loudly(_check_fixture_paths, tmp_path, capsys):
+    """A qrels file that parses fine but has no gated (non-abstention) query is the
+
+    same "explicit opt-in resolved to nothing" case as a missing file, and must
+    fail the same loud way rather than silently using the flat --tolerance.
+    """
+    baseline, report = _check_fixture_paths
+    qrels = tmp_path / "all-abstention.jsonl"
+    qrels.write_text(
+        json.dumps(
+            {
+                "query_id": "q1",
+                "query": "x",
+                "document_id": "d",
+                "relevance": 0,
+                "category": "abstention",
+            }
+        )
+    )
+    exit_code = main(
+        ["check", "--report", str(report), "--baseline", str(baseline), "--qrels", str(qrels)]
+    )
+    assert exit_code == 2
+    assert "--qrels" in capsys.readouterr().out
+
+
+def test_cli_check_explicit_num_queries_zero_errors_loudly(_check_fixture_paths, capsys):
+    """A literal --num-queries 0 is also an explicit (if odd) opt-in to derivation."""
+    baseline, report = _check_fixture_paths
+    exit_code = main(
+        [
+            "check",
+            "--report",
+            str(report),
+            "--baseline",
+            str(baseline),
+            "--num-queries",
+            "0",
+        ]
+    )
+    assert exit_code == 2
+    assert "--num-queries" in capsys.readouterr().out

@@ -188,3 +188,26 @@ CLI/CI precedence rule.
   (more gated queries) tightens the derived tolerance over time — the fix
   is a floor on precision the corpus can support today, not a permanent
   loosening.
+
+### The honest cost: a wider silent-pass window today
+
+Deriving the tolerance from resolution also widens what the gate lets
+through without complaint. At the corpus's current size (`n = 13`),
+`recall@5`'s derived tolerance is `1 / 13 ≈ 0.0769` — **a real recall
+regression of up to ~7.7 percentage points on a single query can now pass
+the gate silently**, more than 3.5x the old fixed `0.02` (2 points). That is
+not a new failure mode this amendment invents: it is the same
+one-query-of-resolution noise the `mrr`/`0.0385` case above already
+demonstrated, sized for `recall@5`'s coarser step (binary hit/miss per
+query, not a rank-weighted score). Making it explicit here rather than only
+in `docs/testing.md` is deliberate — accepting a wider pass window is the
+actual shape of the trade this amendment makes, not a side effect to
+discover later.
+
+`min_detectable_delta(metric, n)` is `O(1/n)`, so this is a shrinking cost,
+not a fixed one: doubling the gated golden-query count from 13 to 26 halves
+every metric's derived tolerance, including `recall@5`'s back down to
+`~0.0385`. Growing `corpus/qrels.jsonl` is therefore not just "nice to have"
+for eval coverage generally — it is the direct, quantified lever that
+tightens this gate's precision, and should be read as a standing incentive
+this amendment creates rather than a one-time trade to forget about.
