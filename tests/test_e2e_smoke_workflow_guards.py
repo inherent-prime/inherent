@@ -150,11 +150,19 @@ def test_concurrency_cancels_superseded_runs() -> None:
 
 
 def test_boots_the_stack_and_waits_for_health() -> None:
-    """The lane is only meaningful against a booted stack.
+    """The lane is only meaningful against a fully booted stack.
 
-    `--wait` is what makes `docker compose up` block until every service
-    reports healthy; without it the tests start racing the boot and fail as
-    connection errors rather than real regressions.
+    Both halves of the wait are pinned, because they cover different gaps
+    and the copied-from-`integration.yml` shape keeps both:
+
+    - `--wait` makes `docker compose up` block until every service's own
+      healthcheck passes;
+    - the curl poll then waits on the public API's `/health` specifically,
+      which is the endpoint the tests actually talk to.
+
+    Without them the tests race the boot and fail as connection errors
+    rather than as real regressions -- the worst failure mode for a merge
+    gate, since it reads as a flaky block rather than a bug.
     """
     text = _text()
     boot = re.search(r"^\s*run: docker compose up (.+)$", text, re.MULTILINE)
@@ -164,13 +172,38 @@ def test_boots_the_stack_and_waits_for_health() -> None:
         f"stack boot. Found: docker compose up {boot.group(1)}"
     )
 
+    assert re.search(r"curl -fsS http://localhost:18000/health", text), (
+        "expected the health-wait step to poll the public API's /health "
+        "endpoint with `curl -fsS http://localhost:18000/health` (copied "
+        "from integration.yml's compose-integration job)"
+    )
+
 
 def test_tears_the_stack_down_unconditionally() -> None:
-    """A failed run must not leave volumes behind for the next job."""
+    """A failed run must not leave volumes behind for the next job.
+
+    The `if:` is the whole point and is checked as part of the same match,
+    not separately: `docker compose down -v` under `if: success()` would
+    tear down only on the happy path, which is precisely backwards -- the
+    runs that leave dirty volumes behind are the failing ones. Asserting
+    only that the command appears somewhere would stay green through that
+    edit, so the condition is anchored to the line immediately above the
+    `run:` it guards.
+    """
     text = _text()
-    assert (
-        "docker compose down -v" in text
-    ), "expected a `docker compose down -v` teardown step"
+    teardown = re.search(
+        r"^\s*if: (.+)\n\s*run: docker compose down -v$", text, re.MULTILINE
+    )
+    assert teardown is not None, (
+        "expected a `docker compose down -v` teardown step whose `if:` is on "
+        "the line directly above its `run:` -- either the step is missing, or "
+        "it carries no `if:` at all (which would skip teardown on failure)"
+    )
+    assert teardown.group(1).strip() == "always()", (
+        "the teardown step must be `if: always()`; a failed smoke run is "
+        "exactly the case that must not leave volumes behind. Found: "
+        f"if: {teardown.group(1)!r}"
+    )
 
 
 @pytest.mark.parametrize("pyproject", SERVICE_PYPROJECTS, ids=lambda p: p.parent.name)
