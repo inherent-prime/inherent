@@ -203,13 +203,25 @@ def live_backend_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """
     import src.services.embedder as embedder
 
+    def _drop_embedder_client() -> None:
+        """Close, then null, the memoized client.
+
+        Nulling alone would leak the previous ``httpx.Client``'s connection
+        pool (sockets stay open until GC finalizes them), and the one on the
+        way OUT points at a host port this fixture only made valid for the
+        duration of the test.
+        """
+        if embedder._CLIENT is not None:
+            embedder._CLIENT.close()
+        embedder._CLIENT = None
+
     for field, value in _LIVE_BACKENDS.items():
         monkeypatch.setattr(app_settings, field, value)
     monkeypatch.setenv("EMBEDDING_SERVICE_URL", _LIVE_BACKENDS["embedding_service_url"])
 
-    embedder._CLIENT = None
+    _drop_embedder_client()
     yield
-    embedder._CLIENT = None
+    _drop_embedder_client()
 
 
 @asynccontextmanager
@@ -435,6 +447,15 @@ async def test_stdio_surface_and_search(live_backend_settings: None, seeded_docu
         listed = await session.list_tools()
         assert sorted(tool.name for tool in listed.tools) == EXPECTED_STDIO_TOOLS
 
+        # The mirror image of the HTTP assertion: stdio has no headers, so
+        # ``api_key`` MUST stay in the advertised schema here. Pinning both
+        # directions is what catches ``_strip_api_key`` mutating the shared
+        # registry dict in place -- which would silently delete stdio's only
+        # way to authenticate while the HTTP test stayed green.
+        by_name = {tool.name: tool for tool in listed.tools}
+        assert "api_key" in by_name["search_documents"].inputSchema["properties"]
+        assert "api_key" in (by_name["search_documents"].inputSchema.get("required") or [])
+
         result = await session.call_tool(
             "search_documents",
             {
@@ -457,8 +478,23 @@ async def test_stdio_surface_and_search(live_backend_settings: None, seeded_docu
 # ---------------------------------------------------------------------------
 
 
+class MissingMcpEventIdError(Exception):
+    """Raised at exactly ONE line: the ``event_id`` check below (#241).
+
+    Exists so the xfail on ``test_http_report_feedback_closes_loop`` can be
+    SCOPED to the known bug via ``raises=``. A bare ``xfail(strict=True)``
+    swallows every call-phase exception, so an MCP search regression (a
+    tool returning ``isError=True``), a transport-framing break, or a 500
+    from the feedback endpoint would all be reported as a green "xfailed" --
+    the known-broken test would silently absorb NEW breakage in the very
+    path it exercises. With ``raises`` set, only this one exception counts
+    as the expected failure; anything else is a real, loud FAILURE.
+    """
+
+
 @pytest.mark.xfail(
     strict=True,
+    raises=MissingMcpEventIdError,
     reason=(
         "#241 (filed, then auto-closed IN ERROR by the #240 fix commit 48cbe72 -- "
         "PR #242's body said 'Closes #240' but the merge commit also closed #241): "
@@ -486,15 +522,23 @@ async def test_http_report_feedback_closes_loop(client: httpx.Client, seeded_doc
             "search_documents",
             {"query": SEED_QUERY, "workspace_id": WORKSPACE_ID, "limit": 5},
         )
+
+    # Preconditions. These are plain assertions on purpose: the xfail above is
+    # scoped to MissingMcpEventIdError, so an AssertionError here is reported as a
+    # genuine failure rather than being absorbed into the known #241 xfail.
     assert result.isError is False, f"search_documents failed: {_text(result)}"
-
     payload = _structured_payload(result)
-    event_id = payload.get("event_id")
-    assert event_id, (
-        "MCP search returned no event_id; report_feedback's schema promises one "
-        f"(payload keys: {sorted(payload)})"
-    )
+    assert payload["results"], f"search returned no results to judge: {payload}"
 
+    event_id = payload.get("event_id")
+    if not event_id:
+        raise MissingMcpEventIdError(
+            "MCP search returned no event_id; report_feedback's schema promises one "
+            f"(payload keys: {sorted(payload)})"
+        )
+
+    # Only reachable once #241 is fixed; a non-2xx here is a REAL failure (the
+    # #240 durability invariant broken on the MCP-minted id), not an xfail.
     resp = client.post(
         f"{API_URL}/v1/evals/feedback",
         headers={**REST_HEADERS, "Content-Type": "application/json"},
