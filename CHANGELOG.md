@@ -285,22 +285,41 @@ All notable changes to Inherent are documented here. The format follows
   parses of customer-uploaded EPUB/ODT XML should move to `defusedxml`. Both
   baselines are tracked in #247.
 
-- **CI: required merge gates — hardened CI, Conventions gate.** `ci.yml` now
-  declares `permissions: contents: read` at the workflow level (it previously
-  inherited whatever the repository default grants), cancels superseded
-  in-flight runs per pull request via a `concurrency` group — while leaving
-  push-to-`main` runs uncancelled, since that history is the merge-gate record
-  — and sets `timeout-minutes` on every job (30 for `service-checks` and
-  `Required tests before merge`, 10 for `root tests/`). Previously a hung
-  Postgres service container or a wedged `uvx` resolve could hold a job — soon
-  to be a required status check — pending for the runner's 6-hour default. A
-  new `conventions.yml` workflow adds a `Conventions` required check: it
-  fails a PR that touches `services/**` without a `CHANGELOG.md` entry, or
-  that changes API routers / the MCP tool registry / shared contracts without
-  touching `docs/` — unless the PR carries the `no-changelog` or
-  `no-docs-needed` label respectively (both labels are re-evaluated live, via
-  the workflow's `labeled`/`unlabeled` triggers, so applying one un-blocks an
-  already-failing PR without a new push).
+- **CI: required merge gates — hardened CI, Conventions gate, E2E smoke
+  lane.** `ci.yml` now declares `permissions: contents: read` at the workflow
+  level (it previously inherited whatever the repository default grants),
+  cancels superseded in-flight runs per pull request via a `concurrency`
+  group — while leaving push-to-`main` runs uncancelled, since that history is
+  the merge-gate record — and sets `timeout-minutes` on every job (30 for
+  `service-checks` and `Required tests before merge`, 10 for `root tests/`).
+  Previously a hung Postgres service container or a wedged `uvx` resolve could
+  hold a job — soon to be a required status check — pending for the runner's
+  6-hour default. A new `conventions.yml` workflow adds a `Conventions`
+  required check: it fails a PR that touches `services/**` without a
+  `CHANGELOG.md` entry, or that changes API routers / the MCP tool registry /
+  shared contracts without touching `docs/` — unless the PR carries the
+  `no-changelog` or `no-docs-needed` label respectively (both labels are
+  re-evaluated live, via the workflow's `labeled`/`unlabeled` triggers, so
+  applying one un-blocks an already-failing PR without a new push). A new
+  `e2e-smoke.yml` workflow adds an `E2E smoke` required check — the first
+  end-to-end signal this repo has ever had before merge. Until now the only
+  proof that the real stack boots and a document survives ingest → search
+  lived in `integration.yml`, which runs the full compose suite plus
+  benchmarks and is deliberately restricted to pushes to `main`, nightly cron
+  and manual dispatch: a PR could break the
+  Compose wiring and stay green until after it merged. The smoke lane boots
+  the identical stack (same images, same `RATE_LIMIT_ENABLED=false` and
+  `INTEGRATION_TIMEOUT=600` env, same `make bootstrap`, same failure-path log
+  and document-state dumps) but runs only tests tagged with the new `smoke`
+  marker via `-m "smoke and compose"`, and with `--no-cov` since coverage is
+  the fast lane's job. Today that is one test —
+  `test_ingestion_to_search_roundtrip` — which takes ~8s against a booted
+  stack; the other roundtrip variants stay in the full lane. The
+  retrieval-baseline hard gate is deliberately excluded: its baseline is
+  ratcheted only by runs on `main`, so enforcing it per-PR would block merges
+  on metric drift unrelated to the PR. Unlike the other lanes this one sets
+  `cancel-in-progress: true`, since only the newest commit on a PR gates
+  merge.
 
 - **⚠️ `GET /v1/chunks/{document_id}/context` is now bounded and pageable
   (#219).** The endpoint concatenated every chunk with no limit: one

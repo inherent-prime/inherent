@@ -151,6 +151,13 @@ markers = [
     "slow: slow-running tests",
     "security: auth/tenancy security regression tests (offline)",
     "contract: schema/contract regression tests",
+    # The PR-blocking end-to-end subset, run by .github/workflows/e2e-smoke.yml
+    # as `-m "smoke and compose"`. Always combined with `compose`, never
+    # selected alone: a smoke test is by definition one that needs the real
+    # booted stack, and the pairing keeps the marker from silently widening
+    # the merge gate if it is ever applied to an offline test. Keep this set
+    # small -- everything tagged here is paid for on every pull request.
+    "smoke: PR-blocking E2E smoke subset (always combined with compose)",
 ]
 
 [tool.coverage.run]
