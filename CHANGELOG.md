@@ -312,9 +312,28 @@ All notable changes to Inherent are documented here. The format follows
   `INTEGRATION_TIMEOUT=600` env, same `make bootstrap`, same failure-path log
   and document-state dumps) but runs only tests tagged with the new `smoke`
   marker via `-m "smoke and compose"`, and with `--no-cov` since coverage is
-  the fast lane's job. Today that is one test —
-  `test_ingestion_to_search_roundtrip` — which takes ~8s against a booted
-  stack; the other roundtrip variants stay in the full lane. The
+  the fast lane's job. Today that is three tests —
+  `test_ingestion_to_search_roundtrip` plus the two MCP ones below — which
+  take ~8s against a booted stack; the other roundtrip variants stay in the
+  full lane. That gate is now backed by the first live E2E coverage the MCP
+  server has ever had (`test_compose_mcp.py`): every previous MCP test drove
+  the handlers in-process with `get_database` / `get_search_service` mocked,
+  so nothing proved a real MCP client could reach a running stack at all.
+  The new suite points the `mcp` SDK's `streamablehttp_client` at `POST
+  /mcp` for a genuine initialize → `tools/list` → `tools/call` round trip
+  (pinning the 10 advertised tools and that no HTTP schema leaks `api_key`,
+  retrieving a REST-seeded document, and running upload → poll →
+  `delete_document` → `not_found` entirely through tools), and connects the
+  SDK's in-memory client/server session to the real stdio server object with
+  settings pointed at the compose-published backend ports — in-memory
+  streams replace the pipe, not the backends, so its 14 tools and its search
+  execute against the same live Postgres/Mongo/Weaviate/TEI. Both tool lists
+  are hardcoded rather than derived from `_TOOLS`, so registry drift breaks
+  a live test instead of silently republishing the surface. Writing it
+  surfaced #241 — no MCP search ever mints an `event_id`, leaving
+  `report_feedback` unusable over MCP — which had been auto-closed in error
+  by the #240 fix commit and is now reopened and pinned as a strict xfail.
+  The
   retrieval-baseline hard gate is deliberately excluded: its baseline is
   ratcheted only by runs on `main`, so enforcing it per-PR would block merges
   on metric drift unrelated to the PR. Unlike the other lanes this one sets
