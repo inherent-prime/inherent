@@ -448,6 +448,13 @@ All notable changes to Inherent are documented here. The format follows
   on metric drift unrelated to the PR. Unlike the other lanes this one sets
   `cancel-in-progress: true`, since only the newest commit on a PR gates
   merge.
+  With the real live suites above landed, `inh-public-api-svc`'s
+  `tests/e2e/` — fully mocked via `AsyncMock`/`MagicMock` overrides of
+  `get_database`, `get_search_service` and auth, never touching a real
+  dependency — no longer earned that name; it is renamed to
+  `tests/app_flows/` and its `conftest.py` docstring now says plainly that
+  it is in-process app-flow testing, NOT end-to-end, and that live E2E
+  lives in `tests/integration/test_compose_*.py`.
 
 - **⚠️ `GET /v1/chunks/{document_id}/context` is now bounded and pageable
   (#219).** The endpoint concatenated every chunk with no limit: one

@@ -1,5 +1,6 @@
-"""End-to-end tests for complete API flows.
+"""In-process app-flow tests for complete API flows.
 
+NOT end-to-end -- live E2E lives in tests/integration/test_compose_*.py.
 These tests exercise the real FastAPI app with mocked database/search
 services, validating full request->middleware->handler->response chains.
 """
