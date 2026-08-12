@@ -312,9 +312,10 @@ All notable changes to Inherent are documented here. The format follows
   `INTEGRATION_TIMEOUT=600` env, same `make bootstrap`, same failure-path log
   and document-state dumps) but runs only tests tagged with the new `smoke`
   marker via `-m "smoke and compose"`, and with `--no-cov` since coverage is
-  the fast lane's job. Today that is three tests —
-  `test_ingestion_to_search_roundtrip` plus the two MCP ones below — which
-  take ~8s against a booted stack; the other roundtrip variants stay in the
+  the fast lane's job. Today that is four tests —
+  `test_ingestion_to_search_roundtrip`, the two MCP ones below, and
+  `test_cross_workspace_search_is_empty` — which take ~8s against a booted
+  stack; the other roundtrip variants stay in the
   full lane. That gate is now backed by the first live E2E coverage the MCP
   server has ever had (`test_compose_mcp.py`): every previous MCP test drove
   the handlers in-process with `get_database` / `get_search_service` mocked,
@@ -333,7 +334,33 @@ All notable changes to Inherent are documented here. The format follows
   surfaced #241 — no MCP search ever mints an `event_id`, leaving
   `report_feedback` unusable over MCP — which had been auto-closed in error
   by the #240 fix commit and is now reopened and pinned as a strict xfail.
-  The
+  The same lane also carries the first LIVE proof of the tenancy boundary
+  (`test_compose_tenancy.py`). Cross-tenant leakage is this product's worst
+  failure mode — issue #1 was a real one — yet every test of it was offline,
+  driving the auth helpers with a mocked database: they prove the decision
+  logic, never that a real request through the real middleware against real
+  Postgres/Mongo/Weaviate is denied. `scripts/dev/bootstrap.sh` now seeds two
+  principals rather than one (its PG-insert + Mongo-upsert refactored into a
+  reusable `seed_principal` function, still idempotent): `ink_dev_local_key_002`
+  / `user_local_002` / `ws_local_002` joins the existing 001 identity with the
+  same read/write/search permissions, so no denial below can pass merely
+  because the second key is under-privileged. Both principals are fully
+  provisioned on purpose — pointing one key at an invented workspace id is
+  refused at the key-binding check and proves nothing about whether one real
+  tenant can reach another's content. A uuid sentinel, fresh per module run so
+  a dirty stack cannot false-pass, is uploaded by A and then hunted by B over
+  REST and MCP: search, `GET /v1/documents/{id}`, `GET /v1/chunks/{id}`,
+  `/chunks/{id}/context`, `DELETE`, and the MCP `search_documents` tool. The
+  asserted statuses are the DOCUMENTED ones — 403 for a scoped key naming
+  another workspace in `X-Workspace-Id` (it refuses the caller's own binding),
+  404 for every cross-workspace document read or delete (a 403 there would be
+  an existence oracle, the #138 follow-up's bug) — and the delete test
+  re-reads the document and its chunks as A afterwards, since a handler that
+  deleted before checking the workspace would also answer 404. Each surface
+  carries its own negative control (A's search must FIND the sentinel over
+  that same transport) so a total retrieval outage reads as failure rather
+  than as perfect isolation. All four tests pass against the live stack, and
+  all four fail loudly when B is pointed at A's credentials. The
   retrieval-baseline hard gate is deliberately excluded: its baseline is
   ratcheted only by runs on `main`, so enforcing it per-PR would block merges
   on metric drift unrelated to the PR. Unlike the other lanes this one sets
