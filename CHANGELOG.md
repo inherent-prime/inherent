@@ -617,6 +617,32 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Fixed
 
+- **Eval-gate tolerance derived from corpus resolution (#236).** The
+  compose retrieval-eval hard gate compared each per-mode metric to the
+  committed baseline against a single fixed `EVAL_GATE_TOLERANCE` (`0.02`),
+  which is finer than what a 13-query golden corpus can actually resolve:
+  the smallest possible move a single query's rank change can produce in
+  pooled `mrr` is `0.5/13 ≈ 0.0385`, already above `0.02`. Any single-query
+  rank slip therefore hard-failed the gate regardless of how every other
+  metric moved — this hit `main` on ~5 of the last 7 nightly runs and once
+  blocked it for three days on a net-positive change (#237). `tests/evals/eval_gate.py`
+  gains `min_detectable_delta(metric, n)` (the smallest single-query step
+  for a metric family — `0.5/n` for `mrr`, `1/n` for `recall@k`,
+  `(1 - 1/log2(3))/n` for `ndcg@k`) and `effective_tolerance(metric, n,
+  floor)` (`max(floor, min_detectable_delta(...))`). `EVAL_GATE_TOLERANCE`
+  keeps its name and default but now means the *floor* under the derived
+  per-metric tolerance, not the tolerance itself; `n` is the number of gated
+  golden queries (`category != "abstention"`, currently 13), computed from
+  the same in-memory pool `test_compose_retrieval_regression.py` already
+  uses for its pooled averages. The `check` CLI subcommand gains
+  `--num-queries`/`--qrels` to opt into the same derivation; omitting both
+  preserves the exact pre-fix flat-tolerance behavior.
+  `corpus/retrieval_baseline.json`'s values are unchanged — only its
+  `_comment` was updated to describe the new tolerance semantics. See
+  `docs/testing.md`'s "Tolerance is derived from corpus resolution" section
+  and [ADR 0003](https://github.com/inherent-prime/inherent/blob/main/docs/adr/0003-traffic-mined-retrieval-evals.md)'s
+  2026-08-12 amendment for the full formula and CLI/CI precedence.
+
 - **`POST /v1/search` returned an `event_id` before the capture row existed
   (#242, #240).** The id was minted, attached to the response, and the INSERT
   scheduled via `BackgroundTasks` — which Starlette runs *after* the response
@@ -658,7 +684,14 @@ All notable changes to Inherent are documented here. The format follows
   and the ranking code is untouched. The gate's own resolution limit — a 0.02
   tolerance is finer than the 0.0385 minimum single-query MRR step on a
   13-query corpus, so the automated `max(current, baseline)` ratchet can never
-  express this trade — is tracked in #236.
+  express this trade — is tracked in #236. **Fixed later in this same
+  `[Unreleased]` section** — `EVAL_GATE_TOLERANCE` is now a floor under a
+  per-metric tolerance derived from corpus resolution
+  (`max(floor, min_detectable_delta(metric, n))`), so a single query's rank
+  slip no longer requires a manual re-seed like this one; see the "Eval-gate
+  tolerance derived from corpus resolution" entry below and
+  [ADR 0003](https://github.com/inherent-prime/inherent/blob/main/docs/adr/0003-traffic-mined-retrieval-evals.md)'s
+  2026-08-12 amendment.
 
 - **Service images ignored `uv.lock` and shipped a different dependency set
   than CI tested (#226, #225).** Both service Dockerfiles installed with

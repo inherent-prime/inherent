@@ -9,16 +9,21 @@ required; runs in the default ``-m 'not compose'`` suite. The live-stack wiring
 from __future__ import annotations
 
 import json
+import math
 
 import pytest
 
 from tests.evals.eval_gate import (
+    DEFAULT_TOLERANCE,
     Regression,
+    effective_tolerance,
     find_regressions,
     format_regressions,
     load_doc_keys,
     load_metrics,
+    load_qrels_query_count,
     main,
+    min_detectable_delta,
     ratchet_baseline,
 )
 
@@ -217,3 +222,113 @@ def test_format_regressions_lists_each_one():
     assert "keyword.mrr" in message
     assert "0.40" in message
     assert "0.50" in message
+
+
+# ---------------------------------------------------------------------------
+# min_detectable_delta / effective_tolerance (#236)
+#
+# Metric-name keys match retrieval_baseline.json's actual keys ("mrr",
+# "recall@5", "ndcg@5" -- NOT "recall_at_5"/"ndcg_at_5"), not the brief's
+# placeholder names.
+# ---------------------------------------------------------------------------
+
+
+def test_min_detectable_delta_mrr():
+    # smallest single-query MRR move: rank 1 -> 2 changes 1/1 - 1/2 = 0.5, averaged over n
+    assert min_detectable_delta("mrr", 13) == pytest.approx(0.5 / 13)
+
+
+def test_min_detectable_delta_recall():
+    # one query gaining/losing one relevant doc: 1/n (conservative, single-relevant case)
+    assert min_detectable_delta("recall@5", 13) == pytest.approx(1 / 13)
+
+
+def test_min_detectable_delta_ndcg():
+    # smallest top-2 swap: (1 - 1/log2(3)) / n
+    assert min_detectable_delta("ndcg@5", 13) == pytest.approx((1 - 1 / math.log2(3)) / 13)
+
+
+def test_min_detectable_delta_rejects_unrecognized_metric():
+    with pytest.raises(ValueError):
+        min_detectable_delta("unknown@5", 13)
+
+
+def test_min_detectable_delta_rejects_non_positive_num_queries():
+    with pytest.raises(ValueError):
+        min_detectable_delta("mrr", 0)
+
+
+def test_effective_tolerance_takes_max_of_floor_and_resolution():
+    assert effective_tolerance("mrr", 13, floor=0.02) == pytest.approx(
+        0.5 / 13
+    )  # resolution dominates
+    assert effective_tolerance("mrr", 200, floor=0.02) == pytest.approx(0.02)  # floor dominates
+
+
+def test_effective_tolerance_defaults_floor_to_default_tolerance():
+    assert effective_tolerance("mrr", 200) == pytest.approx(DEFAULT_TOLERANCE)
+
+
+def test_find_regressions_with_effective_tolerance_ignores_single_rank_slip():
+    # baseline mrr .70, current .6615 (= one rank-1->2 slip at n=13): NOT a regression
+    baseline = {"keyword": {"mrr": 0.70}}
+    tolerance = {"mrr": effective_tolerance("mrr", 13, floor=0.02)}
+    current_slip = {"keyword": {"mrr": 0.70 - 0.5 / 13}}
+    assert find_regressions(current_slip, baseline, tolerance=tolerance) == []
+
+    # baseline mrr .70, current .60: IS a regression
+    current_drop = {"keyword": {"mrr": 0.60}}
+    assert find_regressions(current_drop, baseline, tolerance=tolerance) == [
+        Regression("keyword", "mrr", current=0.60, baseline=0.70)
+    ]
+
+
+def test_find_regressions_still_accepts_a_flat_float_tolerance():
+    """Backward-compat: existing callers passing a single float must keep working."""
+    baseline = {"hybrid": {"recall@5": 0.50}}
+    current = {"hybrid": {"recall@5": 0.49}}
+    assert find_regressions(current, baseline, tolerance=0.02) == []
+
+
+# ---------------------------------------------------------------------------
+# load_qrels_query_count (#236)
+# ---------------------------------------------------------------------------
+
+
+def test_load_qrels_query_count_excludes_abstention_category(tmp_path):
+    path = tmp_path / "qrels.jsonl"
+    path.write_text(
+        "\n".join(
+            json.dumps(row)
+            for row in [
+                {"query_id": "q1", "query": "a", "document_id": "d1", "relevance": 3},
+                {
+                    "query_id": "q2",
+                    "query": "b",
+                    "document_id": "d2",
+                    "relevance": 0,
+                    "category": "abstention",
+                },
+                {"query_id": "q3", "query": "c", "document_id": "d3", "relevance": 3},
+            ]
+        )
+    )
+    assert load_qrels_query_count(path) == 2
+
+
+def test_load_qrels_query_count_dedupes_multi_line_queries(tmp_path):
+    path = tmp_path / "qrels.jsonl"
+    path.write_text(
+        "\n".join(
+            json.dumps(row)
+            for row in [
+                {"query_id": "q1", "query": "a", "document_id": "d1", "relevance": 3},
+                {"query_id": "q1", "query": "a", "document_id": "d2", "relevance": 2},
+            ]
+        )
+    )
+    assert load_qrels_query_count(path) == 1
+
+
+def test_load_qrels_query_count_missing_file_returns_zero(tmp_path):
+    assert load_qrels_query_count(tmp_path / "nope.jsonl") == 0
