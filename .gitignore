@@ -29,3 +29,4 @@ graphify-out/
 
 # MkDocs build output
 site/
+.memory/
