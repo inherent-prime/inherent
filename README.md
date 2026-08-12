@@ -82,9 +82,9 @@ each value is the best score that mode has sustained.
 
 | Mode | Recall@5 | MRR | nDCG@5 |
 | --- | --- | --- | --- |
-| Hybrid | 0.846 | 0.795 | 0.720 |
-| Keyword | 0.808 | 0.821 | 0.714 |
-| Semantic | 0.846 | 0.695 | 0.681 |
+| Hybrid | 0.885 | 0.795 | 0.738 |
+| Keyword | 0.885 | 0.782 | 0.717 |
+| Semantic | 0.885 | 0.705 | 0.706 |
 <!-- retrieval-baseline:end -->
 
 Run-over-run scores are appended to
