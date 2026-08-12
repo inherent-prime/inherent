@@ -1115,6 +1115,38 @@ class TestUploadDocumentTool:
         assert "REST" in content[0].text
         db.create_or_reset_pending_document.assert_not_called()
 
+    @pytest.mark.parametrize(
+        "filename,content_type",
+        [
+            ("talk.mp3", "audio/mpeg"),
+            ("talk.wav", "audio/wav"),
+            ("talk.m4a", "audio/mp4"),
+            ("talk.m4a", "audio/x-m4a"),
+        ],
+    )
+    async def test_audio_content_types_rejected_at_mcp_as_rest_only(self, filename, content_type):
+        """#128: audio is registered REST-only — MCP must reject before
+        intake, same shape as PDF/PNG binary rejection."""
+        db = AsyncMock()
+        db.validate_api_key = AsyncMock(return_value=self._key())
+        db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
+        db.create_or_reset_pending_document = AsyncMock()
+
+        with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)):
+            content = await _call_tool(
+                "upload_document",
+                {
+                    "api_key": "x",
+                    "filename": filename,
+                    "content": "not really audio",
+                    "content_type": content_type,
+                },
+            )
+
+        assert content[0].text.startswith("Error:")
+        assert "REST" in content[0].text
+        db.create_or_reset_pending_document.assert_not_called()
+
     async def test_unsupported_text_content_type_rejected_at_mcp_boundary(self):
         """A text/* subtype that is NOT in the shared allow-list (e.g.
         text/rtf) is rejected at the MCP gate with the supported-types

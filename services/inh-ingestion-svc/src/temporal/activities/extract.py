@@ -283,6 +283,9 @@ EXTRACTORS: dict[str, Callable[[bytes, str], str]] = {
     # #127: SRT and WebVTT share one cue parser (see `_extract_subtitle_text`).
     "srt": lambda content, filename: _extract_subtitle_text(content, filename),
     "vtt": lambda content, filename: _extract_subtitle_text(content, filename),
+    # #128: mp3/wav/m4a share one ASR extractor (optional `asr` extra;
+    # missing faster-whisper → placeholder, same shape as OCR).
+    "audio_asr": lambda content, filename: _extract_audio_text(content, filename),
 }
 
 
@@ -1792,3 +1795,203 @@ def _extract_subtitle_text(content: bytes, filename: str) -> str:
             parts.append(_timestamp_to_marker(start_timestamp))
         parts.append(cue_text)
     return " ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# #128: audio ASR behind optional `asr` extra (faster-whisper)
+# ---------------------------------------------------------------------------
+
+# Process-level singleton so every audio file does not re-download / re-load
+# the Whisper weights (Sprint 0: warm load ~2s vs cold ~30s + download).
+# Cleared in tests via `extract_module._asr_model = None`.
+_asr_model = None
+_asr_model_key: tuple[str, str, str] | None = None
+
+# Coarse citation markers every N seconds of audio (time-based, not every
+# Whisper segment — segment count varies wildly with speaking rate, while
+# wall-clock buckets stay citable the same way #127's [t=MM:SS] markers are).
+_ASR_MARKER_EVERY_SECONDS = 30
+
+
+def _seconds_to_asr_marker(seconds: float) -> str:
+    """Format a Whisper segment start (seconds) as ``[t=MM:SS]`` (#128).
+
+    Matches #127's MM:SS shape: hours fold into minutes (90 min → ``90:00``).
+    """
+    total = max(0, int(seconds))
+    minutes = total // 60
+    secs = total % 60
+    return f"[t={minutes:02d}:{secs:02d}]"
+
+
+def _format_asr_transcript(segments) -> str:
+    """Join segment texts with a ``[t=MM:SS]`` marker every ~30s of audio."""
+    parts: list[str] = []
+    last_bucket = -1
+    for seg in segments:
+        text = (getattr(seg, "text", None) or "").strip()
+        if not text:
+            continue
+        start = float(getattr(seg, "start", 0.0) or 0.0)
+        bucket = int(start // _ASR_MARKER_EVERY_SECONDS)
+        if bucket != last_bucket:
+            parts.append(_seconds_to_asr_marker(start))
+            last_bucket = bucket
+        parts.append(text)
+    return " ".join(parts)
+
+
+def _probe_audio_duration_seconds(path: str) -> float | None:
+    """Best-effort duration via PyAV before Whisper runs (early cost guard).
+
+    Returns None when duration cannot be read — caller falls back to
+    ``TranscriptionInfo.duration`` after ``transcribe`` returns.
+    """
+    try:
+        import av
+    except ImportError:
+        return None
+    try:
+        with av.open(path) as container:
+            if container.duration is None:
+                return None
+            # container.duration is in av.time_base units (microseconds).
+            return float(container.duration) / av.time_base
+    except Exception:
+        return None
+
+
+def _get_asr_model():
+    """Lazy-load ``faster_whisper.WhisperModel`` once per process.
+
+    Reloads if ``ASR_MODEL_SIZE`` / device / compute_type change (rare).
+    """
+    global _asr_model, _asr_model_key
+    from src.config.settings import get_settings
+
+    settings = get_settings()
+    key = (settings.asr_model_size, settings.asr_device, settings.asr_compute_type)
+    if _asr_model is not None and _asr_model_key == key:
+        return _asr_model
+
+    from faster_whisper import WhisperModel
+
+    _asr_model = WhisperModel(
+        settings.asr_model_size,
+        device=settings.asr_device,
+        compute_type=settings.asr_compute_type,
+    )
+    _asr_model_key = key
+    return _asr_model
+
+
+def _extract_audio_text(content: bytes, filename: str) -> str:
+    """Extract text from audio via optional ASR, or return a placeholder (#128).
+
+    Mirrors ``_extract_image_text`` (OCR): the ``asr`` extra
+    (``faster-whisper``) is optional. When the library is missing, the model
+    cannot load, or transcription yields nothing usable, return
+    ``[audio: <name>, transcription unavailable]`` so the document still
+    flows through the pipeline instead of hard-failing.
+
+    Duration over ``ASR_MAX_DURATION_SECONDS`` raises a non-retryable
+    ``ApplicationError`` (document fails with an actionable message) — never
+    accept-then-garble a multi-hour recording.
+
+    ``MemoryError`` is deliberately NOT caught -- an OOM must stay retryable
+    / visible rather than look like a successful empty transcript (#206).
+
+    Successful transcripts include coarse ``[t=MM:SS]`` markers every
+    ``_ASR_MARKER_EVERY_SECONDS`` of audio.
+    """
+    placeholder = f"[audio: {filename}, transcription unavailable]"
+
+    try:
+        from faster_whisper import WhisperModel  # noqa: F401 — presence check
+    except ImportError:
+        logger.warning(
+            "ASR libraries not available (install the 'asr' extra: faster-whisper); "
+            "returning placeholder for audio",
+            filename=filename,
+        )
+        return placeholder
+
+    try:
+        model = _get_asr_model()
+    except MemoryError:
+        raise
+    except Exception as e:
+        logger.warning(
+            "ASR model load failed; returning placeholder for audio",
+            filename=filename,
+            error=str(e),
+        )
+        return placeholder
+
+    from src.config.settings import get_settings
+
+    max_duration = get_settings().asr_max_duration_seconds
+
+    # faster-whisper wants a filesystem path (or ndarray). Write a temp file
+    # so we never require callers to stage audio themselves.
+    import tempfile
+    from pathlib import Path
+
+    suffix = Path(filename).suffix.lower() or ".bin"
+    tmp_path: str | None = None
+    parts: list[str] = []
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+
+        probed = _probe_audio_duration_seconds(tmp_path)
+        if probed is not None and probed > max_duration:
+            raise ApplicationError(
+                f"Audio duration ({probed:.0f}s) exceeds the "
+                f"{max_duration}s limit for '{filename}'. "
+                f"Trim the recording or raise ASR_MAX_DURATION_SECONDS.",
+                type="AudioDurationExceeded",
+                non_retryable=True,
+            )
+
+        try:
+            segments, info = model.transcribe(tmp_path, beam_size=1)
+            duration = getattr(info, "duration", None)
+            if duration is not None and float(duration) > max_duration:
+                raise ApplicationError(
+                    f"Audio duration ({float(duration):.0f}s) exceeds the "
+                    f"{max_duration}s limit for '{filename}'. "
+                    f"Trim the recording or raise ASR_MAX_DURATION_SECONDS.",
+                    type="AudioDurationExceeded",
+                    non_retryable=True,
+                )
+            transcript = _format_asr_transcript(segments)
+            if transcript:
+                parts = [transcript]
+        except ApplicationError:
+            raise
+        except MemoryError:
+            raise
+        except Exception as e:
+            logger.warning(
+                "ASR transcription failed; returning placeholder for audio",
+                filename=filename,
+                error=str(e),
+            )
+            return placeholder
+    finally:
+        if tmp_path is not None:
+            try:
+                Path(tmp_path).unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Failed to remove ASR temp file", path=tmp_path)
+
+    if not parts:
+        logger.warning(
+            "ASR produced no text for audio; returning placeholder",
+            filename=filename,
+        )
+        return placeholder
+
+    return parts[0]

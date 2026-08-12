@@ -38,7 +38,7 @@ def main() -> int:
         print(f"error: {DOC_PATH} does not exist", file=sys.stderr)
         return 1
 
-    text = DOC_PATH.read_text()
+    text = DOC_PATH.read_text(encoding="utf-8")
     if BEGIN_MARKER not in text or END_MARKER not in text:
         print(
             f"error: {DOC_PATH} is missing the BEGIN/END generated-table markers",
@@ -54,7 +54,7 @@ def main() -> int:
         print(f"{DOC_PATH} already up to date.")
         return 0
 
-    DOC_PATH.write_text(new_text)
+    DOC_PATH.write_text(new_text, encoding="utf-8", newline="\n")
     print(f"Regenerated the supported-file-types table in {DOC_PATH}.")
     return 0
 

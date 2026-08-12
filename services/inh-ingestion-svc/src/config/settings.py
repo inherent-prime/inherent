@@ -210,6 +210,17 @@ class Settings(BaseSettings):
     # Port for Prometheus metrics server (worker mode only; standalone uses /metrics route)
     metrics_port: int = Field(9090, alias="METRICS_PORT")
 
+    # =========================================================================
+    # Optional ASR (#128) — only used when the `asr` extra is installed
+    # =========================================================================
+
+    # Whisper model size for faster-whisper (Sprint 0 lock: base on CPU).
+    asr_model_size: str = Field("base", alias="ASR_MODEL_SIZE")
+    asr_device: str = Field("cpu", alias="ASR_DEVICE")
+    asr_compute_type: str = Field("int8", alias="ASR_COMPUTE_TYPE")
+    # Reject audio longer than this before indexing (default 2 hours).
+    asr_max_duration_seconds: int = Field(7200, alias="ASR_MAX_DURATION_SECONDS")
+
     @property
     def resolved_mq_max_concurrent(self) -> int:
         """Effective MQ consume-loop concurrency bound.

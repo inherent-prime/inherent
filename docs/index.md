@@ -8,7 +8,8 @@ and retrieval layer for a private RAG system, exposed over REST and MCP.
 
 You connect sources — plain text, Markdown, CSV, HTML, PDF, JSON, DOCX,
 XLSX, PPTX, PNG (OCR), EML, EPUB, RTF, ODT, YAML/TOML/XML, source code
-(Python, JS/TS, Go, Java, Rust, and more), SRT/WebVTT transcripts — see the
+(Python, JS/TS, Go, Java, Rust, and more), SRT/WebVTT transcripts, audio
+(MP3/WAV/M4A via optional ASR) — see the
 full [supported file types](reference/file-types.md) list — and Inherent
 extracts, chunks, embeds, stores, and serves retrieval with citations,
 permissions, and freshness signals.
@@ -34,7 +35,8 @@ permissions, and freshness signals.
 
 ## How it works
 
-Two services, standard components (FastAPI, PostgreSQL, Weaviate, Temporal,
+Two services, standard components (FastAPI, PostgreSQL, Weaviate, 
+Temporal,
 Valkey, S3-compatible storage, Hugging Face TEI):
 
 - **`inh-ingestion-svc`** owns document processing: consumes upload events,

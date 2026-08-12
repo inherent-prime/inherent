@@ -7,6 +7,8 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Added
 
+- **Audio upload + optional ASR.** REST accepts mp3/wav/m4a behind opt-in `asr` extra (`faster-whisper`), placeholder degradation, Compose overlay, ID3-aware mp3 sniff; MCP rejects audio. (#243, #128)
+
 - **Streamable HTTP transport for the MCP server (#220).** The same
   `_TOOLS` registry stdio serves is now mounted at `POST /mcp` inside
   `inh-public-api-svc` — same process, same port, same middleware stack as

@@ -48,6 +48,19 @@ with workflow.unsafe.imports_passed_through():
     )
 
 
+def _extract_timeout_for_content_type(content_type: str) -> timedelta:
+    """Activity start_to_close timeout for extract_text (#128).
+
+    Audio ASR on CPU can run far longer than the 5-minute default (Sprint 0
+    timings). Pure function of workflow input so Temporal determinism is
+    preserved — no settings reads inside the workflow sandbox.
+    """
+    mime = content_type.split(";", 1)[0].strip().lower()
+    if mime.startswith("audio/"):
+        return timedelta(minutes=60)
+    return timedelta(minutes=5)
+
+
 @workflow.defn
 class DocumentIngestionWorkflow:
     """Durable workflow for document ingestion processing.
@@ -396,7 +409,7 @@ class DocumentIngestionWorkflow:
                     document_id=input.document_id,
                     workspace_id=input.workspace_id,
                 ),
-                start_to_close_timeout=timedelta(minutes=5),
+                start_to_close_timeout=_extract_timeout_for_content_type(input.content_type),
                 retry_policy=RetryPolicy(
                     maximum_attempts=3,
                     initial_interval=timedelta(seconds=2),
