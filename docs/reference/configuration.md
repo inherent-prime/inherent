@@ -140,7 +140,8 @@ Decode uses PyAV (pulled by `faster-whisper`); system `ffmpeg` is optional.
 Model weights live under `HF_HOME` (Compose overlay defaults to
 `/var/cache/huggingface` on volume `asr_hf_cache`). First run downloads
 ~148 MB for `base`; air-gap hosts must pre-seed that cache. See
-[local getting started — Optional ASR](../getting-started/local.md).
+[local getting started — Optional ASR](../getting-started/local.md) and
+[Optional audio ASR](audio-asr.md) for flow and overlay rationale.
 
 | Variable | Default | Effect | Secret |
 | --- | --- | --- | --- |

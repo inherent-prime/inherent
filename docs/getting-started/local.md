@@ -223,6 +223,9 @@ Promoted eval cases persist until you disable them via
 Default Compose leaves audio extraction as a **placeholder**
 (`[audio: <name>, transcription unavailable]`). Real STT is opt-in (#128).
 
+See **[Optional audio ASR](../reference/audio-asr.md)** for the full flow,
+why `docker-compose.asr.yml` exists, extraction behavior, and guardrails.
+
 ### Enable with Compose overlay
 
 ```bash
@@ -258,6 +261,7 @@ falls back to the placeholder (or fails loudly if you treat load errors as
 hard — today load failures return the placeholder).
 
 Env knobs: see [Configuration — Optional ASR](../reference/configuration.md).
+Architecture and overlay rationale: [Optional audio ASR](../reference/audio-asr.md).
 
 ## Troubleshooting
 

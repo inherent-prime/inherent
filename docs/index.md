@@ -29,6 +29,7 @@ permissions, and freshness signals.
 | Call the API — every endpoint, with curl examples | [API examples](examples/README.md) · [REST API reference](reference/rest-api.md) |
 | Wire an agent over MCP | [MCP tools reference](reference/mcp-tools.md) |
 | Configure the services | [Configuration reference](reference/configuration.md) |
+| Understand optional audio ASR (STT) | [Optional audio ASR](reference/audio-asr.md) |
 | See what changed in each release | [Release notes](release-notes.md) |
 | Understand the design decisions | [ADR index](adr/README.md) |
 | Contribute, report a vulnerability, get help | [Contributing](community/contributing.md) · [Security](community/security.md) · [Support](community/support.md) |
