@@ -13,6 +13,15 @@ that don't belong to any one package:
   (stdlib only), so it isn't part of any service's `uv sync` — run it via
   `uvx 'pytest==9.0.2' tests/` or `make test` (#183).
 
+Within `inh-public-api-svc`, don't confuse `tests/app_flows/` with
+`tests/integration/`: `tests/app_flows/` (renamed from `tests/e2e/` — the old
+name overclaimed) drives the FastAPI app in-process with `get_database` /
+`get_search_service` / auth mocked via `AsyncMock`/`MagicMock`, never
+touching a real dependency. Live end-to-end coverage — a real client against
+a real booted stack — lives in `tests/integration/test_compose_*.py` and is
+gated by the `compose` marker (see [Markers](#markers) below); a `smoke`
+subset of those runs on every PR.
+
 Every test command below assumes you have synced dev dependencies first:
 
 ```bash
@@ -113,7 +122,27 @@ make test-integration   # public-api compose suite (stack must be up)
 ```
 
 **Local compose CI:** `.github/workflows/integration.yml` (or `make test-integration`
-against a laptop stack).
+against a laptop stack). Runs on push to `main`, nightly cron, and manual
+dispatch — not on pull requests, since it runs the full Compose suite plus
+the retrieval-eval hard gate and both services' benchmarks. See the
+[retrieval-eval gate](#retrieval-eval-gate-baseline-ratchet-and-trend-history-139)
+section below.
+
+**PR-blocking smoke lane:** `.github/workflows/e2e-smoke.yml` — the `E2E
+smoke` required check, and the only live end-to-end signal a PR gets before
+merge. It boots the identical Compose stack `integration.yml` does, then runs
+only tests tagged with the `smoke` marker via `-m "smoke and compose"`
+(`--no-cov`; coverage is the fast lane's job). Today that is 6 tests, all in
+`inh-public-api-svc` (ingestion has none yet — the step tolerates pytest's
+"no tests collected" exit code so an empty selection doesn't fail the gate),
+covering the ingest → search roundtrip, PDF extraction, cross-workspace
+isolation, MCP search/upload, and `event_id` usability, and they take ~25s
+against a booted stack; the job's own timeout is 40 minutes to absorb stack
+boot/bootstrap time. The retrieval-eval hard gate is deliberately excluded
+from `smoke` — its baseline only ratchets on `main` runs, so gating it per-PR
+would block merges on drift unrelated to the PR — and the slower live E2E
+suites (tenancy, lifecycle, event-durability, dead-letter recovery) stay
+`compose`-only, running in the post-merge lane instead.
 
 **Laptop Hetzner VM (manual):** [getting-started/local-vm-test.md](getting-started/local-vm-test.md)
 — Terraform apply from your machine with Object Storage remote state, smoke
@@ -153,6 +182,7 @@ Combine them with `-m` expressions (e.g. `-m 'security or contract'`).
 | `unit`             | Fast, isolated unit tests                                          | all      |
 | `integration`      | Exercises real service dependencies                               | public-api, ingestion |
 | `compose`          | Requires a running docker-compose stack (deselected by default)   | public-api, ingestion |
+| `smoke`            | PR-blocking subset of `compose`; run via `-m "smoke and compose"` in `e2e-smoke.yml` | public-api (ingestion: none yet) |
 | `slow`             | Slow-running tests                                                 | public-api, ingestion |
 | `benchmark`        | Latency/throughput benchmarks (loose SLO regression guards)       | public-api, ingestion |
 | `security`         | Auth/tenancy security regression tests (offline)                  | public-api, ingestion |

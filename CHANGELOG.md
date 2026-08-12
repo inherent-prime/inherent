@@ -455,6 +455,25 @@ All notable changes to Inherent are documented here. The format follows
   `tests/app_flows/` and its `conftest.py` docstring now says plainly that
   it is in-process app-flow testing, NOT end-to-end, and that live E2E
   lives in `tests/integration/test_compose_*.py`.
+  The GitHub ruleset backing all of this (`main-protect`, id 16976743) was
+  itself inert until now: its branch-name condition was a single malformed
+  string (`"refs/heads/main, release*"`) that matched no ref, so every rule
+  on it — including `pull_request` and the two review rules above — was
+  silently not applied to `main`. It is repaired to the array form
+  (`refs/heads/main`, `refs/heads/release*`) and live, with 0 required
+  approvals (a sole-maintainer repo can't self-approve, so the human gate is
+  green checks plus a human clicking merge), required review-thread
+  resolution, and squash/rebase-only merges. `AGENTS.md`'s "raise PRs
+  against `dev`" rule, stale since `main` became the integration branch, is
+  replaced with the corrected policy plus a merge-gate table (PR-blocking /
+  post-merge / release-only); `docs/testing.md` gains the `smoke` marker,
+  the smoke lane's scope and time budget, and the `tests/app_flows` rename
+  above. Registering the three PR-blocking checks
+  (`Required tests before merge` / `E2E smoke` / `Conventions`) as the
+  ruleset's `required_status_checks` is deliberately deferred to a follow-up
+  change, so it can confirm the live check-run names on an actual PR first —
+  registering the wrong name would leave `main` requiring a check that can
+  never report, which blocks every PR permanently.
 
 - **⚠️ `GET /v1/chunks/{document_id}/context` is now bounded and pageable
   (#219).** The endpoint concatenated every chunk with no limit: one

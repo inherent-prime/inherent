@@ -10,7 +10,9 @@ Guidance for working in this repository.
 - If there is a major decision or change that has happened in the repository, add a dated one-line entry to `.memory/timeline/<YYYY-MM>.md`, refresh `.memory/index.md` if the current state changed, and update the `./docs` folder
 - Before commit always check if the code build, lint, tests and smoke tests are passing in local to save building time in Cloud
 - Whenever you commit some code, always make sure you write proper description of the change
-- Always raise PRs against the `dev` branch
+- Always raise PRs against `main` — it is the sole protected integration
+  branch (GitHub ruleset `main-protect`, id 16976743). `dev` is retired to
+  scratch status: no protection, no required flow, not a PR target.
 - No commit should be without a Github Issue. If there is no issue or adhoc work, make sure to create an issue with details and then proceed to write the code
 
 ## Mandatory Quality Gates (ALL agents must follow)
@@ -23,6 +25,30 @@ Every agent — main or subagent — MUST complete these before marking work don
 4. **Sanity Check**: Run full test suite + type check to verify nothing is broken.
 5. **Smoke Test**: Always do smoke test in local before pushing to remote branch.
 6. **Root-cause CI flakes, don't theorize**: never ship a CI-flake fix on an unverified "prime suspect" — run the diagnostic before committing, and when the bug is a shared-helper timeout (e.g. a DB-clearing hook), grep every call site and fix them all, not just the one that failed
+
+## Branch Policy & Merge Gates
+
+`main` is the only protected branch (ruleset `main-protect`, id 16976743,
+`enforcement: active`, pattern `refs/heads/main`, `refs/heads/release*`). It
+blocks branch deletion and non-fast-forward pushes, requires linear history,
+runs `code_quality` and `copilot_code_review`, and gates merge on a
+`pull_request` rule: 0 required approvals (sole-maintainer repo — GitHub
+forbids self-approval, so the human gate is green checks + a human clicking
+merge), all review threads must be resolved, squash/rebase merge only. `dev`
+carries none of this — it is scratch space, not a PR target.
+
+Three lanes, by when they run and what they can block:
+
+| Lane | Runs on | Checks | Blocks |
+| --- | --- | --- | --- |
+| **PR-blocking** | every PR into `main` | `Required tests before merge` (`ci.yml`: lint, format, mypy, bandit, unit+contract tests, coverage floors — all three services); `E2E smoke` (`e2e-smoke.yml`: boots the Compose stack, runs `-m "smoke and compose"`, 6 tests, 40-min job timeout); `Conventions` (`conventions.yml`: requires a `CHANGELOG.md` entry when `services/**` changes and a `docs/` touch when API routers / the MCP tool registry / shared contracts change — skippable per-PR with the `no-changelog` / `no-docs-needed` labels) | merging the PR |
+| **Post-merge** | push to `main`, nightly cron, manual dispatch | `integration.yml`: full Compose suite, the retrieval-eval hard gate (tolerance derived from corpus resolution, #236 — see `docs/testing.md`), search + ingestion benchmarks, dead-letter recovery E2E, baseline ratchet and regression-alert jobs | nothing directly — it reports and files issues against code already on `main` |
+| **Release-only** | a final `vX.Y.Z` tag / manual dispatch | `publish.yml` (human-approved GHCR image publish); `hetzner-e2e.yml` (real-VM Terraform + Compose E2E, triggered by a successful `publish.yml` run on a final tag) | cutting/publishing a release |
+
+The three PR-blocking checks above are the required-status-check *intent* for
+`main-protect`; their registration on the ruleset is a separate, later step
+— until then, treat a red `ci.yml` / `e2e-smoke.yml` / `conventions.yml` on a
+PR as blocking in practice even though GitHub isn't yet enforcing it for you.
 
 ## Ways of working
 
