@@ -1140,6 +1140,24 @@ depend on it.
 | `sample.srt` | `application/x-subrip` | `docs/examples/sample-documents/sample.srt` |
 | `sample.vtt` | `text/vtt` | `docs/examples/sample-documents/sample.vtt` |
 
+### E2E fixtures
+
+These three are not general-purpose samples: they exist for the live compose
+E2E lane (`services/inh-public-api-svc/tests/integration/test_compose_lifecycle.py`)
+and each carries a unique sentinel string the tests search for. Don't edit them
+without updating the sentinels in that test file.
+
+| File | MIME Type | Sentinel | Purpose |
+|---|---|---|---|
+| `e2e-lifecycle.pdf` | `application/pdf` | `ZZE2EPDFQUOKKA` | Real PDF through the third-party extractor |
+| `e2e-lifecycle.docx` | `application/vnd.openxmlformats-officedocument.wordprocessingml.document` | `ZZE2EDOCXNARWHAL` | Real DOCX through python-docx |
+| `e2e-tabular.xlsx` | `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` | `ZZE2EXLSXPANGOLIN` | 500 pipe-serialized rows — the shape that collapses into one giant chunk without #129's `tabular` chunking (`docs/architecture/overview.md` §6.2) |
+
+The pre-existing `sample.pdf` / `sample.docx` / `sample.xlsx` above are
+deliberately left untouched by that lane: `services/inh-ingestion-svc/tests/test_extraction_by_type.py`
+pins their exact sheet names, merged-cell markers and header row, and they feed
+the extraction/chunking quality eval corpus.
+
 ### Generate sample PDF (requires `enscript` + `ps2pdf`)
 
 ```bash
