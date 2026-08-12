@@ -392,15 +392,61 @@ def test_dependency_outage_dead_letters_then_recovers() -> None:
         body = _wait_document_processed(client, document_id, timeout=TIMEOUT)
         assert body["status"] == "processed"
         _wait_searchable(client, document_id, outage_marker, timeout=TIMEOUT)
+
+        # --- 7. The dead-letter job row must still be readable after a
+        # successful retry (the retry endpoint must not have deleted or
+        # corrupted it). We deliberately do NOT assert status == "resolved"
+        # here -- #249 (filed while writing this test) found that no code
+        # path ever transitions a dead-letter job to "resolved" after a
+        # successful retry, so the row is stuck at "retrying" forever even
+        # though the document above is fully processed and searchable. This
+        # pins that DEFECT-CONSISTENT state on purpose: if #249 is fixed,
+        # this assertion should be tightened to status == "resolved" (or
+        # whatever the fix lands on), and its failure here is the signal to
+        # do that.
+        job_after_retry_resp = client.get(
+            f"{INGESTION_API_URL}/dead-letter/{job_id}",
+            headers=INGESTION_HEADERS,
+            params={"workspace_id": WORKSPACE_ID},
+        )
+        assert job_after_retry_resp.status_code == 200, (
+            f"dead-letter job {job_id} not readable after retry: "
+            f"{job_after_retry_resp.status_code} {job_after_retry_resp.text}"
+        )
+        job_after_retry = job_after_retry_resp.json()
+        assert job_after_retry["id"] == job_id
+        assert job_after_retry["document_id"] == document_id
+        # Defect-consistent per #249: still "retrying", never advanced to
+        # "resolved" despite the document being processed+searchable above.
+        assert job_after_retry.get("status") == "retrying", (
+            f"dead-letter job {job_id} status changed from the #249 defect "
+            f"baseline ('retrying') to {job_after_retry.get('status')!r} -- "
+            f"if #249 was fixed, tighten this assertion to the new resolved "
+            f"state instead of loosening it"
+        )
     finally:
         # Unconditional: never leave the shared stack with Weaviate down --
-        # Tasks 8-12 still need it healthy.
-        restore = _docker_compose("start", "weaviate")
-        if restore.returncode != 0:
-            pytest.fail(
-                f"CLEANUP FAILED: 'docker compose start weaviate' returned "
-                f"{restore.returncode}: {restore.stderr}. Stack may be left with "
-                f"weaviate down -- fix manually before running further tests."
-            )
-        _wait_weaviate_healthy()
-        client.close()
+        # Tasks 8-12 still need it healthy. Cleanup must be airtight, not
+        # best-effort: a subprocess failure here (TimeoutExpired/OSError/
+        # CalledProcessError) must still hit the loud "fix manually" path
+        # instead of propagating past it silently, and the client must
+        # always be closed even if the health-wait itself raises.
+        try:
+            try:
+                restore = _docker_compose("start", "weaviate")
+                if restore.returncode != 0:
+                    pytest.fail(
+                        f"CLEANUP FAILED: 'docker compose start weaviate' returned "
+                        f"{restore.returncode}: {restore.stderr}. Stack may be left "
+                        f"with weaviate down -- fix manually before running further "
+                        f"tests."
+                    )
+            except (subprocess.TimeoutExpired, OSError, subprocess.CalledProcessError) as exc:
+                pytest.fail(
+                    f"CLEANUP FAILED: 'docker compose start weaviate' raised "
+                    f"{exc!r}. Stack may be left with weaviate down -- fix manually "
+                    f"before running further tests: docker compose start weaviate"
+                )
+            _wait_weaviate_healthy()
+        finally:
+            client.close()
