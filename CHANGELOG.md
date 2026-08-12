@@ -285,7 +285,7 @@ All notable changes to Inherent are documented here. The format follows
   parses of customer-uploaded EPUB/ODT XML should move to `defusedxml`. Both
   baselines are tracked in #247.
 
-- **CI runs are least-privilege, deduplicated and time-boxed.** `ci.yml` now
+- **CI: required merge gates — hardened CI, Conventions gate.** `ci.yml` now
   declares `permissions: contents: read` at the workflow level (it previously
   inherited whatever the repository default grants), cancels superseded
   in-flight runs per pull request via a `concurrency` group — while leaving
@@ -293,7 +293,14 @@ All notable changes to Inherent are documented here. The format follows
   — and sets `timeout-minutes` on every job (30 for `service-checks` and
   `Required tests before merge`, 10 for `root tests/`). Previously a hung
   Postgres service container or a wedged `uvx` resolve could hold a job — soon
-  to be a required status check — pending for the runner's 6-hour default.
+  to be a required status check — pending for the runner's 6-hour default. A
+  new `conventions.yml` workflow adds a `Conventions` required check: it
+  fails a PR that touches `services/**` without a `CHANGELOG.md` entry, or
+  that changes API routers / the MCP tool registry / shared contracts without
+  touching `docs/` — unless the PR carries the `no-changelog` or
+  `no-docs-needed` label respectively (both labels are re-evaluated live, via
+  the workflow's `labeled`/`unlabeled` triggers, so applying one un-blocks an
+  already-failing PR without a new push).
 
 - **⚠️ `GET /v1/chunks/{document_id}/context` is now bounded and pageable
   (#219).** The endpoint concatenated every chunk with no limit: one
