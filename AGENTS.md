@@ -11,6 +11,7 @@ Guidance for working in this repository.
 - Before commit always check if the code build, lint, tests and smoke tests are passing in local to save building time in Cloud
 - Whenever you commit some code, always make sure you write proper description of the change
 - Always raise PRs against the `dev` branch
+- No commit should be without a Github Issue. If there is no issue or adhoc work, make sure to create an issue with details and then proceed to write the code
 
 ## Mandatory Quality Gates (ALL agents must follow)
 
