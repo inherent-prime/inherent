@@ -3,7 +3,10 @@
 - **Status:** Accepted. **Amended 2026-08-06** — maintainer approval granted,
   default flipped from `False` to `True`. See
   [Amendment](#amendment-2026-08-06-maintainer-approval-granted-default-flipped-to-true)
-  for why now and what changed.
+  for why now and what changed. **Amended 2026-08-12** — the CI verdict the
+  2026-08-06 amendment deferred to came back, and the baseline was re-seeded
+  to flag-on numbers. See
+  [Amendment](#amendment-2026-08-12-ci-verdict-returned-baseline-re-seeded).
 - **Date:** 2026-07-23
 - **Deciders:** maintainers
 - **Related:** [ADR 0003](0003-traffic-mined-retrieval-evals.md), #146, #47
@@ -108,13 +111,13 @@ policy originally expected before a flag defaults on. **As of the 2026-08-06
 amendment, this evidence plus maintainer approval were judged sufficient to
 flip the default** — see the Amendment section.
 
-> **Note (2026-08-06):** the committed `corpus/retrieval_baseline.json` still
-> reflects the flag-**off** numbers as of this writing — it is deliberately
-> *not* re-seeded by the amendment (see the Amendment section for why), so it
-> temporarily no longer matches the production default (`True`). Do not treat
-> `retrieval_baseline.json`'s comment claiming "production default" as
-> current until a follow-up ratchets it; the source of truth for the current
-> default is `settings.py`.
+> **Note (2026-08-06, resolved 2026-08-12):** the committed
+> `corpus/retrieval_baseline.json` reflected the flag-**off** numbers between
+> those dates — deliberately *not* re-seeded by the 2026-08-06 amendment (see
+> that section for why), so it temporarily did not match the production
+> default (`True`). It was re-seeded to flag-**on** numbers on 2026-08-12; see
+> [Amendment](#amendment-2026-08-12-ci-verdict-returned-baseline-re-seeded).
+> The source of truth for the current default is always `settings.py`.
 
 ## Boundary: what this is not
 
@@ -209,3 +212,53 @@ An operator who wants the pre-2026-08-06 ranking behavior sets
 `docker-compose.yml`). No other behavior changes; `_diversify_by_document`
 and the over-fetch widening are unchanged code, only reachable by more
 callers by default now.
+
+## Amendment (2026-08-12): CI verdict returned, baseline re-seeded
+
+The 2026-08-06 amendment deliberately did **not** re-seed
+`corpus/retrieval_baseline.json`, so that CI would judge the flag-on default
+(together with #129 format-aware chunking) against the flag-off baseline on
+its own merits, and said: "If that CI run shows the gate still fails,
+re-baselining is a separate, deliberate follow-up." This amendment is that
+follow-up.
+
+### What CI measured
+
+Main sha `edd9f0c`, reproduced bit-identically by the 2026-08-11 nightly:
+
+| mode | mrr | nDCG@5 | recall@5 |
+| --- | --- | --- | --- |
+| hybrid | 0.7949 (=) | 0.7382 (+0.018) | 0.8846 (+0.038) |
+| keyword | 0.7821 (**−0.038**) | 0.7171 (+0.003) | 0.8846 (+0.077) |
+| semantic | 0.7051 (+0.010) | 0.7057 (+0.025) | 0.8846 (+0.038) |
+
+Eight of the nine gated metrics are flat or improved. One regressed past the
+0.02 gate tolerance: `keyword.mrr`.
+
+### What the one regression is
+
+−0.0385 is exactly 0.5/13 over the 13 scored (non-abstention) golden queries:
+**one** query's judged-relevant document moved from rank 1 to rank 2 in
+keyword mode. The per-category breakdown localises it to `general`; every
+other category (`exact_id`, `stale_version`, `paraphrase`,
+`multi_doc_crowding`) scores mrr 1.0 in all three modes. Diversification did
+what this ADR predicted — `multi_doc_crowding` recall went 0.5 → 1.0 — it
+simply did not recover that one query's top slot.
+
+### Decision
+
+Accept the trade and re-seed the baseline to the flag-on numbers. One
+rank-position slip on one query, bought with corpus-wide recall (+0.038 to
++0.077) and nDCG gains in all three modes, is the trade this ADR was approved
+to make. The automated ratchet cannot express it — `max(current, baseline)`
+only ever moves up — so it lands as a reviewed edit to the committed baseline.
+
+### Caveat this exposed (tracked in #236)
+
+The gate's tolerance is finer than the corpus's own resolution. With 13
+scored queries the smallest possible single-query MRR move (rank 1 → rank 2)
+is 0.5/13 = 0.0385, already above `EVAL_GATE_TOLERANCE` (0.02). Until the
+tolerance is derived from corpus size, the gate cannot distinguish "one query
+slipped one position" from "retrieval regressed", and every such slip will
+hard-fail main and require another manual re-seed. That fix is out of scope
+here — this amendment only records the ranking decision.

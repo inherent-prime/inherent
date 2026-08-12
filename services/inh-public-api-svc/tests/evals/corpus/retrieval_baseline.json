@@ -1,18 +1,18 @@
 {
-  "_comment": "Retrieval eval baseline (#37 -> hard gate, #139). Per-mode mean metrics over the golden corpus. This is a HARD GATE, not reporting-only: the compose retrieval eval fails the build when any per-mode metric regresses beyond EVAL_GATE_TOLERANCE below these numbers (tests/evals/eval_gate.py), on top of the absolute RETRIEVAL_MIN_RECALL5 floor. A green run on main ratchets these values up to max(current, baseline) per mode/metric (never down) and opens a PR with the ratchet + a trend-history line (.github/workflows/integration.yml) -- branch protection on main blocks github-actions[bot] from pushing directly, so the ratchet lands as a PR instead of a push (previously it silently failed on every run; see retrieval_history.jsonl for the seeding entry). Re-seeded 2026-07-23 (#146) after adding q14/multi_doc_crowding to qrels.jsonl (rate-limiting-deep-dive.txt vs rate-limit-quick-reference.txt): these numbers are a real local Compose measurement with enable_diversification at its production default (False) -- diversification's own eval improvement (recall@5 0.5->1.0, nDCG@5 ~0.61->~0.90-0.92 on the multi_doc_crowding category specifically, every pooled per-mode metric flat or improved, none regressed) is documented in ADR 0004 and the CHANGELOG, not folded into this committed baseline, since the flag stays off by default pending the same eval-gate approval process as the #47 methods.",
+  "_comment": "Retrieval eval baseline (#37 -> hard gate, #139). Per-mode mean metrics over the golden corpus. This is a HARD GATE, not reporting-only: the compose retrieval eval fails the build when any per-mode metric regresses beyond EVAL_GATE_TOLERANCE below these numbers (tests/evals/eval_gate.py), on top of the absolute RETRIEVAL_MIN_RECALL5 floor. A green run on main ratchets these values up to max(current, baseline) per mode/metric (never down) and opens a PR with the ratchet + a trend-history line (.github/workflows/integration.yml) -- branch protection on main blocks github-actions[bot] from pushing directly, so the ratchet lands as a PR instead of a push. RE-SEEDED 2026-08-12 (#237): this is a DOWNWARD move on keyword.mrr, which the automated ratchet cannot make by construction, so it lands as a reviewed baseline edit. ADR 0004's 2026-08-06 amendment deliberately left the baseline at flag-OFF numbers so CI would judge the flag-ON default (#146, per-document diversification) together with #129 (format-aware chunking) on its own merits. CI returned that verdict on main sha edd9f0c and again on the 2026-08-11 nightly, bit-identical both times: 8 of 9 gated metrics flat or improved (recall@5 +0.038 semantic/hybrid and +0.077 keyword, nDCG@5 up in all three modes, multi_doc_crowding recall 0.5 -> 1.0), and ONE regressed -- keyword.mrr 0.8205 -> 0.7821. That delta is exactly 0.5/13, i.e. a single golden query in the 'general' category whose judged-relevant document moved from rank 1 to rank 2 in keyword mode; every other category scores mrr 1.0 in all three modes. Accepting one rank-position slip on one query in exchange for corpus-wide recall and nDCG gains is the trade ADR 0004 was approved to make, so these flag-ON numbers become the baseline. NOTE the gate's own resolution limit, tracked separately (#236): with 13 scored queries the smallest possible single-query MRR move (rank 1 -> rank 2) is 0.5/13 = 0.0385, which already exceeds EVAL_GATE_TOLERANCE (0.02) -- so until the tolerance is derived from corpus size, ANY single rank slip hard-fails this gate and lands here as another manual re-seed.",
   "hybrid": {
     "mrr": 0.7948717948717949,
-    "ndcg@5": 0.720203946724338,
-    "recall@5": 0.8461538461538461
+    "ndcg@5": 0.738242413261144,
+    "recall@5": 0.8846153846153846
   },
   "keyword": {
-    "mrr": 0.8205128205128205,
-    "ndcg@5": 0.7137303348940747,
-    "recall@5": 0.8076923076923077
+    "mrr": 0.782051282051282,
+    "ndcg@5": 0.7170766312445653,
+    "recall@5": 0.8846153846153846
   },
   "semantic": {
-    "mrr": 0.6948717948717948,
-    "ndcg@5": 0.6809059023785262,
-    "recall@5": 0.8461538461538461
+    "mrr": 0.7051282051282051,
+    "ndcg@5": 0.7056546093724562,
+    "recall@5": 0.8846153846153846
   }
 }

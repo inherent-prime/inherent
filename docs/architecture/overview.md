@@ -411,11 +411,13 @@ this page does not redraw it. What matters for the end-to-end picture:
   filters client-side, so a `min_score` floor doesn't under-fill a page
   (search-sequence.md diagram 2).
 - **Per-document diversification** ([ADR 0004](../adr/0004-per-document-diversification.md),
-  `enable_diversification`, default off) is a post-filter round-robin over
-  already-scored candidates, gated behind the same eval-gate policy as the
-  advanced-retrieval scaffolding in [docs/advanced-indexes.md](../advanced-indexes.md)
-  — it exists because a long multi-chunk document can otherwise occupy every
-  slot in a small `limit` at a shorter, equally-relevant document's expense.
+  `enable_diversification`, on by default since 2026-08-06) is a post-filter
+  round-robin over already-scored candidates. It cleared the eval-gate policy
+  that still gates the advanced-retrieval scaffolding in
+  [docs/advanced-indexes.md](../advanced-indexes.md) before its default
+  flipped — it exists because a long multi-chunk document can otherwise occupy
+  every slot in a small `limit` at a shorter, equally-relevant document's
+  expense. Set `ENABLE_DIVERSIFICATION=false` to restore the prior ranking.
 - A **citation** is built purely from the matched chunk's own returned
   fields — `chunk_id`, `document_id`, `content`, `start_char`/`end_char`,
   `score`, `source_uri` (`services/inh-public-api-svc/src/services/search.py:602-616`)

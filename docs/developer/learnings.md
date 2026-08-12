@@ -10,6 +10,62 @@ this file — read the matching entry before touching the related area. Add an
 entry when a shipped defect teaches something a rule alone can't carry: one
 entry per root cause, newest first.
 
+## #237 — A quality gate whose tolerance is finer than its corpus's resolution reports noise as regression (2026-08-12)
+
+**What happened.** The compose retrieval-eval hard gate failed every push and
+nightly on `main` for three days on one metric: `keyword.mrr` 0.8205 → 0.7821.
+Eight of the nine gated metrics were flat or improved in the same run —
+`recall@5` up 0.038 to 0.077 across all three modes, `nDCG@5` up in all three.
+A net quality improvement was holding `main` red.
+
+**Why it could not self-clear.** Three properties compounded, none wrong on
+its own:
+
+1. **The tolerance was finer than the measurement's resolution.**
+   `EVAL_GATE_TOLERANCE` is 0.02, but with 13 scored golden queries the
+   *smallest possible* MRR move — one query slipping from rank 1 to rank 2 —
+   is `0.5/13 = 0.0385`. The gate was mathematically incapable of passing any
+   single rank slip. It could not distinguish "one document moved one
+   position" from "retrieval regressed", because at that corpus size those
+   two produce overlapping numbers.
+2. **The ratchet was one-sided.** `ratchet_baseline()` is
+   `max(current, baseline)`, so the baseline can only move up. A deliberate,
+   net-positive trade-off has no automated path in, and no structured place to
+   record its justification. The only exit was a human editing JSON.
+3. **The gate was advisory, not blocking.** The regression *was* detected
+   pre-merge on the feature branch and filed as #200. The branch merged
+   anyway — `integration.yml` runs post-merge on `main` and files an issue
+   rather than blocking. A correct signal that nothing consumes is not a gate.
+
+**The lesson.** Before setting a threshold on an aggregate metric, compute the
+metric's **quantum** — the smallest change a single observation can produce —
+and make sure the threshold is coarser than it. `mean of N` over a small N is
+a step function, not a continuous quantity: for MRR the step is `0.5/N` for a
+rank-1→rank-2 flip, `1/N` for a hit dropping out entirely. A threshold below
+the step size guarantees the gate fires on the smallest possible real
+movement, which is indistinguishable from noise at that resolution. Derive the
+tolerance from N rather than hardcoding it, so it tightens automatically as
+the corpus grows.
+
+The corollary for ratchets: a monotonic ratchet encodes "quality only ever
+improves", which is false whenever a change trades one metric for several
+others. Pair every one-sided ratchet with a governed way down that **requires
+a written reason** — otherwise the escape hatch is an unreviewed hand-edit,
+and the reasoning that justified it lives nowhere.
+
+**Also seen here.** `docs/architecture/overview.md` described
+`enable_diversification` as "default off" for six days after the default
+flipped to `True`, so the published answer contradicted the behavior CI was
+measuring. A settings default that appears in prose needs the same
+code-derived assertion as a generated table
+(`tests/unit/test_diversification_docs_contract.py`, same pattern as #117's
+`test_docs_sync.py`) — with decision records excluded, since an ADR must be
+free to narrate both polarities of a decision it later amended.
+
+**Fixed by.** #237 re-seeded the baseline and pinned the docs claim; #236
+tracks the three structural fixes (derived tolerance, `reseed --reason`
+subcommand, path-filtered required check on ranking-affecting PRs).
+
 ## #225 — A green test suite says nothing about the image when the two resolve dependencies differently (2026-08-09)
 
 **What happened.** The integration workflow went red on `main` with no code

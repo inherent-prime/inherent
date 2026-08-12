@@ -439,6 +439,24 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Fixed
 
+- **Retrieval-eval baseline re-seeded to the shipped diversification default,
+  unblocking `main` (#237, #146).** The compose retrieval-eval hard gate had
+  failed every push and nightly on `main` since sha `edd9f0c`, on one metric:
+  `keyword.mrr` 0.8205 → 0.7821. ADR 0004's 2026-08-06 amendment deliberately
+  left `corpus/retrieval_baseline.json` at flag-**off** numbers so CI would
+  judge the flag-**on** default (#146) together with format-aware chunking
+  (#129) on its own merits. That verdict came back bit-identical on two runs:
+  eight of nine gated metrics flat or improved (recall@5 +0.038 semantic and
+  hybrid, +0.077 keyword; nDCG@5 up in all three modes; `multi_doc_crowding`
+  recall 0.5 → 1.0) and one regressed by exactly 0.5/13 — a single golden
+  query whose judged-relevant document moved from rank 1 to rank 2 in keyword
+  mode. The baseline now records the flag-on measurement. No behavior change:
+  `Settings.enable_diversification` has defaulted to `True` since 2026-08-06,
+  and the ranking code is untouched. The gate's own resolution limit — a 0.02
+  tolerance is finer than the 0.0385 minimum single-query MRR step on a
+  13-query corpus, so the automated `max(current, baseline)` ratchet can never
+  express this trade — is tracked in #236.
+
 - **Service images ignored `uv.lock` and shipped a different dependency set
   than CI tested (#226, #225).** Both service Dockerfiles installed with
   `uv pip install --system [-e] .`, which ignores the lockfile and re-resolves
