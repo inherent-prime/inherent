@@ -1,4 +1,4 @@
-"""Compensating-write retry for document state (#99).
+"""Compensating-write retry for document and chunk state (#99 / #133).
 
 A state write followed by a publish (or any second fallible step) needs a
 compensating mark-failed path (CLAUDE.md defect prevention). #99: the
@@ -8,12 +8,15 @@ told 'failed', with nothing to find or reconcile the divergence.
 
 Every compensation site (upload intake, REST refresh, MCP refresh) must route
 through :func:`mark_document_failed_with_retry` instead of calling
-``database.mark_document_failed`` bare inside an ``except`` block. The helper
-retries transient failures with exponential backoff; when retries are
-exhausted it makes the orphan loud — a CRITICAL log carrying the document id
-plus a bump of ``document_compensation_exhausted_total`` — and reports the
-outcome to the caller instead of raising (the caller is already on a failure
-path and must still return its error response).
+``database.mark_document_failed`` bare inside an ``except`` block. Chunk
+create rollback (PG insert succeeded, vector write failed) must route through
+:func:`delete_chunk_with_retry` instead of a bare ``delete_document_chunk``.
+
+The helpers retry transient failures with exponential backoff; when retries
+are exhausted they make the orphan loud — a CRITICAL log plus a bump of
+``document_compensation_exhausted_total`` — and report the outcome to the
+caller instead of raising (the caller is already on a failure path and must
+still return its error response).
 """
 
 import asyncio
@@ -82,6 +85,116 @@ async def mark_document_failed_with_retry(
                     error=str(exc),
                     document_id=document_id,
                     workspace_id=workspace_id,
+                    operation=operation,
+                    attempts=attempts,
+                )
+                record_compensation_exhausted(operation)
+    return False
+
+
+async def delete_chunk_with_retry(
+    database: DatabaseService,
+    document_id: str,
+    workspace_id: str,
+    chunk_index: int,
+    *,
+    operation: str,
+    attempts: int = MARK_FAILED_ATTEMPTS,
+    backoff_seconds: float = MARK_FAILED_BACKOFF_SECONDS,
+) -> bool:
+    """Delete a single chunk row, retrying transient failures with backoff (#133).
+
+    Used when a chunk Create's PG insert succeeded but the Weaviate upsert
+    failed: compensate by removing the orphan PG row so stores do not diverge.
+    ``None`` from ``delete_document_chunk`` (row already gone) counts as
+    success — compensation is idempotent.
+
+    Args:
+        database: Database service that owns ``delete_document_chunk``.
+        document_id: Parent document id.
+        workspace_id: Workspace scoping the row.
+        chunk_index: Stable index of the chunk to remove (Option A gaps OK).
+        operation: Metric label (e.g. ``chunk_create_vector_rollback``).
+        attempts: Total attempts before declaring exhaustion.
+        backoff_seconds: Base delay, doubled after each failed attempt.
+
+    Returns:
+        True when the delete landed or the row was already absent; False when
+        every attempt raised. On False the PG row may still exist without a
+        vector — CRITICAL log + exhaustion metric are the operator signal.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            await database.delete_document_chunk(document_id, workspace_id, chunk_index)
+            return True
+        except Exception as exc:
+            if attempt < attempts:
+                logger.warning(
+                    "Compensating chunk delete failed; retrying",
+                    error=str(exc),
+                    document_id=document_id,
+                    chunk_index=chunk_index,
+                    operation=operation,
+                    attempt=attempt,
+                    attempts=attempts,
+                )
+                await asyncio.sleep(backoff_seconds * 2 ** (attempt - 1))
+            else:
+                logger.critical(
+                    "Compensation exhausted — chunk PG row may lack a vector; "
+                    "manual reconciliation required",
+                    error=str(exc),
+                    document_id=document_id,
+                    workspace_id=workspace_id,
+                    chunk_index=chunk_index,
+                    operation=operation,
+                    attempts=attempts,
+                )
+                record_compensation_exhausted(operation)
+    return False
+
+
+async def restore_chunk_content_with_retry(
+    database: DatabaseService,
+    document_id: str,
+    workspace_id: str,
+    chunk_index: int,
+    content: str,
+    *,
+    operation: str,
+    attempts: int = MARK_FAILED_ATTEMPTS,
+    backoff_seconds: float = MARK_FAILED_BACKOFF_SECONDS,
+) -> bool:
+    """Restore a chunk's prior PG content after a failed vector update (#133).
+
+    Same retry + loud-exhaustion pattern as :func:`delete_chunk_with_retry`.
+    ``None`` from ``update_document_chunk`` (row gone) counts as success —
+    nothing left to restore.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            await database.update_document_chunk(document_id, workspace_id, chunk_index, content)
+            return True
+        except Exception as exc:
+            if attempt < attempts:
+                logger.warning(
+                    "Compensating chunk content restore failed; retrying",
+                    error=str(exc),
+                    document_id=document_id,
+                    chunk_index=chunk_index,
+                    operation=operation,
+                    attempt=attempt,
+                    attempts=attempts,
+                )
+                await asyncio.sleep(backoff_seconds * 2 ** (attempt - 1))
+            else:
+                logger.critical(
+                    "Compensation exhausted — chunk PG content may diverge from "
+                    "vector; manual reconciliation required",
+                    error=str(exc),
+                    document_id=document_id,
+                    workspace_id=workspace_id,
+                    chunk_index=chunk_index,
                     operation=operation,
                     attempts=attempts,
                 )

@@ -1056,3 +1056,148 @@ class TestExpiredKeyDispatcherParity:
         result = await _call_mcp_tool("list_documents", {"api_key": "ink_k"}, db)
 
         assert "Error" not in result[0].text
+
+
+# ---------------------------------------------------------------------------
+# Chunk CRUD (#133): vector-store failure parity REST ↔ MCP
+# ---------------------------------------------------------------------------
+
+
+def _sample_chunk(chunk_index: int = 0, content: str = "text"):
+    from src.models.document import DocumentChunk
+
+    return DocumentChunk(
+        id="10",
+        document_id="doc-1",
+        content=content,
+        chunk_index=chunk_index,
+        token_count=1,
+        metadata={"content_hash": "h"},
+    )
+
+
+class TestChunkCreateVectorDownParity:
+    """REST create returns 503 after compensating PG delete (Sprint 2 unit
+    tests). MCP must surface Error and roll back the appended row."""
+
+    async def test_mcp_create_vector_down_compensates_pg_row(self):
+        db = _mock_db()
+        db.append_document_chunk = AsyncMock(return_value=_sample_chunk(4, "new"))
+        db.delete_document_chunk = AsyncMock(return_value=_sample_chunk(4, "new"))
+        failing_search = AsyncMock()
+        failing_search.upsert_chunk_vector = AsyncMock(side_effect=RuntimeError("weaviate down"))
+
+        with patch(
+            "src.services.chunk_writes.get_search_service",
+            new=AsyncMock(return_value=failing_search),
+        ):
+            result = await _call_mcp_tool(
+                "create_chunk",
+                {"api_key": "ink_k", "document_id": "doc-1", "content": "new"},
+                db,
+            )
+
+        assert "Error" in result[0].text
+        db.delete_document_chunk.assert_awaited_once_with("doc-1", WS, 4)
+
+    async def test_rest_create_vector_down_returns_503(self):
+        key = _write_key()
+        db = _mock_db()
+        application = create_app()
+        application.dependency_overrides[resolve_workspace_write] = lambda: ResolvedAuth(
+            key_info=key, workspace_id=WS
+        )
+        application.dependency_overrides[get_database] = lambda: db
+        try:
+            with patch(
+                "src.api.v1.chunks.create_chunk_everywhere",
+                AsyncMock(side_effect=RuntimeError("weaviate down")),
+            ):
+                transport = ASGITransport(app=application)
+                async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                    response = await ac.post(
+                        "/v1/chunks/doc-1",
+                        headers={"X-API-Key": "ink_test"},
+                        json={"content": "new"},
+                    )
+        finally:
+            application.dependency_overrides.clear()
+
+        assert response.status_code == 503
+
+
+class TestChunkUpdateVectorDownParity:
+    async def test_mcp_update_vector_down_restores_prior_content(self):
+        db = _mock_db()
+        prior = _sample_chunk(1, "old")
+        updated = _sample_chunk(1, "new")
+        updated.metadata = {"content_hash": "nh"}
+        db.get_document_chunk_by_index = AsyncMock(return_value=prior)
+        db.update_document_chunk = AsyncMock(side_effect=[updated, prior])
+        failing_search = AsyncMock()
+        failing_search.upsert_chunk_vector = AsyncMock(side_effect=RuntimeError("embed fail"))
+
+        with patch(
+            "src.services.chunk_writes.get_search_service",
+            new=AsyncMock(return_value=failing_search),
+        ):
+            result = await _call_mcp_tool(
+                "edit_chunk",
+                {
+                    "api_key": "ink_k",
+                    "document_id": "doc-1",
+                    "chunk_index": 1,
+                    "content": "new",
+                },
+                db,
+            )
+
+        assert "Error" in result[0].text
+        assert db.update_document_chunk.await_count == 2
+        assert db.update_document_chunk.await_args_list[1].args[3] == "old"
+
+
+class TestChunkDeleteVectorDownParity:
+    async def test_mcp_delete_vector_down_leaves_pg_intact(self):
+        db = _mock_db()
+        db.get_document_chunk_by_index = AsyncMock(return_value=_sample_chunk(2))
+        db.delete_document_chunk = AsyncMock()
+        failing_search = AsyncMock()
+        failing_search.delete_chunk_vector = AsyncMock(side_effect=RuntimeError("weaviate down"))
+
+        with patch(
+            "src.services.chunk_writes.get_search_service",
+            new=AsyncMock(return_value=failing_search),
+        ):
+            result = await _call_mcp_tool(
+                "delete_chunk",
+                {"api_key": "ink_k", "document_id": "doc-1", "chunk_index": 2},
+                db,
+            )
+
+        assert "Error" in result[0].text
+        db.delete_document_chunk.assert_not_awaited()
+
+    async def test_rest_delete_vector_down_returns_503(self):
+        key = _write_key()
+        db = _mock_db()
+        application = create_app()
+        application.dependency_overrides[resolve_workspace_write] = lambda: ResolvedAuth(
+            key_info=key, workspace_id=WS
+        )
+        application.dependency_overrides[get_database] = lambda: db
+        try:
+            with patch(
+                "src.api.v1.chunks.delete_chunk_everywhere",
+                AsyncMock(side_effect=RuntimeError("weaviate down")),
+            ):
+                transport = ASGITransport(app=application)
+                async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                    response = await ac.delete(
+                        "/v1/chunks/doc-1/2",
+                        headers={"X-API-Key": "ink_test"},
+                    )
+        finally:
+            application.dependency_overrides.clear()
+
+        assert response.status_code == 503

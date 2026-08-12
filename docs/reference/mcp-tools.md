@@ -29,10 +29,10 @@ claude mcp add --transport http inherent https://api.inherent.sh/mcp \
   a tool argument removes that surface entirely. Missing/invalid/expired
   keys get the same 401 REST returns, before any JSON-RPC request is even
   parsed.
-- **Tool surface: 10, not 13.** `verify_claim`, `search_memory`, and
+- **Tool surface: 13, not 16.** `verify_claim`, `search_memory`, and
   `get_citations` are not advertised and cannot be called by name over HTTP
   (see [Surface difference](#surface-difference-http-vs-stdio) below) —
-  unchanged on stdio.
+  unchanged on stdio. `report_feedback` is also HTTP-excluded.
 - Rides the REST app's existing middleware stack — CORS, security headers,
   audit logging, and **rate limiting** all apply to `/mcp` the same way they
   apply to `/v1/*`, by construction (no second copy to keep in sync).
@@ -58,21 +58,22 @@ claude mcp add --transport http inherent https://api.inherent.sh/mcp \
   exactly its one workspace — a `workspace_id` naming any other workspace
   is rejected, even one the key's owner also owns. A user-scoped key
   (`workspace_id` unset on the key) may use any workspace its owner owns.
-- **All 13 tools** are advertised and callable, including the 3 excluded
+- **All 16 tools** are advertised and callable, including the tools excluded
   from HTTP (below) — unaffected by the HTTP transport's existence.
 
 ## Surface difference: HTTP vs stdio
 
 | | stdio | Streamable HTTP |
 | --- | --- | --- |
-| Tool count | 13 | 10 |
+| Tool count | 16 | 13 |
 | API key | `api_key` schema argument | `X-API-Key` / `Authorization` header |
 | `verify_claim` | ✅ | ❌ excluded |
 | `search_memory` | ✅ | ❌ excluded |
 | `get_citations` | ✅ | ❌ excluded |
+| `report_feedback` | ✅ | ❌ excluded |
 | Tool error shape | prose `TextContent`, `isError: false` | `isError: true` + `error_class` |
 
-Three tools are excluded from HTTP (`ToolDef.http_exposed = False` in the
+Four tools are excluded from HTTP (`ToolDef.http_exposed = False` in the
 registry — the exclusion is data on the tool's own entry, not a second
 name list maintained separately):
 
@@ -90,14 +91,16 @@ name list maintained separately):
 - **`get_citations`** — same parameters and endpoint as `search_documents`,
   whose results already carry a full `citation` object per result
   (`chunk_id`, `document_name`, `content`, `start_char`, `end_char`).
+- **`report_feedback`** — stdio/REST-only (not part of issue #220's original
+  HTTP list).
 
 ## Tools
 
-The full, stdio-side catalogue (all 13 tools). The **HTTP** column marks
+The full, stdio-side catalogue (all 16 tools). The **HTTP** column marks
 whether a tool is also on the Streamable HTTP surface (see
 [Surface difference](#surface-difference-http-vs-stdio) above) —
 `report_feedback` is stdio/REST-only too (not part of the issue #220's
-10-tool HTTP list; a pending decision, not a permanent exclusion). On
+original 10-tool HTTP list; a pending decision, not a permanent exclusion). On
 stdio every tool requires `api_key` (string) as a schema argument; on HTTP
 the key is a header and `api_key` never appears in the schema. Additional
 parameters below.
@@ -118,7 +121,7 @@ parameters below.
 | --- | --- | --- | --- | --- |
 | `list_documents` | ✅ | `workspace_id`, `page` (1), `page_size` (20) | Paginated document listing | `GET /v1/documents` |
 | `get_document` | ✅ | `document_id` (required) | Single document's metadata | `GET /v1/documents/{id}` |
-| `list_chunks` | ✅ | `document_id` (required) | All chunks for a document | `GET /v1/chunks/{document_id}` |
+| `list_chunks` | ✅ | `document_id` (required) | All chunks for a document. `chunk_index` may have gaps after deletes (#133 Option A) | `GET /v1/chunks/{document_id}` |
 | `get_document_context` | ✅ | `document_id` (required); `max_chars` (default 20,000, capped at 100,000), `offset` (default 0) | Bounded window of chunk text + metadata header, capped at `max_chars` (#219: an uncapped call used to be able to exhaust an agent's own context window). Structured JSON block carries `truncated`, `total_chars`, `offset`, `next_offset` — if `truncated` is `true`, re-call with `offset=next_offset` for the rest | `GET /v1/chunks/{document_id}/context` |
 | `verify_claim` | ❌ | `claim` (required); `evidence[]` | Offline lexical claim-vs-evidence support scoring | `POST /v1/verify-claim` |
 | `explain_lineage` | ✅ | `document_id` (required); `chunk_id` | Provenance + freshness for a document or chunk | `GET /v1/documents/{id}/lineage` |
@@ -128,6 +131,9 @@ parameters below.
 | Tool | HTTP | Parameters | Purpose | REST twin |
 | --- | --- | --- | --- | --- |
 | `upload_document` | ✅ | `filename`, `content` (required); `content_type` (optional — omit it: derived from `filename`'s extension, see below), `workspace_id` | **Text-only** ingestion sharing REST's validate/dedup/store/enqueue pipeline. Binary formats (PDF/DOCX/PNG) and JSON are REST-only — use `POST /v1/documents`. If the key owns several workspaces, `workspace_id` is required | `POST /v1/documents` |
+| `create_chunk` | ✅ | `document_id`, `content` (required) | Append a chunk at `max(chunk_index)+1`; PG then Weaviate (compensated on vector failure) | `POST /v1/chunks/{document_id}` |
+| `edit_chunk` | ✅ | `document_id`, `chunk_index`, `content` (required) | Edit by stable `chunk_index`; re-embeds. Vector failure restores prior PG content | `PATCH /v1/chunks/{document_id}/{chunk_index}` |
+| `delete_chunk` | ✅ | `document_id`, `chunk_index` (required) | Hard-delete one chunk (vector first); leaves gaps | `DELETE /v1/chunks/{document_id}/{chunk_index}` |
 | `delete_document` | ✅ | `document_id` (required) | Permanently delete document + vectors + chunks + stored bytes | `DELETE /v1/documents/{id}` |
 | `refresh_stale_source` | ✅ | `document_id` (required) | Re-enqueue an uploaded document to clear staleness; on MQ failure a retried best-effort compensation marks it `failed`, matching REST (see the REST reference for exhaustion behavior) | `POST /v1/documents/{id}/refresh` |
 
@@ -164,7 +170,8 @@ reintroduced through the schema). Omit the field; do not pass
 - Permissions are exact membership, same as REST: `write` does not imply
   `read` or `search`.
 - Document-scoped tools (`get_document`, `list_chunks`, `explain_lineage`,
-  `delete_document`, `refresh_stale_source`, `get_document_context`) answer a
+  `create_chunk`, `edit_chunk`, `delete_chunk`, `delete_document`,
+  `refresh_stale_source`, `get_document_context`) answer a
   document id that doesn't exist and one that exists in a workspace you
   aren't authorized for with the SAME `Error: Document '<id>' not found` —
   matching REST's undifferentiated `404` (#138). Do not rely on distinguishing

@@ -50,6 +50,9 @@ TOOL_SPEC: dict[str, dict] = {
     "delete_document": {"required": ["api_key", "document_id"]},
     "get_document": {"required": ["api_key", "document_id"]},
     "list_chunks": {"required": ["api_key", "document_id"]},
+    "create_chunk": {"required": ["api_key", "document_id", "content"]},
+    "edit_chunk": {"required": ["api_key", "document_id", "chunk_index", "content"]},
+    "delete_chunk": {"required": ["api_key", "document_id", "chunk_index"]},
     "upload_document": {"required": ["api_key", "filename", "content"]},
 }
 
@@ -68,6 +71,9 @@ _PERMISSION: dict[str, str] = {
     "delete_document": "write",
     "get_document": "read",
     "list_chunks": "read",
+    "create_chunk": "write",
+    "edit_chunk": "write",
+    "delete_chunk": "write",
     "upload_document": "write",
 }
 
@@ -94,6 +100,9 @@ _TOOL_ARGS: dict[str, dict] = {
     "delete_document": {"document_id": "doc-1"},
     "get_document": {"document_id": "doc-1"},
     "list_chunks": {"document_id": "doc-1"},
+    "create_chunk": {"document_id": "doc-1", "content": "new chunk text"},
+    "edit_chunk": {"document_id": "doc-1", "chunk_index": 0, "content": "edited"},
+    "delete_chunk": {"document_id": "doc-1", "chunk_index": 0},
     "upload_document": {"filename": "notes.md", "content": "# hello world"},
 }
 
@@ -271,6 +280,20 @@ class TestToolOutputType:
         db.delete_document = AsyncMock(
             return_value={"document_id": "doc-1", "chunk_count": 3, "size_bytes": 2048}
         )
+        from src.models.document import DocumentChunk
+
+        sample_chunk = DocumentChunk(
+            id="1",
+            document_id="doc-1",
+            content="chunk text",
+            chunk_index=0,
+            token_count=2,
+            metadata={"content_hash": "abc"},
+        )
+        db.append_document_chunk = AsyncMock(return_value=sample_chunk)
+        db.update_document_chunk = AsyncMock(return_value=sample_chunk)
+        db.get_document_chunk_by_index = AsyncMock(return_value=sample_chunk)
+        db.delete_document_chunk = AsyncMock(return_value=sample_chunk)
 
         from src.models.search import SearchResponse
 
@@ -285,6 +308,8 @@ class TestToolOutputType:
             )
         )
         search.delete_document_vectors = AsyncMock(return_value=3)
+        search.upsert_chunk_vector = AsyncMock(return_value=None)
+        search.delete_chunk_vector = AsyncMock(return_value=None)
         mq = AsyncMock()
         mq.publish = AsyncMock(return_value=None)
         storage = MagicMock()
@@ -311,6 +336,11 @@ class TestToolOutputType:
             patch(
                 "src.services.deletion.get_storage_service",
                 new=MagicMock(return_value=storage),
+            ),
+            # chunk CRUD (#133) reaches Weaviate through chunk_writes.
+            patch(
+                "src.services.chunk_writes.get_search_service",
+                new=AsyncMock(return_value=search),
             ),
             # upload_document reaches storage/MQ through the shared
             # document_intake service (same one REST uses, #87 Task 3).

@@ -79,7 +79,10 @@ The MCP server uses stdio rather than an HTTP transport in the current implement
 | `/v1/documents/{id}/lineage` | `GET` | Explain a document's (or chunk's) provenance and freshness |
 | `/v1/verify-claim` | `POST` | Verify a claim against supplied evidence passages |
 | `/v1/chunks/{doc_id}` | `GET` | List chunks for a document |
+| `/v1/chunks/{doc_id}` | `POST` | Append a chunk (`max(chunk_index)+1`) |
 | `/v1/chunks/{doc_id}/{chunk_id}` | `GET` | Fetch a single chunk by id |
+| `/v1/chunks/{doc_id}/{chunk_index}` | `PATCH` | Edit a chunk by stable index (re-embeds) |
+| `/v1/chunks/{doc_id}/{chunk_index}` | `DELETE` | Hard-delete one chunk (gaps allowed) |
 | `/v1/chunks/{doc_id}/context` | `GET` | Reconstruct document context from chunks |
 | `/v1/evals/feedback` | `POST` | Report a verdict on a captured search event; auto-promotes to a labeled eval case |
 | `/v1/evals/scorecard` | `GET` | Workspace retrieval scorecard (answer rate, corpus gaps, labeled-case count) |
@@ -100,6 +103,9 @@ The MCP server uses stdio rather than an HTTP transport in the current implement
 | `get_document_context` | Retrieve the full content of a document |
 | `list_documents` | List accessible documents |
 | `list_chunks` | List a document's chunks |
+| `create_chunk` | Append a chunk (`max(chunk_index)+1`) |
+| `edit_chunk` | Edit a chunk by stable `chunk_index` (re-embeds) |
+| `delete_chunk` | Hard-delete one chunk (gaps allowed) |
 | `upload_document` | Ingest a text document (markdown/plain text); binary formats stay REST-only |
 | `verify_claim` | Verify a claim against supplied evidence passages |
 | `explain_lineage` | Explain a document's (or chunk's) provenance and freshness |

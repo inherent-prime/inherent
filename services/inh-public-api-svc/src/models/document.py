@@ -44,6 +44,12 @@ class DocumentChunk(BaseModel):
     metadata: dict | None = None
 
 
+class ChunkContentRequest(BaseModel):
+    """Body for Create / Update chunk (#133)."""
+
+    content: str
+
+
 class DocumentListResponse(BaseModel):
     """Response for listing documents."""
 

@@ -74,8 +74,17 @@ retrieval — see [Keeping content current](../keeping-content-current.md).
 | Method | Path | Permission | Purpose |
 | --- | --- | --- | --- |
 | GET | `/v1/chunks/{document_id}` | `read` | All chunks (`content`, `chunk_index`, `token_count`, `metadata`) — unbounded, unlike `/context` below |
+| POST | `/v1/chunks/{document_id}` | `write` | Append one chunk at `max(chunk_index)+1` (#133 Option A). Body: `{"content": "..."}`. Returns the new `DocumentChunk` (`201`) |
 | GET | `/v1/chunks/{document_id}/context` | `read` | Document metadata + a bounded window of chunks + combined `full_text`. Query: `max_chars` (1–100,000, default 20,000), `offset` (chars, default 0). Response adds `truncated`, `total_chars`, `offset`, `next_offset` — see below |
-| GET | `/v1/chunks/{document_id}/{chunk_id}` | `read` | Single chunk. Cross-tenant chunk reads as `404` |
+| GET | `/v1/chunks/{document_id}/{chunk_id}` | `read` | Single chunk by BIGSERIAL `id`. Cross-tenant chunk reads as `404` |
+| PATCH | `/v1/chunks/{document_id}/{chunk_index}` | `write` | Edit chunk by stable `chunk_index` — PG update + Weaviate re-embed with new vector. Body: `{"content": "..."}` |
+| DELETE | `/v1/chunks/{document_id}/{chunk_index}` | `write` | Hard-delete one chunk (Weaviate first, then PG). Leaves gaps; no sibling re-index. `204` |
+
+**Ordering contract (#133 Option A):** `chunk_index` is a **stable id**, not a
+dense `0..N` sequence. Create always appends at `max+1`; Delete hard-deletes
+and leaves gaps. Mid-document insert is out of scope. Vector-store failure on
+Create/Update/Delete returns `503` after compensation (Create rolls back the
+PG row; Update restores prior content; Delete leaves the PG row intact).
 
 `GET /v1/chunks/{document_id}/context` bounds BOTH `full_text` and `chunks`
 to the same `[offset, offset + max_chars)` window over the document's

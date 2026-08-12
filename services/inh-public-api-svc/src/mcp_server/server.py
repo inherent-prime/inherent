@@ -999,6 +999,108 @@ async def _handle_list_chunks(key_info: APIKeyInfo, arguments: dict) -> list[Tex
     return _structured(f"{len(chunks)} chunks for document '{document.id}'", payload)
 
 
+async def _handle_create_chunk(key_info: APIKeyInfo, arguments: dict) -> list[TextContent]:
+    """Append a chunk — same as POST /v1/chunks/{document_id} (#133)."""
+    document_id = arguments.get("document_id", "")
+    content = arguments.get("content")
+    if not document_id:
+        return [TextContent(type="text", text="Error: Document ID is required")]
+    if content is None or content == "":
+        return [TextContent(type="text", text="Error: content is required")]
+
+    document, _, error = await _resolve_document_for_user(key_info, document_id)
+    if error:
+        return [TextContent(type="text", text=error)]
+
+    from src.services.chunk_writes import create_chunk_everywhere
+
+    database = await get_database()
+    outcome = await create_chunk_everywhere(
+        database, document_id, document.workspace_id, str(content)
+    )
+    if not outcome.found or outcome.chunk is None:
+        return [TextContent(type="text", text=f"Error: Document '{document_id}' not found")]
+
+    return _structured(
+        f"Created chunk {outcome.chunk.chunk_index} on document '{document_id}'.",
+        outcome.chunk.model_dump(),
+    )
+
+
+async def _handle_edit_chunk(key_info: APIKeyInfo, arguments: dict) -> list[TextContent]:
+    """Edit a chunk by chunk_index — same as PATCH /v1/chunks/... (#133)."""
+    document_id = arguments.get("document_id", "")
+    content = arguments.get("content")
+    chunk_index = arguments.get("chunk_index")
+    if not document_id:
+        return [TextContent(type="text", text="Error: Document ID is required")]
+    if chunk_index is None:
+        return [TextContent(type="text", text="Error: chunk_index is required")]
+    if content is None or content == "":
+        return [TextContent(type="text", text="Error: content is required")]
+
+    try:
+        chunk_index_int = int(chunk_index)
+    except (TypeError, ValueError):
+        return [TextContent(type="text", text="Error: chunk_index must be an integer")]
+
+    document, _, error = await _resolve_document_for_user(key_info, document_id)
+    if error:
+        return [TextContent(type="text", text=error)]
+
+    from src.services.chunk_writes import update_chunk_everywhere
+
+    database = await get_database()
+    outcome = await update_chunk_everywhere(
+        database, document_id, document.workspace_id, chunk_index_int, str(content)
+    )
+    if not outcome.found or outcome.chunk is None:
+        return [TextContent(type="text", text="Error: Chunk not found")]
+
+    return _structured(
+        f"Updated chunk {chunk_index_int} on document '{document_id}'.",
+        outcome.chunk.model_dump(),
+    )
+
+
+async def _handle_delete_chunk(key_info: APIKeyInfo, arguments: dict) -> list[TextContent]:
+    """Hard-delete a chunk — same as DELETE /v1/chunks/... (#133 Option A)."""
+    document_id = arguments.get("document_id", "")
+    chunk_index = arguments.get("chunk_index")
+    if not document_id:
+        return [TextContent(type="text", text="Error: Document ID is required")]
+    if chunk_index is None:
+        return [TextContent(type="text", text="Error: chunk_index is required")]
+
+    try:
+        chunk_index_int = int(chunk_index)
+    except (TypeError, ValueError):
+        return [TextContent(type="text", text="Error: chunk_index must be an integer")]
+
+    document, _, error = await _resolve_document_for_user(key_info, document_id)
+    if error:
+        return [TextContent(type="text", text=error)]
+
+    from src.services.chunk_writes import delete_chunk_everywhere
+
+    database = await get_database()
+    outcome = await delete_chunk_everywhere(
+        database, document_id, document.workspace_id, chunk_index_int
+    )
+    if not outcome.found:
+        return [TextContent(type="text", text="Error: Chunk not found")]
+
+    payload = {
+        "document_id": document_id,
+        "chunk_index": chunk_index_int,
+        "deleted": True,
+    }
+    return _structured(
+        f"Deleted chunk {chunk_index_int} from document '{document_id}'.",
+        payload,
+    )
+
+
 async def _resolve_single_workspace_for_upload(
     key_info: APIKeyInfo, requested_workspace_id: str | None
 ) -> tuple[str | None, str | None]:
@@ -1405,8 +1507,8 @@ _TOOLS: dict[str, ToolDef] = {
     ),
     "list_chunks": ToolDef(
         description="List all chunks belonging to a document (id, content, chunk_index, "
-        "token_count) — same data as GET /v1/chunks/{document_id}. Requires 'read' "
-        "permission.",
+        "token_count) — same data as GET /v1/chunks/{document_id}. chunk_index may have "
+        "gaps after deletes (#133 Option A). Requires 'read' permission.",
         input_schema={
             "type": "object",
             "properties": {
@@ -1420,6 +1522,79 @@ _TOOLS: dict[str, ToolDef] = {
         },
         permission="read",
         handler=_handle_list_chunks,
+    ),
+    "create_chunk": ToolDef(
+        description="Append a chunk to a document at max(chunk_index)+1 (#133 Option A) — "
+        "same as POST /v1/chunks/{document_id}. Writes PostgreSQL then Weaviate with a "
+        "fresh embedding; vector failure rolls the PG row back. chunk_index is a stable "
+        "id (gaps allowed after deletes). Requires 'write' permission.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "api_key": {"type": "string", "description": "Your Inherent API key"},
+                "document_id": {
+                    "type": "string",
+                    "description": "The document ID to append a chunk to",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Chunk text content",
+                },
+            },
+            "required": ["api_key", "document_id", "content"],
+        },
+        permission="write",
+        handler=_handle_create_chunk,
+    ),
+    "edit_chunk": ToolDef(
+        description="Edit one chunk by stable chunk_index (#133) — same as PATCH "
+        "/v1/chunks/{document_id}/{chunk_index}. Recomputes content_hash/token_count and "
+        "re-embeds in Weaviate; vector failure restores prior PG content. Requires "
+        "'write' permission.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "api_key": {"type": "string", "description": "Your Inherent API key"},
+                "document_id": {
+                    "type": "string",
+                    "description": "The document ID that owns the chunk",
+                },
+                "chunk_index": {
+                    "type": "integer",
+                    "description": "Stable chunk_index (not the BIGSERIAL id; gaps OK)",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Replacement chunk text",
+                },
+            },
+            "required": ["api_key", "document_id", "chunk_index", "content"],
+        },
+        permission="write",
+        handler=_handle_edit_chunk,
+    ),
+    "delete_chunk": ToolDef(
+        description="Hard-delete one chunk by stable chunk_index (#133 Option A) — same "
+        "as DELETE /v1/chunks/{document_id}/{chunk_index}. Deletes the Weaviate object "
+        "first, then the PG row (gaps left; no sibling re-index). Vector failure leaves "
+        "the row intact. Requires 'write' permission.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "api_key": {"type": "string", "description": "Your Inherent API key"},
+                "document_id": {
+                    "type": "string",
+                    "description": "The document ID that owns the chunk",
+                },
+                "chunk_index": {
+                    "type": "integer",
+                    "description": "Stable chunk_index to delete (gaps OK)",
+                },
+            },
+            "required": ["api_key", "document_id", "chunk_index"],
+        },
+        permission="write",
+        handler=_handle_delete_chunk,
     ),
     "upload_document": ToolDef(
         # Deliberately does NOT repeat the full type list here (that copy

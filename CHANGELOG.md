@@ -7,6 +7,16 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Added
 
+- **Chunk CRUD on public-API REST + MCP (#133).** Agents can append, edit, and
+  hard-delete individual chunks on both surfaces: `POST` /
+  `PATCH` / `DELETE /v1/chunks/...` and MCP `create_chunk` / `edit_chunk` /
+  `delete_chunk` (write permission). Ordering is Option A — append at
+  `max(chunk_index)+1`, delete leaves gaps (`chunk_index` is a stable id).
+  Writes run synchronously in public-api (PG + Weaviate with embedding);
+  vector failure compensates (Create rolls back PG; Update restores prior
+  content; Delete aborts before PG). Failure parity pinned in
+  `test_failure_parity.py`.
+
 - **Streamable HTTP transport for the MCP server (#220).** The same
   `_TOOLS` registry stdio serves is now mounted at `POST /mcp` inside
   `inh-public-api-svc` — same process, same port, same middleware stack as

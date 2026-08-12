@@ -3,11 +3,11 @@
 Covers the acceptance criteria on the HTTP surface mounted at ``POST /mcp``
 inside this service's existing FastAPI app (``src/mcp_server/http_transport.py``):
 
-- **Schema**: exactly the 10 documented tools are advertised; the 3 the issue
-  excludes (``verify_claim`` / ``search_memory`` / ``get_citations``) --
-  plus ``report_feedback``, excluded by the same "10, not 13" intent -- are
-  absent from HTTP but UNCHANGED on stdio. No HTTP schema mentions
-  ``api_key`` anywhere.
+- **Schema**: exactly the documented HTTP-exposed tools are advertised; the
+  tools excluded via ``ToolDef.http_exposed=False``
+  (``verify_claim`` / ``search_memory`` / ``get_citations`` /
+  ``report_feedback``) are absent from HTTP but UNCHANGED on stdio. No HTTP
+  schema mentions ``api_key`` anywhere.
 - **Auth**: missing / invalid / expired key rejected at the HTTP layer before
   the MCP session manager ever sees the request (#180); a key lacking a
   tool's permission is rejected by ``call_tool`` before the handler runs
@@ -51,7 +51,7 @@ from src.models.api_key import APIKeyInfo
 
 pytestmark = [pytest.mark.contract]
 
-# The issue's "10, not 13" acceptance list, verbatim.
+# The issue's "10, not 13" acceptance list, plus chunk CRUD (#133).
 HTTP_EXPOSED_TOOLS = {
     "search_documents",
     "list_documents",
@@ -63,6 +63,9 @@ HTTP_EXPOSED_TOOLS = {
     "delete_document",
     "refresh_stale_source",
     "get_retrieval_health",
+    "create_chunk",
+    "edit_chunk",
+    "delete_chunk",
 }
 
 # Excluded from HTTP: the issue's explicit 3, plus report_feedback (see the
