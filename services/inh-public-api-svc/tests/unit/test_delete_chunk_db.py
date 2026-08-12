@@ -99,6 +99,40 @@ async def test_delete_returns_deleted_chunk_and_does_not_reindex():
 
 
 @pytest.mark.asyncio
+async def test_delete_rolls_back_when_delete_rowcount_is_not_one():
+    db = DatabaseService.__new__(DatabaseService)
+
+    row = MagicMock()
+    row.id = 55
+    row.document_id = "doc-1"
+    row.content = "middle"
+    row.chunk_index = 1
+    row.token_count = 3
+    row.metadata = None
+    row.content_hash = "abc"
+    row.source_uri = None
+    row.ingested_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    select_result = MagicMock()
+    select_result.fetchone = MagicMock(return_value=row)
+    delete_result = MagicMock()
+    delete_result.rowcount = 0
+
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock(side_effect=[select_result, delete_result])
+    mock_session.commit = AsyncMock()
+    mock_session.rollback = AsyncMock()
+    db.session = MagicMock(return_value=_session_ctx(mock_session))
+
+    result = await db.delete_document_chunk(document_id="doc-1", workspace_id="ws-1", chunk_index=1)
+
+    assert result is None
+    mock_session.rollback.assert_awaited_once()
+    mock_session.commit.assert_not_awaited()
+    assert mock_session.execute.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_delete_query_is_workspace_scoped():
     db = DatabaseService.__new__(DatabaseService)
 

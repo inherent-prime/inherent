@@ -1051,15 +1051,26 @@ class DatabaseService:
                 metadata=_merge_chunk_provenance(row),
             )
 
-            await session.execute(
+            delete_result = await session.execute(
                 text(
                     """
-                    DELETE FROM document_chunks
-                    WHERE document_id = :document_id AND chunk_index = :chunk_index
+                    DELETE FROM document_chunks dc
+                    USING processed_documents pd
+                    WHERE dc.document_id = :document_id
+                      AND dc.chunk_index = :chunk_index
+                      AND pd.document_id = dc.document_id
+                      AND pd.workspace_id = :workspace_id
                 """
                 ),
-                {"document_id": document_id, "chunk_index": chunk_index},
+                {
+                    "document_id": document_id,
+                    "chunk_index": chunk_index,
+                    "workspace_id": workspace_id,
+                },
             )
+            if delete_result.rowcount != 1:
+                await session.rollback()
+                return None
             await session.execute(
                 text(
                     """
