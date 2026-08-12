@@ -136,13 +136,17 @@ only tests tagged with the `smoke` marker via `-m "smoke and compose"`
 `inh-public-api-svc` (ingestion has none yet — the step tolerates pytest's
 "no tests collected" exit code so an empty selection doesn't fail the gate),
 covering the ingest → search roundtrip, PDF extraction, cross-workspace
-isolation, MCP search/upload, and `event_id` usability, and they take ~25s
-against a booted stack; the job's own timeout is 40 minutes to absorb stack
-boot/bootstrap time. The retrieval-eval hard gate is deliberately excluded
-from `smoke` — its baseline only ratchets on `main` runs, so gating it per-PR
-would block merges on drift unrelated to the PR — and the slower live E2E
-suites (tenancy, lifecycle, event-durability, dead-letter recovery) stay
-`compose`-only, running in the post-merge lane instead.
+isolation, the MCP tool-surface pin plus an MCP search roundtrip, and
+`event_id` usability, and they take ~25s against a booted stack; the job's
+own timeout is 40 minutes to absorb stack boot/bootstrap time. MCP's
+upload → poll → delete round trip is not smoke-tagged — it stays
+`compose`-only, post-merge. The retrieval-eval hard gate is deliberately
+excluded from `smoke` — its baseline only ratchets on `main` runs, so gating
+it per-PR would block merges on drift unrelated to the PR — and the bulk of
+the slower live E2E suites (tenancy, lifecycle, event-durability) remains
+`compose`-only, one canary test from each promoted to `smoke` and the rest
+running in the post-merge lane; dead-letter recovery is the one suite that
+is entirely post-merge, none of it in `smoke`.
 
 **Laptop Hetzner VM (manual):** [getting-started/local-vm-test.md](getting-started/local-vm-test.md)
 — Terraform apply from your machine with Object Storage remote state, smoke
