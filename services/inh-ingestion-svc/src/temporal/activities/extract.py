@@ -33,13 +33,13 @@ from urllib.parse import unquote
 
 # The three ET.fromstring() calls below parse XML pulled out of a
 # customer-uploaded archive (EPUB container.xml / content.opf, ODT
-# content.xml), so bandit flags each as B314. CPython >= 3.7.1 does not
-# resolve external entities, which rules out classic XXE, but a hostile
-# archive can still drive entity-expansion CPU burn -- so each call carries a
-# `# nosec B314` pointing here, and #247 tracks moving all three to
-# defusedxml (a runtime dependency add, out of scope for the CI change that
-# first surfaced these).
-from xml.etree import ElementTree as ET
+# content.xml), so bandit flags the import as B405 and each call as B314.
+# CPython >= 3.7.1 does not resolve external entities, which rules out classic
+# XXE, but a hostile archive can still drive entity-expansion CPU burn -- so
+# each call carries a `# nosec B314` pointing here, and #247 tracks moving all
+# three to defusedxml (a runtime dependency add, out of scope for the CI
+# change that first surfaced these).
+from xml.etree import ElementTree as ET  # nosec B405 -- see above
 
 import charset_normalizer
 import structlog

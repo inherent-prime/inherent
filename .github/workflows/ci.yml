@@ -44,10 +44,11 @@ jobs:
             format: uv run black --check src tests
             # mypy/bandit previously ran for public-api ONLY, so the largest
             # of the three services had no type or security signal at all.
-            # `-ll` reports medium severity and above. The findings that were
-            # baselined to land this green are tracked in #247.
+            # The bandit invocation is byte-identical across all three so the
+            # severity floor cannot differ between them. The findings that
+            # were baselined to land this green are tracked in #247.
             typecheck: uv run mypy src
-            security: uv run bandit -r src -ll
+            security: uv run bandit -c pyproject.toml -r src
             test: uv run pytest
             cov_fail_under: 40
           - service: inh-public-api-svc
@@ -72,7 +73,7 @@ jobs:
             # the shared package every service imports, so it is the one
             # place a type or security regression propagates everywhere.
             typecheck: uv run mypy src
-            security: uv run bandit -r src -ll
+            security: uv run bandit -c pyproject.toml -r src
             test: uv run pytest
             cov_fail_under: 95
 

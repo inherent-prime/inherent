@@ -266,20 +266,24 @@ All notable changes to Inherent are documented here. The format follows
   `mypy` and `bandit` ran for `inh-public-api-svc` only; the ingestion service
   — the largest of the three, and the one that parses untrusted uploaded files
   — and the shared `inh-contracts` package had no type or security signal at
-  all. Both are now in the `service-checks` matrix (`uv run mypy src`,
-  `uv run bandit -r src -ll`). `inh-contracts` was already clean under both.
-  Ingestion had 20 mypy errors and 5 medium-severity bandit findings: 5 mypy
-  errors were real and are fixed here (a `Redis | None` deref in
+  all. Both are now in the `service-checks` matrix, running `uv run mypy src`
+  and `uv run bandit -c pyproject.toml -r src` — the bandit invocation and its
+  `[tool.bandit]` config are byte-identical across all three services, so the
+  severity floor cannot differ between them and an identical finding cannot
+  fail one service while passing another. `inh-contracts` needed no
+  suppressions at all. Ingestion had 20 mypy errors and 8 bandit findings: 5
+  mypy errors were real and are fixed here (a `Redis | None` deref in
   `_delivery_count`, an SSRF-guard `getaddrinfo` result typed `str | int`, two
   attribute accesses on a `slide: object` in the PPTX notes path, and an
   `int | None` index in the subtitle-cue parser); the other 15 are all
   `[no-any-return]` from stubless clients and are baselined via a **per-module**
   `warn_return_any = false` override rather than a service-wide one, so every
-  other check still applies to those modules. The 5 bandit findings each carry
-  an inline `# nosec` with a justification — `0.0.0.0` bind and an f-string
-  whose only interpolation is an in-code literal are permanent; the three
-  `xml.etree` parses of customer-uploaded EPUB/ODT XML should move to
-  `defusedxml`. Both baselines are tracked in #247.
+  other check still applies to those modules. The 8 bandit findings each carry
+  an inline `# nosec` with a justification — the `0.0.0.0` container bind, an
+  f-string whose only interpolation is an in-code literal, and two best-effort
+  `except: pass` fallbacks are permanent; the `xml.etree` import and the three
+  parses of customer-uploaded EPUB/ODT XML should move to `defusedxml`. Both
+  baselines are tracked in #247.
 
 - **CI runs are least-privilege, deduplicated and time-boxed.** `ci.yml` now
   declares `permissions: contents: read` at the workflow level (it previously

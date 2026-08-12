@@ -121,6 +121,19 @@ module = [
 ]
 warn_return_any = false
 
+# Mirrors inh-public-api-svc's [tool.bandit] verbatim so all three services
+# gate on the SAME severity threshold. CI invokes `bandit -c pyproject.toml -r
+# src` (not `-ll`) everywhere: with a severity floor of MEDIUM here and LOW in
+# public-api, an identical LOW finding would have failed one service and passed
+# another. B101 is the one project-wide skip -- asserts are used as type
+# narrowing in src/ and as, well, assertions in tests/.
+[tool.bandit]
+exclude_dirs = ["tests", "build", "dist"]
+skips = ["B101"]  # Skip assert_used check (used in tests)
+
+[tool.bandit.assert_used]
+skips = ["*_test.py", "test_*.py"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py", "*_test.py"]

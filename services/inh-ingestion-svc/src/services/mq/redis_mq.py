@@ -302,6 +302,9 @@ class RedisMQService(BaseMQService):
             if pending:
                 return int(pending[0]["times_delivered"])
         except Exception:
+            # nosec B110 -- deliberate: the delivery count is advisory (it only
+            # decides when to drop a poison message), so a Redis hiccup here
+            # must fall back to 1 rather than abort the consumer loop.
             pass
         return 1
 
