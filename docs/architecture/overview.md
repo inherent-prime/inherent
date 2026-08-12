@@ -515,6 +515,20 @@ current behavior. Treat `chunking_hint`-driven chunking as **planned, not
 shipped** — the mechanism described in §6.1–6.2 is what a document uploaded
 to `main` actually goes through today.
 
+> **Status update (2026-08-12): §6.2 and §6.3 above are stale.** #129 has since
+> merged to `main` (`7d99cea` + the review-blocker follow-up `9cc2d29`), so
+> `chunk_text` *does* read `chunking_hint` and `.xlsx` now dispatches to
+> `_chunk_by_rows` rather than `_chunk_by_sentences`. The giant-chunk mechanism
+> traced in §6.2 is still exactly right about the `sentences` splitter — a
+> 500-row spreadsheet fixture measured against it produces a 28,344-character
+> chunk — it just is no longer the path a spreadsheet takes. Live on the compose
+> stack, `docs/examples/sample-documents/e2e-tabular.xlsx` ingests to 51 chunks
+> with a 786-character maximum, pinned by
+> `services/inh-public-api-svc/tests/integration/test_compose_lifecycle.py::test_xlsx_chunks_stay_within_bounds`.
+> The same missing sub-sentence fallback survives on the *prose* path and is
+> tracked as #227. §6.1–6.3 are left as written rather than rewritten in place,
+> since they are the record of why the fix was needed.
+
 ## 7. Durability and failure
 
 The retry table in §2.3 is the mechanical policy; this section is what it

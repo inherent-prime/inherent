@@ -313,9 +313,10 @@ All notable changes to Inherent are documented here. The format follows
   and document-state dumps) but runs only tests tagged with the new `smoke`
   marker via `-m "smoke and compose"`, and with `--no-cov` since coverage is
   the fast lane's job. Today that is four tests —
-  `test_ingestion_to_search_roundtrip`, the two MCP ones below, and
-  `test_cross_workspace_search_is_empty` — which take ~8s against a booted
-  stack; the other roundtrip variants stay in the
+  `test_ingestion_to_search_roundtrip`, the two MCP ones below,
+  `test_cross_workspace_search_is_empty`, `test_pdf_becomes_searchable` and
+  `test_search_event_id_is_usable_on_the_next_request` — which take ~25s
+  against a booted stack; the other roundtrip variants stay in the
   full lane. That gate is now backed by the first live E2E coverage the MCP
   server has ever had (`test_compose_mcp.py`): every previous MCP test drove
   the handlers in-process with `get_database` / `get_search_service` mocked,
@@ -377,7 +378,47 @@ All notable changes to Inherent are documented here. The format follows
   route, and successfully DELETE the probe on teardown — so a retrieval outage
   or a broken route reads as failure rather than as perfect isolation. All four
   tests pass against the live stack, and all four fail loudly when B is pointed
-  at A's credentials. The
+  at A's credentials. Two more live suites join the same lane. The first
+  (`test_compose_lifecycle.py`) covers what happens to a document *after* the
+  happy-path roundtrip: an owner's `DELETE` must evict the document from the
+  vector store as well as from Postgres — every prior delete assertion was
+  either offline or a cross-tenant refusal, so a delete that dropped the row
+  and left the vectors would have looked perfect from `GET /v1/documents/{id}`
+  while every search kept serving the erased content; `POST
+  /v1/documents/{id}/refresh` (#42), which had no live coverage at all, is
+  pinned to its documented contract (an uploaded document needs no source URI,
+  the response is a `DocumentUploadResponse` with the same id and
+  `status="pending"`, and the document returns to `processed` with its content
+  intact, which is the only way to prove the stored S3 object, the MQ publish
+  and the pending-row reset all still work together); and PDF/DOCX ingest
+  through their real third-party extractors rather than the constructed UTF-8
+  every other live test uploads, asserting the fixture's sentinel comes back in
+  the retrieved *content* — a document whose extractor returned an empty string
+  is still findable by filename signal, so a document-id-only assertion would
+  call that a pass. Three additive binary fixtures back it
+  (`docs/examples/sample-documents/e2e-lifecycle.pdf`, `e2e-lifecycle.docx`,
+  `e2e-tabular.xlsx`, each under 40 KB); the pre-existing
+  `sample.pdf`/`.docx`/`.xlsx` were deliberately left alone, since
+  `test_extraction_by_type.py` pins their exact sheet names, merged-cell
+  markers and header rows and they feed the extraction/chunking eval corpus.
+  The 500-row `e2e-tabular.xlsx` is the live regression guard for #129's
+  format-aware chunking: `docs/architecture/overview.md` §6.2 describes a
+  spreadsheet collapsing into one giant chunk (pipe-delimited rows contain no
+  `.`/`!`/`?`-plus-whitespace, so `_chunk_by_sentences` finds no split point
+  and the size guard never fires), which TEI then silently truncates at the
+  embedding ceiling — measured on this fixture, that path still yields a
+  28,344-character chunk, while the shipped `tabular` → `_chunk_by_rows` path
+  it now takes yields 51 chunks with a 786-character maximum. The test asserts
+  the bound rather than xfailing the defect, because #129 merged after §6.2 was
+  written and the defect no longer reproduces (§6.2's "planned, not shipped"
+  note is stale). The second suite (`test_compose_event_durability.py`) is the
+  live pin for #240: it searches, and posts `POST /v1/evals/feedback` on the
+  returned `event_id` with no sleep, no retry and no polling in between —
+  deliberately, since a retry is exactly the workaround the bug forced on
+  callers — then checks `GET /v1/evals/scorecard`'s counters actually moved,
+  because a 200 from feedback proves the row was found but not that an operator
+  can see it. That race lived in FastAPI's response lifecycle rather than in any
+  function under test, so no offline test could ever have observed it. The
   retrieval-baseline hard gate is deliberately excluded: its baseline is
   ratcheted only by runs on `main`, so enforcing it per-PR would block merges
   on metric drift unrelated to the PR. Unlike the other lanes this one sets
