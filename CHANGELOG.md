@@ -418,8 +418,32 @@ All notable changes to Inherent are documented here. The format follows
   callers — then checks `GET /v1/evals/scorecard`'s counters actually moved,
   because a 200 from feedback proves the row was found but not that an operator
   can see it. That race lived in FastAPI's response lifecycle rather than in any
-  function under test, so no offline test could ever have observed it. The
-  retrieval-baseline hard gate is deliberately excluded: its baseline is
+  function under test, so no offline test could ever have observed it. A third
+  new suite (`inh-ingestion-svc`'s `test_compose_dead_letter_recovery.py`)
+  joins the full compose lane (not smoke — it stops and restarts the
+  `weaviate` container, ~53s wall-clock, too slow and disruptive for the
+  PR-blocking lane): with `weaviate` stopped, an upload's parallel
+  Postgres/Weaviate storage step retries the Weaviate side 5x
+  (2s/4s/8s/16s backoff, ~30s floor) before the workflow marks the document
+  failed and records a `dead_letter_jobs` row; the test polls the ingestion
+  service's own `GET /dead-letter` (a separate authenticated REST surface
+  from the public API, port 18002 by default) until that job appears,
+  restarts `weaviate` and waits for it healthy, `POST`s the job's
+  `/retry` endpoint, and confirms the document reaches `processed` and is
+  searchable again — the first live proof this recovery path actually
+  works end to end, not just that the pieces are individually mocked-unit-
+  tested (`tests/failure_injection/` was entirely mocked before this). A
+  canary upload before the fault injection is a positive control: it
+  proves the pipeline is healthy going in, so a failure lower down is the
+  dead-letter/retry path's fault, not a pre-broken stack. Cleanup runs
+  `docker compose start weaviate` unconditionally in a `finally`, since
+  later full-lane tests need the shared stack left healthy regardless of
+  outcome. Reading the retry path surfaced a real gap worth tracking
+  separately: nothing ever transitions a dead-letter job to
+  `status="resolved"` after a successful retry, so the dead-letter listing
+  can't distinguish "retried and now fine" from "still mid-retry" no matter
+  how long ago the retry succeeded (#249).
+  The retrieval-baseline hard gate is deliberately excluded: its baseline is
   ratcheted only by runs on `main`, so enforcing it per-PR would block merges
   on metric drift unrelated to the PR. Unlike the other lanes this one sets
   `cancel-in-progress: true`, since only the newest commit on a PR gates
