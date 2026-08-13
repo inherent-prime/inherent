@@ -660,6 +660,30 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Fixed
 
+- **CI's `inh-ingestion-svc` Postgres schema now matches dev/prod
+  (schema-fidelity gap).** `ci.yml`'s ingestion job provisioned its
+  `postgres:15` service container solely via `DatabaseService.ensure_schema()`
+  (SQLAlchemy `metadata.create_all()`), never `scripts/migrations/*.sql` —
+  the same path `docker-compose.yml`'s `postgres-init` service and the
+  in-image `SERVICE_MODE=migrate` runner use for dev/staging/prod. The two
+  schema sources had already silently diverged: migration 012 adds
+  `workspace_metadata.user_id -> tenants.user_id` (`fk_workspace_tenant`),
+  a foreign key the SQLAlchemy `Table` never declared, so CI's schema
+  structurally lacked it and any test violating it passed in CI while
+  failing against a real migrated database. `tests/test_database.py`'s
+  `test_upsert_workspace_metadata`, `test_update_workspace_stats`, and
+  `test_delete_workspace_data` now create the owning `tenants` row first
+  (`db_service.upsert_tenant(user_id)`), mirroring what
+  `TenantManager.ensure_tenant_exists` always does in production. `ci.yml`
+  now applies every `scripts/migrations/*.sql` file, in filename order,
+  against the service container before tests run, failing loudly
+  (`set -e` + `ON_ERROR_STOP=1`) on the first error. The SQLAlchemy
+  `workspace_metadata.user_id` column also gained the missing
+  `ForeignKey("tenants.user_id", ondelete="CASCADE")` so `ensure_schema()`
+  (test-only — no production or Compose path calls it) agrees with the
+  migration. A new root-suite guard (`tests/test_ci_schema_fidelity.py`)
+  pins that `ci.yml` keeps applying the migrations.
+
 - **Eval-gate tolerance derived from corpus resolution (#236).** The
   compose retrieval-eval hard gate compared each per-mode metric to the
   committed baseline against a single fixed `EVAL_GATE_TOLERANCE` (`0.02`),
