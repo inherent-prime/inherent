@@ -197,7 +197,9 @@ INHERENT_VERSION     ?= latest
 ##                 requires human approval — this target documents the flow.
 release-images:
 	@echo "Images are published by .github/workflows/publish.yml. To cut a release:"
-	@echo "  1. Bump versions in services/*/pyproject.toml and update CHANGELOG.md."
+	@echo "  1. Bump versions in the services/*/pyproject.toml that changed, run"
+	@echo "     'uv lock --project services/<svc>' for each, and cut CHANGELOG.md."
+	@echo "     Full checklist: docs/maintainers/releasing.md"
 	@echo "  2. Push a release-candidate tag, then the final tag:"
 	@echo "       git tag v<X.Y.Z>-rc1 && git push origin v<X.Y.Z>-rc1   # candidate"
 	@echo "       git tag v<X.Y.Z>     && git push origin v<X.Y.Z>       # final"

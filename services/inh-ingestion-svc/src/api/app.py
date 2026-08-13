@@ -231,7 +231,7 @@ def create_app(settings: Settings) -> FastAPI:
     app = FastAPI(
         title="Inherent Ingestion Service",
         description="Standalone HTTP API for triggering document ingestion via Temporal.",
-        version="0.5.0",
+        version="0.6.0",
         lifespan=lifespan,
     )
 
@@ -249,7 +249,7 @@ def create_app(settings: Settings) -> FastAPI:
         return HealthResponse(
             status="healthy" if manager.is_running else "degraded",
             temporal_worker=manager.is_running,
-            version="0.5.0",
+            version="0.6.0",
         )
 
     # ------------------------------------------------------------------

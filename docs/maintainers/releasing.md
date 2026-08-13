@@ -15,6 +15,14 @@ This repository does not assume an automated release train.
 
 ## Release Checklist
 
+0. Bump the `version` in each service `pyproject.toml` whose behavior or
+   packaging surface changed this cycle, then regenerate that service's
+   `uv.lock` (`uv lock --project services/<svc>`) — the lock pins the version
+   and the images build from it (#226). Leave a service alone if nothing in
+   it changed, or if it was already bumped by the PR that changed it. This is
+   about **package** versions; the published image tag is the repository-level
+   git tag and stays decoupled (see
+   [Image tags vs. service versions](#image-tags-vs-service-versions)).
 1. Confirm README and service docs match the shipped behavior.
 2. Run the offline release-acceptance suites in one shot:
    ```bash
@@ -111,8 +119,12 @@ job runs without pausing.
    optional `inherent_version` (GHCR tag; empty = strip leading `v` from `ref`);
    `server_type` default `cpx32`.
 7. **Publish a GitHub Release from the final tag** (Releases → Draft a new
-   release → pick `vX.Y.Z`). Title it `vX.Y.Z — <theme>` and paste the tag
-   message plus a link to the matching `CHANGELOG.md` entry. Writing notes into
+   release → pick `vX.Y.Z`). Title it exactly `vX.Y.Z` — bare tag, no theme
+   or codename, matching step 6 of the
+   [Release Checklist](#release-checklist) and the published v0.4.1/v0.5.0
+   releases. A theme belongs in the annotated **tag message**, not the
+   release title. Use the release-notes format from step 6, and link the
+   matching `CHANGELOG.md` entry. Writing notes into
    the tag message or CHANGELOG alone does not make them visible — the
    Releases tab is where consumers actually look, and the tagged git object
    and GHCR package page do not surface either on their own (#112).
