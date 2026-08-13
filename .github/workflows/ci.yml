@@ -6,10 +6,27 @@ on:
     branches:
       - main
 
+# Least privilege: every job here only reads the checked-out tree (the
+# per-job summaries go to $GITHUB_STEP_SUMMARY, not to the API), so the
+# workflow token never needs write access to contents, issues or checks.
+permissions:
+  contents: read
+
+# One in-flight CI run per PR (or per branch on push). Superseded PR runs are
+# cancelled so a rapid push sequence does not queue N redundant matrices;
+# push-to-main runs are NOT cancelled, because `main`'s CI history is the
+# merge-gate record for each commit.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   service-checks:
     name: ${{ matrix.service }} checks
     runs-on: ubuntu-latest
+    # A hung Postgres service container or a wedged pytest must not hold a
+    # required merge gate "pending" for the runner's 6h default.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -25,8 +42,13 @@ jobs:
             python-version: "3.11"
             lint: uv run ruff check src tests
             format: uv run black --check src tests
-            typecheck: ""
-            security: ""
+            # mypy/bandit previously ran for public-api ONLY, so the largest
+            # of the three services had no type or security signal at all.
+            # The bandit invocation is byte-identical across all three so the
+            # severity floor cannot differ between them. The findings that
+            # were baselined to land this green are tracked in #247.
+            typecheck: uv run mypy src
+            security: uv run bandit -c pyproject.toml -r src
             test: uv run pytest
             cov_fail_under: 40
           - service: inh-public-api-svc
@@ -47,8 +69,11 @@ jobs:
             python-version: "3.11"
             lint: uv run ruff check src tests
             format: uv run black --check src tests
-            typecheck: ""
-            security: ""
+            # Clean under both today, with no baselined findings -- this is
+            # the shared package every service imports, so it is the one
+            # place a type or security regression propagates everywhere.
+            typecheck: uv run mypy src
+            security: uv run bandit -c pyproject.toml -r src
             test: uv run pytest
             cov_fail_under: 95
 
@@ -145,6 +170,9 @@ jobs:
   root-tests:
     name: root tests/ (repo-level pins)
     runs-on: ubuntu-latest
+    # These tests read repo files with stdlib pathlib and run in seconds; the
+    # only plausible way to exceed this is a wedged `uvx` resolve.
+    timeout-minutes: 10
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -174,6 +202,9 @@ jobs:
   required-tests:
     name: Required tests before merge
     runs-on: ubuntu-latest
+    # This job is the required status check, so it must always reach a
+    # terminal state rather than sitting pending behind a stuck dependency.
+    timeout-minutes: 30
     needs:
       - service-checks
       - root-tests

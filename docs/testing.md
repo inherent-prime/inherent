@@ -13,6 +13,15 @@ that don't belong to any one package:
   (stdlib only), so it isn't part of any service's `uv sync` — run it via
   `uvx 'pytest==9.0.2' tests/` or `make test` (#183).
 
+Within `inh-public-api-svc`, don't confuse `tests/app_flows/` with
+`tests/integration/`: `tests/app_flows/` (renamed from `tests/e2e/` — the old
+name overclaimed) drives the FastAPI app in-process with `get_database` /
+`get_search_service` / auth mocked via `AsyncMock`/`MagicMock`, never
+touching a real dependency. Live end-to-end coverage — a real client against
+a real booted stack — lives in `tests/integration/test_compose_*.py` and is
+gated by the `compose` marker (see [Markers](#markers) below); a `smoke`
+subset of those runs on every PR.
+
 Every test command below assumes you have synced dev dependencies first:
 
 ```bash
@@ -113,7 +122,31 @@ make test-integration   # public-api compose suite (stack must be up)
 ```
 
 **Local compose CI:** `.github/workflows/integration.yml` (or `make test-integration`
-against a laptop stack).
+against a laptop stack). Runs on push to `main`, nightly cron, and manual
+dispatch — not on pull requests, since it runs the full Compose suite plus
+the retrieval-eval hard gate and both services' benchmarks. See the
+[retrieval-eval gate](#retrieval-eval-gate-baseline-ratchet-and-trend-history-139)
+section below.
+
+**PR-blocking smoke lane:** `.github/workflows/e2e-smoke.yml` — the `E2E
+smoke` required check, and the only live end-to-end signal a PR gets before
+merge. It boots the identical Compose stack `integration.yml` does, then runs
+only tests tagged with the `smoke` marker via `-m "smoke and compose"`
+(`--no-cov`; coverage is the fast lane's job). Today that is 6 tests, all in
+`inh-public-api-svc` (ingestion has none yet — the step tolerates pytest's
+"no tests collected" exit code so an empty selection doesn't fail the gate),
+covering the ingest → search roundtrip, PDF extraction, cross-workspace
+isolation, the MCP tool-surface pin plus an MCP search roundtrip, and
+`event_id` usability, and they take ~25s against a booted stack; the job's
+own timeout is 40 minutes to absorb stack boot/bootstrap time. MCP's
+upload → poll → delete round trip is not smoke-tagged — it stays
+`compose`-only, post-merge. The retrieval-eval hard gate is deliberately
+excluded from `smoke` — its baseline only ratchets on `main` runs, so gating
+it per-PR would block merges on drift unrelated to the PR — and the bulk of
+the slower live E2E suites (tenancy, lifecycle, event-durability) remains
+`compose`-only, one canary test from each promoted to `smoke` and the rest
+running in the post-merge lane; dead-letter recovery is the one suite that
+is entirely post-merge, none of it in `smoke`.
 
 **Laptop Hetzner VM (manual):** [getting-started/local-vm-test.md](getting-started/local-vm-test.md)
 — Terraform apply from your machine with Object Storage remote state, smoke
@@ -153,6 +186,7 @@ Combine them with `-m` expressions (e.g. `-m 'security or contract'`).
 | `unit`             | Fast, isolated unit tests                                          | all      |
 | `integration`      | Exercises real service dependencies                               | public-api, ingestion |
 | `compose`          | Requires a running docker-compose stack (deselected by default)   | public-api, ingestion |
+| `smoke`            | PR-blocking subset of `compose`; run via `-m "smoke and compose"` in `e2e-smoke.yml` | public-api (ingestion: none yet) |
 | `slow`             | Slow-running tests                                                 | public-api, ingestion |
 | `benchmark`        | Latency/throughput benchmarks (loose SLO regression guards)       | public-api, ingestion |
 | `security`         | Auth/tenancy security regression tests (offline)                  | public-api, ingestion |
@@ -187,10 +221,80 @@ cd services/<svc> && uv run pytest -m benchmark
 
 `test_compose_retrieval_regression.py` (`retrieval_eval` + `compose`) hard-gates
 on regression, not just reporting: any per-mode metric (recall@5/MRR/nDCG@5)
-that drops more than `EVAL_GATE_TOLERANCE` (default `0.02`) below the committed
+that drops more than its **effective tolerance** below the committed
 `corpus/retrieval_baseline.json` fails the build, via
 `tests/evals/eval_gate.py`. An absolute-floor backstop
 (`RETRIEVAL_MIN_RECALL5`, default `0.15`) still applies underneath it.
+
+### Tolerance is derived from corpus resolution (#236)
+
+`EVAL_GATE_TOLERANCE` (default `0.02`) is a **floor**, not the tolerance
+itself. The actual per-metric tolerance the gate uses is:
+
+```
+effective_tolerance(metric, n) = max(EVAL_GATE_TOLERANCE, min_detectable_delta(metric, n))
+```
+
+where `n` is the number of gated golden queries (every query in
+`corpus/qrels.jsonl` except `category == "abstention"`, matching the same
+exclusion the pooled recall/MRR/nDCG averages already apply — abstention
+queries have no relevant document by construction, so they score a
+structural `0.0` regardless of ranking quality) and
+`min_detectable_delta(metric, n)` is the smallest possible move a *single*
+query's rank change can produce in that metric's pooled average:
+
+| Metric family | Smallest single-query step | Formula |
+|---|---|---|
+| `mrr` | rank 1 → rank 2 | `0.5 / n` |
+| `recall@k` | gaining/losing one relevant doc | `1 / n` |
+| `ndcg@k` | top-2 positions swap | `(1 - 1/log2(3)) / n` |
+
+**Why:** a fixed absolute tolerance can be finer than what a small corpus can
+actually resolve. With `n = 13` gated queries (the corpus size as of
+2026-08-12), the smallest possible MRR move is `0.5 / 13 ≈ 0.0385`, which
+already exceeds the `0.02` floor — so *any* single query slipping one rank
+position hard-failed the gate even when every other metric improved (#236,
+first hit in #237, which blocked `main` for three days on a net-positive
+change). `effective_tolerance` makes the gate's resolution match the
+corpus's: below `min_detectable_delta`, the gate cannot distinguish "one
+document moved one rank" from "retrieval regressed" — those two produce
+overlapping numbers — so it must not fail on the difference. Raising
+`EVAL_GATE_TOLERANCE` still works as a floor for a larger/noisier corpus; it
+just can no longer be set *below* what the corpus can resolve.
+
+**The honest trade-off:** widening the tolerance to match resolution also
+widens what counts as "not a regression." At `n = 13`, `recall@5`'s derived
+tolerance is `1 / 13 ≈ 0.0769` — a real recall regression up to ~7.7
+percentage points on a single query can now pass the gate silently, over 3.5x
+the old fixed `0.02` (2 percentage points). This is the same
+one-rank-slip-shaped noise the fix is closing for `mrr`/`ndcg@5`, applied to
+`recall@5`'s coarser (binary hit/miss, not rank-weighted) step size, so it
+isn't a new risk the fix introduces so much as the existing risk's exact size
+made visible. `min_detectable_delta` shrinks as `1/n`, so growing the golden
+corpus's gated-query count is the direct lever to tighten it back down — e.g.
+doubling `n` to 26 halves every metric's derived tolerance. This is a
+standing incentive to keep expanding `corpus/qrels.jsonl`, not a one-time
+trade to forget about.
+
+`min_detectable_delta` and `effective_tolerance` live in `tests/evals/eval_gate.py`
+and are unit-tested (hand-computed values) in `tests/evals/test_eval_gate.py`.
+The compose test derives `n` from the same in-memory query/category mapping it
+already uses to compute the pooled averages, so the tolerance is always
+derived from the exact pool a given run measured over — not a hardcoded
+constant that could drift from the corpus.
+
+The `check` CLI subcommand also supports deriving `n`, for anyone invoking the
+gate outside of pytest: pass `--num-queries N` directly, or `--qrels
+path/to/qrels.jsonl` to have it counted (same abstention exclusion). Passing
+neither preserves the pre-#236 behavior — `--tolerance` is used as a flat
+value for every metric. **Precedence:** `.github/workflows/integration.yml`
+does not invoke the `check` CLI at all today — the gate runs entirely inside
+`test_compose_retrieval_regression.py`'s pytest assertion, which always
+derives per-metric tolerance from the live corpus, using `EVAL_GATE_TOLERANCE`
+only as the floor. If a caller ever does invoke `check` with an explicit
+`--tolerance` alongside `--num-queries`/`--qrels`, derivation wins:
+`--tolerance` is the floor under the derived value, never a way to force a
+flatter (and possibly under-resolved) tolerance back on.
 
 On a green gate on `main`, `.github/workflows/integration.yml`'s
 `eval-baseline-ratchet` job ratchets the baseline up to

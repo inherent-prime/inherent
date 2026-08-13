@@ -1,0 +1,137 @@
+name: E2E smoke
+
+# The PR-blocking end-to-end lane. It boots the same Compose stack
+# `integration.yml` does -- same images, same env, same bootstrap -- but runs
+# only the `smoke`-tagged subset, so it fits inside a merge-gate time budget.
+#
+# Why a second workflow rather than putting pull_request on integration.yml:
+# that workflow's compose job runs the full compose suite plus the latency and
+# ingestion benchmarks, and it is followed by two jobs that MUTATE repo state
+# (baseline ratchet PR, regression issue). It is deliberately kept off pull
+# requests. This lane is the pre-merge half of that split: prove the stack
+# boots and a document survives ingest -> search, and leave the slow
+# quality/benchmark signal to the nightly run on `main`.
+#
+# The stack-boot, bootstrap, failure-dump and teardown steps below are copied
+# from `integration.yml`'s `compose-integration` job on purpose, env values
+# included, so the smoke and full lanes exercise the same stack shape and a
+# smoke pass means the same thing the full lane's boot means. Pinned by
+# tests/test_e2e_smoke_workflow_guards.py.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+# Cancellable, unlike integration.yml's group: only the newest commit on a PR
+# gates merge, so an in-flight run for a superseded commit is holding a runner
+# for a result nobody will read.
+concurrency:
+  group: e2e-smoke-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e-smoke:
+    name: E2E smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      # CPU TEI embedding on a GitHub runner is slow, so a document can take
+      # well over the 180s default to reach 'processed'. Same budget the full
+      # lane gives its compose steps; the job timeout above is the real cap.
+      INTEGRATION_TIMEOUT: "600"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Create .env
+        run: cp .env.example .env
+
+      - name: Start the Compose stack
+        # Matches integration.yml: run the stack unthrottled so a test is never
+        # failed by the default 100 req/min per key. Rate-limit enforcement is
+        # covered by the offline suites. Compose reads RATE_LIMIT_ENABLED from
+        # the shell env for its ${VAR:-true} default.
+        env:
+          RATE_LIMIT_ENABLED: "false"
+        run: docker compose up -d --build --wait
+
+      - name: Wait for the public API to be healthy
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:18000/health >/dev/null 2>&1; then
+              echo "public API healthy"; exit 0
+            fi
+            echo "waiting for public API ($i)..."; sleep 5
+          done
+          echo "::error::public API did not become healthy in time"; exit 1
+
+      - name: Bootstrap dev workspace and API key
+        run: make bootstrap
+
+      - name: Install public-api deps
+        working-directory: services/inh-public-api-svc
+        run: uv sync --frozen --extra dev --group dev
+
+      # No exit-5 tolerance here, deliberately. This service carries the
+      # roundtrip test that IS the gate, so "no tests ran" means the marker or
+      # the test was lost -- a green check with nothing behind it. Let it fail.
+      # --no-cov because coverage is the fast lane's job and dominates runtime.
+      - name: Public API smoke tests
+        working-directory: services/inh-public-api-svc
+        run: uv run pytest -m "smoke and compose" -v --no-cov
+
+      # Tolerates pytest's exit 5 ("no tests collected"), which is what this
+      # service returns today: it has no smoke-tagged tests yet, and a bare
+      # `uv run pytest` would fail the whole gate on an empty selection. Only
+      # 5 is swallowed -- a real failure (1) or an internal error (2/3/4)
+      # still fails the step. Once this service carries smoke tests, the
+      # notice below stops appearing; the tolerance is kept so adding a
+      # service to the lane never requires editing this file first.
+      - name: Ingestion smoke tests
+        working-directory: services/inh-ingestion-svc
+        run: |
+          uv sync --frozen --extra dev --group dev
+          set +e
+          uv run pytest -m "smoke and compose" -v --no-cov
+          status=$?
+          set -e
+          if [ "$status" -eq 5 ]; then
+            echo "::notice::no smoke-tagged tests in inh-ingestion-svc yet -- skipping"
+            exit 0
+          fi
+          exit "$status"
+
+      - name: Dump document state on failure
+        if: failure()
+        # A smoke failure reads as "document <id> not processed within Ns"
+        # without saying whether the doc errored, dead-lettered, or was just
+        # slow. Dump the document + dead-letter tables so its fate is visible.
+        # Defensive (|| true) so a diagnostic hiccup never masks the real
+        # failure.
+        run: |
+          echo "### processed_documents"
+          docker compose exec -T postgres psql -U postgres -d knowledge_base -P pager=off \
+            -c "SELECT document_id, status, error_message, chunk_count, created_at, processed_at FROM processed_documents ORDER BY created_at;" || true
+          echo "### dead_letter_jobs"
+          docker compose exec -T postgres psql -U postgres -d knowledge_base -P pager=off \
+            -c "SELECT job_id, status, error, created_at FROM dead_letter_jobs ORDER BY created_at;" || true
+
+      - name: Dump Compose logs on failure
+        if: failure()
+        # Full ingestion log (not tail-limited): the doc lifecycle -- including
+        # any Temporal activity failure or dead-letter -- is logged here, and a
+        # stuck doc's lines are near the START of the run, beyond any short
+        # tail. Other services stay tail-limited to keep output readable.
+        run: |
+          echo "### ingestion (full)"; docker compose logs --no-color inh-ingestion-svc || true
+          echo "### other services (tail)"; docker compose logs --no-color --tail=200 || true
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

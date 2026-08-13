@@ -23,9 +23,12 @@ uploads/
 playwright-report/
 test-results/
 eval-report.json
+ingestion-benchmark-report.json
+search-benchmark-report.json
 .DS_Store
 
 graphify-out/
 
 # MkDocs build output
 site/
+.memory/

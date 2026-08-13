@@ -52,7 +52,9 @@ def _validate_fetch_url(url: str) -> None:
     # Best-effort DNS: reject a hostname that resolves to an internal address.
     try:
         for info in socket.getaddrinfo(host, None):
-            if _is_internal_ip(info[4][0]):
+            # sockaddr[0] is the address string for both AF_INET (2-tuple) and
+            # AF_INET6 (4-tuple); str() only satisfies the union mypy infers.
+            if _is_internal_ip(str(info[4][0])):
                 raise PermissionError(f"Host resolves to internal address: {host!r}")
     except socket.gaierror:
         pass  # let the HTTP client surface an unresolved-host error

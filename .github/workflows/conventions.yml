@@ -1,0 +1,42 @@
+name: Conventions
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+permissions:
+  contents: read
+  pull-requests: read
+concurrency:
+  group: conventions-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  conventions:
+    name: Conventions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Collect changed files
+        id: diff
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git fetch origin "$BASE_REF"
+          git diff --name-only "origin/$BASE_REF...HEAD" > changed.txt
+          echo "Changed files:" && cat changed.txt
+      - name: CHANGELOG gate
+        if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-changelog') }}
+        run: |
+          if grep -qE '^services/' changed.txt && ! grep -qx 'CHANGELOG.md' changed.txt; then
+            echo "::error::PR touches services/** but has no CHANGELOG.md entry. Add one under [Unreleased] or apply the 'no-changelog' label."
+            exit 1
+          fi
+      - name: Docs-sync gate
+        if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-docs-needed') }}
+        run: |
+          if grep -qE '^services/inh-public-api-svc/src/(api/v1/|mcp_server/server\.py)|^services/inh-contracts/src/' changed.txt \
+             && ! grep -qE '^docs/' changed.txt; then
+            echo "::error::PR changes API routers / MCP tool registry / shared contracts but touches no docs/. Update docs or apply the 'no-docs-needed' label."
+            exit 1
+          fi

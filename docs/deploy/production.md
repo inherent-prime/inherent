@@ -155,12 +155,29 @@ instead of the seeded defaults:
 
 ```bash
 API_KEY=ink_<your-strong-key> WORKSPACE_ID=<your-workspace> \
+USER_ID=<your-user> \
 PG_CONTAINER=inherent-oss-postgres MONGO_CONTAINER=inherent-oss-mongodb \
   bash bootstrap.sh
 ```
 
 Application keys must start with `ink_` (any other prefix is rejected). Rotate
 the `INGESTION_API_KEY` on the same schedule as your other secrets.
+
+**The script also knows about a second, tenancy-test principal
+(`ink_dev_local_key_002` / `ws_local_002`) and deliberately does NOT create it
+here.** It is seeded only when `API_KEY` is left at the local dev default
+`ink_dev_local_key_001`, or when `SEED_PRINCIPAL_B=1` is passed explicitly.
+Overriding `API_KEY` as above — which every non-local caller does — skips it,
+and the script says so on stdout. Never set `SEED_PRINCIPAL_B=1` on a real
+deployment without also overriding `API_KEY_B`, `WORKSPACE_ID_B` and
+`USER_ID_B`: the defaults are published in this repository.
+
+`KEY_ID` (and `KEY_ID_B`) default to empty, which mints a fresh uuid for the
+`api_keys.key_id` column. Pin one only if you want a readable identifier in
+logs, and be aware that `key_id` is `UNIQUE` while the upsert matches on
+`key_hash` — re-running with a pinned `KEY_ID` and a **rotated** `API_KEY` will
+fail on the unique constraint. To rotate a key value, either leave `KEY_ID`
+empty or pass a new one.
 
 > Programmatic key/workspace management (create, list, revoke via API) does not
 > exist yet — provisioning is script- or SQL-driven. Track this before you need

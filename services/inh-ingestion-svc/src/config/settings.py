@@ -203,8 +203,11 @@ class Settings(BaseSettings):
     # Secret key for authenticating HTTP API requests (required for standalone mode)
     ingestion_api_key: str | None = Field(None, alias="INGESTION_API_KEY")
 
-    # Host and port for the standalone HTTP API server
-    api_host: str = Field("0.0.0.0", alias="API_HOST")
+    # Host and port for the standalone HTTP API server. Binding all interfaces
+    # is required inside a container -- the process cannot know the container
+    # IP, and the orchestrator, not this default, decides what is published.
+    # Override with API_HOST for a bare-metal run.
+    api_host: str = Field("0.0.0.0", alias="API_HOST")  # nosec B104 -- see above
     api_port: int = Field(8000, alias="API_PORT")
 
     # Port for Prometheus metrics server (worker mode only; standalone uses /metrics route)

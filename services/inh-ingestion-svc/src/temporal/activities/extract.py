@@ -30,7 +30,16 @@ import zipfile
 from collections.abc import Callable
 from email import policy
 from urllib.parse import unquote
-from xml.etree import ElementTree as ET
+
+# The three ET.fromstring() calls below parse XML pulled out of a
+# customer-uploaded archive (EPUB container.xml / content.opf, ODT
+# content.xml), so bandit flags the import as B405 and each call as B314.
+# CPython >= 3.7.1 does not resolve external entities, which rules out classic
+# XXE, but a hostile archive can still drive entity-expansion CPU burn -- so
+# each call carries a `# nosec B314` pointing here, and #247 tracks moving all
+# three to defusedxml (a runtime dependency add, out of scope for the CI
+# change that first surfaced these).
+from xml.etree import ElementTree as ET  # nosec B405 -- see above
 
 import charset_normalizer
 import structlog
@@ -832,9 +841,14 @@ def _pptx_slide_title(slide: object) -> str | None:
 def _pptx_slide_notes(slide: object) -> str | None:
     """Speaker notes text for `slide`, or None if it has no notes slide, or
     the notes slide has no non-whitespace text."""
-    if not slide.has_notes_slide:
+    # getattr rather than attribute access, matching _pptx_slide_title above:
+    # `slide` is typed `object` because python-pptx ships no usable stubs.
+    if not getattr(slide, "has_notes_slide", False):
         return None
-    notes_text = (slide.notes_slide.notes_text_frame.text or "").strip()
+    notes_slide = getattr(slide, "notes_slide", None)
+    if notes_slide is None:
+        return None
+    notes_text = (notes_slide.notes_text_frame.text or "").strip()
     return notes_text or None
 
 
@@ -1232,7 +1246,7 @@ def _extract_epub_text(content: bytes, filename: str) -> str:
         ) from e
 
     try:
-        container_root = ET.fromstring(container_xml)
+        container_root = ET.fromstring(container_xml)  # nosec B314 -- see import note
     except ET.ParseError as e:
         raise ApplicationError(
             f"EPUB extraction failed: '{filename}' has an unparseable META-INF/container.xml: {e}",
@@ -1260,7 +1274,7 @@ def _extract_epub_text(content: bytes, filename: str) -> str:
         ) from e
 
     try:
-        opf_root = ET.fromstring(opf_xml)
+        opf_root = ET.fromstring(opf_xml)  # nosec B314 -- see import note
     except ET.ParseError as e:
         raise ApplicationError(
             f"EPUB extraction failed: '{filename}' has an unparseable content.opf: {e}",
@@ -1597,7 +1611,7 @@ def _extract_odt_text(content: bytes, filename: str) -> str:
         ) from e
 
     try:
-        root = ET.fromstring(content_xml)
+        root = ET.fromstring(content_xml)  # nosec B314 -- see import note
     except ET.ParseError as e:
         raise ApplicationError(
             f"ODT extraction failed: '{filename}' has an unparseable content.xml: {e}",
@@ -1732,7 +1746,9 @@ def _parse_subtitle_cues(text: str) -> list[tuple[str, str]]:
             if candidate is not None:
                 timestamp_line_index, match = index, candidate
                 break
-        if match is None:
+        # The two are assigned together above, so `match is None` alone is the
+        # real condition; the index test is what lets mypy narrow it to int.
+        if match is None or timestamp_line_index is None:
             continue  # header / NOTE / cue-number-only / non-cue block
 
         cue_text = " ".join(lines[timestamp_line_index + 1 :]).strip()

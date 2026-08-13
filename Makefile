@@ -122,9 +122,19 @@ graphify-hooks:
 graphify-refresh:
 	@GRAPHIFY_REFRESH_SYNC=1 bash scripts/dev/graphify-refresh.sh
 
-## bootstrap: Create the local dev workspace + API key in BOTH stores
+## bootstrap: Create the local dev workspaces + API keys in BOTH stores
 ##            (PostgreSQL api_keys and MongoDB workspaces). Local/dev only.
-##            Safe to re-run. Key value: ink_dev_local_key_001
+##            Safe to re-run. Seeds TWO principals here: ink_dev_local_key_001
+##            in ws_local_001 (the default dev identity) and
+##            ink_dev_local_key_002 in ws_local_002 (a separate owner, used by
+##            the tenancy isolation E2E). The second is seeded ONLY because
+##            DEV_API_KEY is the local default -- run bootstrap.sh directly with
+##            your own API_KEY (as production/Hetzner do) and it is skipped
+##            unless you pass SEED_PRINCIPAL_B=1.
+##            Overrides: API_KEY / KEY_ID / WORKSPACE_ID / USER_ID and the same
+##            names with a _B suffix for the second principal. KEY_ID / KEY_ID_B
+##            default to empty, which mints a uuid -- pin one only if you want a
+##            readable id and never rotate that key's value in place.
 bootstrap:
 	@API_KEY="$(DEV_API_KEY)" WORKSPACE_ID="$(DEV_WORKSPACE_ID)" \
 	 USER_ID="$(DEV_USER_ID)" KEY_NAME="$(DEV_KEY_NAME)" \

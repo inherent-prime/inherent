@@ -219,10 +219,16 @@ make health     # check API health endpoints
 ```
 
 `make bootstrap` (run by `quickstart` and `dev`) is **local/dev only**. It
-creates the dev workspace and API key `ink_dev_local_key_001` in **both** the
-PostgreSQL `api_keys` table and the MongoDB `workspaces` collection — the two
-control-plane records the protected API needs before any upload or search call
-works. It is safe to re-run.
+creates dev workspaces and API keys in **both** the PostgreSQL `api_keys` table
+and the MongoDB `workspaces` collection — the two control-plane records the
+protected API needs before any upload or search call works. It is safe to
+re-run. Two principals are seeded: `ink_dev_local_key_001` in `ws_local_001`
+(the identity every example uses) and `ink_dev_local_key_002` in `ws_local_002`,
+a **separate owner** that the tenancy isolation E2E needs in order to prove one
+tenant cannot reach another's content. The second principal is seeded only when
+`API_KEY` is the local default (as it is here) or `SEED_PRINCIPAL_B=1` is set —
+running the script against a real deployment with your own `API_KEY` never
+plants the well-known second key.
 
 Follow [Getting Started Locally](docs/getting-started/local.md) to upload a
 sample document, wait for ingestion, search indexed content, inspect logs, and
@@ -243,7 +249,10 @@ curl -O https://raw.githubusercontent.com/inherent-prime/inherent/main/docker-co
 INHERENT_VERSION=latest docker compose -f docker-compose.release.yml up -d
 
 # 3. Seed a local dev workspace + API key (one-time; needs no checkout —
-#    the script only talks to the running containers via `docker exec`)
+#    the script only talks to the running containers via `docker exec`).
+#    Override API_KEY with your own `ink_...` value on anything reachable
+#    from outside your machine; doing so also skips the well-known second
+#    (tenancy-test) key.
 curl -O https://raw.githubusercontent.com/inherent-prime/inherent/main/scripts/dev/bootstrap.sh
 PG_CONTAINER=inherent-oss-postgres MONGO_CONTAINER=inherent-oss-mongodb \
   bash bootstrap.sh

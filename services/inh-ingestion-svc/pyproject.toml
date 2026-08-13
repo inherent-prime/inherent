@@ -97,6 +97,43 @@ warn_unused_configs = true
 disallow_untyped_defs = false
 ignore_missing_imports = true
 
+# Baselined [no-any-return] debt, tracked in #247. mypy started running for
+# this service in CI (it previously ran for inh-public-api-svc only) and found
+# 15 sites where a function annotated `-> str` / `-> bool` / `-> int` /
+# `-> dict[str, Any]` returns an untyped value straight out of a stubless
+# third-party client (weaviate, motor, boto3, temporal).
+#
+# `warn_return_any` is switched off HERE, per module, rather than globally the
+# way inh-public-api-svc does it, so the rest of the service keeps the check
+# and this list stays a punch-list: annotate/cast the returns in a module,
+# then delete the module from `module` below. Every OTHER mypy check still
+# runs on these modules -- only the Any-return warning is suppressed. When the
+# list is empty, delete this whole block.
+[[tool.mypy.overrides]]
+module = [
+    "src.api.ownership",             # 2
+    "src.services.database",         # 1
+    "src.services.embedder",         # 1
+    "src.services.processor",        # 1
+    "src.services.weaviate",         # 7
+    "src.temporal.activities.extract",  # 1
+    "src.temporal.activities.status",   # 2
+]
+warn_return_any = false
+
+# Mirrors inh-public-api-svc's [tool.bandit] verbatim so all three services
+# gate on the SAME severity threshold. CI invokes `bandit -c pyproject.toml -r
+# src` (not `-ll`) everywhere: with a severity floor of MEDIUM here and LOW in
+# public-api, an identical LOW finding would have failed one service and passed
+# another. B101 is the one project-wide skip -- asserts are used as type
+# narrowing in src/ and as, well, assertions in tests/.
+[tool.bandit]
+exclude_dirs = ["tests", "build", "dist"]
+skips = ["B101"]  # Skip assert_used check (used in tests)
+
+[tool.bandit.assert_used]
+skips = ["*_test.py", "test_*.py"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py", "*_test.py"]
@@ -114,6 +151,13 @@ markers = [
     "slow: slow-running tests",
     "security: auth/tenancy security regression tests (offline)",
     "contract: schema/contract regression tests",
+    # The PR-blocking end-to-end subset, run by .github/workflows/e2e-smoke.yml
+    # as `-m "smoke and compose"`. Always combined with `compose`, never
+    # selected alone: a smoke test is by definition one that needs the real
+    # booted stack, and the pairing keeps the marker from silently widening
+    # the merge gate if it is ever applied to an offline test. Keep this set
+    # small -- everything tagged here is paid for on every pull request.
+    "smoke: PR-blocking E2E smoke subset (always combined with compose)",
 ]
 
 [tool.coverage.run]
