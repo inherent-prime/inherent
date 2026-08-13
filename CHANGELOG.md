@@ -262,6 +262,26 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Changed
 
+- **CI: coverage floors ratcheted to actual, closing a gate that could pass
+  with half the test suite deleted.** `ci.yml`'s per-service
+  `--cov-fail-under` (matrix `cov_fail_under`) was 40% for
+  `inh-ingestion-svc`, 45% for `inh-public-api-svc` and 95% for
+  `inh-contracts` — tens of points below measured coverage, so a PR that
+  deleted roughly half of either service's test suite would still pass the
+  required merge gate. Sourced from CI run 31661196233 (`main@bc6d56b`,
+  2026-08-13), actual total coverage is 83.35% (ingestion), 85.36%
+  (public-api) and 99.53% (contracts); floors are now `floor(actual) - 1` —
+  82, 84 and 98 respectively — leaving a 1-point buffer for run-to-run
+  jitter (e.g. conditional imports) without reopening the gap. The four
+  per-core-module floors under each service (`auth.py`, `search.py`,
+  `verify.py`, `quality_gate.py` for public-api; `quality.py`,
+  `extract.py`, `store.py`, `chunk.py` for ingestion) are raised the same
+  way, from as low as 35% to 71–99%; none of the eight modules' actual
+  coverage was found below its old configured floor. The policy — track
+  `floor(actual) - 1`, raise whenever coverage improves, never lower — is
+  now stated in the comment block above the per-module step, replacing the
+  previous open-ended "ratchet up over time" language.
+
 - **CI now type-checks and security-scans all three services, not just one.**
   `mypy` and `bandit` ran for `inh-public-api-svc` only; the ingestion service
   — the largest of the three, and the one that parses untrusted uploaded files
