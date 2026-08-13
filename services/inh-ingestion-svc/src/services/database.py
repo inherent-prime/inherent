@@ -128,7 +128,16 @@ class DatabaseService:
             self.metadata,
             Column("id", BigInteger, primary_key=True, autoincrement=True),
             Column("workspace_id", String(100), nullable=False, unique=True),
-            Column("user_id", String(100), nullable=False),
+            # fk_workspace_tenant (migration 012): kept in sync with the raw
+            # SQL migration so ensure_schema() (test-only; production always
+            # provisions via scripts/migrations/*.sql, never calls this) does
+            # not silently diverge from the real, migrated schema again.
+            Column(
+                "user_id",
+                String(100),
+                ForeignKey("tenants.user_id", ondelete="CASCADE", name="fk_workspace_tenant"),
+                nullable=False,
+            ),
             Column("weaviate_collection", String(200), nullable=True),
             Column("document_count", Integer, nullable=False, default=0),
             Column("chunk_count", Integer, nullable=False, default=0),
