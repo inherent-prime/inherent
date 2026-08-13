@@ -113,6 +113,28 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen --extra dev --group dev
 
+      # inh-ingestion-svc's tests exercise real constraints (e.g.
+      # fk_workspace_tenant, added by migration 012) that only the raw SQL
+      # migrations create -- DatabaseService.ensure_schema()'s SQLAlchemy
+      # metadata.create_all() does not declare them. Without this step CI's
+      # Postgres schema structurally lacked constraints that dev/staging/prod
+      # all have (provisioned via docker-compose.yml's postgres-init service
+      # or the in-image `SERVICE_MODE=migrate` runner), so any test relying on
+      # a migration-only constraint passed in CI regardless of whether it
+      # actually held. Apply every migration in the same filename order those
+      # two mirror (scripts/migrations/NNN_*.sql, ascending), failing loudly
+      # (set -e + ON_ERROR_STOP=1) on the first error.
+      - name: Apply DB migrations (ingestion schema fidelity)
+        if: ${{ matrix.service == 'inh-ingestion-svc' }}
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          for migration in scripts/migrations/*.sql; do
+            echo "Applying $migration"
+            psql -h localhost -U postgres -d knowledge_base -v ON_ERROR_STOP=1 -f "$migration"
+          done
+
       - name: Lint
         run: ${{ matrix.lint }}
 
