@@ -5,6 +5,8 @@ All notable changes to Inherent are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-08-13
+
 ### Added
 
 - **Streamable HTTP transport for the MCP server (#220).** The same
@@ -19,7 +21,7 @@ All notable changes to Inherent are documented here. The format follows
   `X-API-Key` / `Authorization: Bearer` header and `api_key` is stripped
   from every advertised tool schema (computed from the registry schema, not
   hand-duplicated) so an agent is never prompted to source a secret it
-  might echo into context or logs. The surface is 10 tools, not stdio's 13:
+  might echo into context or logs. The surface is 10 tools, not stdio's 14:
   `verify_claim` (a lexical token-overlap counter that cannot detect
   negation — it scores "Neither party may cancel this Agreement" as
   `strong, 0.833` against source text saying the opposite), `search_memory`
@@ -677,6 +679,31 @@ All notable changes to Inherent are documented here. The format follows
   `ENABLE_DIVERSIFICATION=false`. See
   [ADR 0004](https://github.com/inherent-prime/inherent/blob/main/docs/adr/0004-per-document-diversification.md)
   and its amendment.
+
+- **Package versions bumped for the release unit that changed.** Bumps
+  `inh-ingestion-svc` 0.5.0 → 0.6.0 (breaking `workspace_id` requirements
+  across eight routes, plus the file-type registry) and `inh-public-api-svc`
+  0.2.0 → 0.3.0 (MCP Streamable HTTP transport, breaking MCP auth binding).
+  `inh-contracts` stays at 2.2.0 — already bumped during this cycle by the
+  changes that touched it. Both `uv.lock` files were regenerated to match, so
+  the images (which build from the lock since #226) carry the same versions.
+  These remain package versions: the published **image** tag is the
+  repository-level release tag, decoupled by design.
+
+### Removed
+
+- **Unused runtime dependencies dropped** to shrink the install surface of
+  both service images: `aiobreaker` and `psycopg[binary]` from
+  `inh-public-api-svc` (DB access is async-only via `asyncpg`; no circuit
+  breaker or sync driver is imported), and `packaging` from
+  `inh-ingestion-svc` (not imported anywhere). No behavior change.
+- **Dead `PLAN_RATE_LIMITS` pricing-tier constant removed** from
+  `inh-public-api-svc/src/config/constants.py` (and its `config/__init__`
+  re-export). It hardcoded commercial plan pricing (`starter`/`pro`/`team`/
+  `enterprise`, `$149`–`$2K+`/month) that this OSS repo has no billing system
+  for and that was read nowhere — per-key limits come from `ApiKey.rate_limit`
+  (default `DEFAULT_RATE_LIMIT`/`RATE_LIMIT_DEFAULT`). No behavior change
+  (#151).
 
 ### Fixed
 
@@ -1367,24 +1394,6 @@ All notable changes to Inherent are documented here. The format follows
   a request omitting it now gets **422** instead of editing the chunk. Every
   existing caller of this inh-ingestion-svc-internal endpoint must add
   `?workspace_id=<ws>`. (#134)
-
-### Removed
-
-- **Unused runtime dependencies dropped** to shrink the install surface of
-  both service images: `aiobreaker` and `psycopg[binary]` from
-  `inh-public-api-svc` (DB access is async-only via `asyncpg`; no circuit
-  breaker or sync driver is imported), and `packaging` from
-  `inh-ingestion-svc` (not imported anywhere). No behavior change.
-- **Dead `PLAN_RATE_LIMITS` pricing-tier constant removed** from
-  `inh-public-api-svc/src/config/constants.py` (and its `config/__init__`
-  re-export). It hardcoded commercial plan pricing (`starter`/`pro`/`team`/
-  `enterprise`, `$149`–`$2K+`/month) that this OSS repo has no billing system
-  for and that was read nowhere — per-key limits come from `ApiKey.rate_limit`
-  (default `DEFAULT_RATE_LIMIT`/`RATE_LIMIT_DEFAULT`). No behavior change
-  (#151).
-
-### Security
-
 - **⚠️ BREAKING (auth) — MCP now enforces workspace-scoped API key binding,
   and REST/MCP document lookups no longer leak cross-workspace existence
   (#138).** REST's `_resolve_workspace` binds a workspace-scoped key to
