@@ -976,19 +976,38 @@ def _extract_pptx_text(content: bytes) -> str:
     return "\n\n".join(slide_parts)
 
 
-def _extract_image_text(content: bytes, original_filename: str) -> str:
-    """Extract text from a PNG image via Tesseract OCR with graceful fallback.
+# Soft cap on multi-page image OCR (#120). Pathological multi-page TIFFs
+# (scanner dumps, fax archives) can be thousands of pages; OCR is CPU-
+# expensive, so stop after this many frames. Single-frame images are
+# unaffected. Parallel to `_MAX_PPTX_SLIDES` / `_MAX_XLSX_CELLS`.
+_MAX_IMAGE_OCR_PAGES = 50
 
-    OCR is an optional capability (requires the ``ocr`` extra plus the
-    ``tesseract`` system binary). When OCR is unavailable -- the libraries
-    are not installed, the tesseract binary is missing, or the image simply
-    contains no readable text -- this returns a minimal placeholder instead
-    of raising. The placeholder keeps the document flowing through the
-    pipeline (0 useful chunks, but not a hard failure) so a missing OCR
-    install never crashes ingestion.
+
+def _extract_image_text(content: bytes, original_filename: str) -> str:
+    """Extract text from an image via Tesseract OCR with graceful fallback (#61, #120).
+
+    Accepts any Pillow-decodable still image the registry routes to
+    ``image_ocr`` (PNG, JPEG, WebP, TIFF, BMP). OCR is an optional
+    capability (requires the ``ocr`` extra plus the ``tesseract`` system
+    binary). When OCR is unavailable -- the libraries are not installed, the
+    tesseract binary is missing, or the image simply contains no readable
+    text -- this returns a minimal placeholder instead of raising. The
+    placeholder keeps the document flowing through the pipeline (0 useful
+    chunks, but not a hard failure) so a missing OCR install never crashes
+    ingestion.
+
+    Multi-page TIFF (#120): only when Pillow reports ``format == "TIFF"``
+    and ``n_frames > 1``. Iterates frames via ``PIL.ImageSequence``, OCRs
+    each page up to ``_MAX_IMAGE_OCR_PAGES``, and joins non-empty results
+    with ``## Page N`` markers (same section-marker style as PPTX slides).
+    Animated non-TIFF formats (APNG, animated WebP) deliberately stay on
+    the single-frame path -- frame iteration is for document pages, not
+    animation frames. Single-frame images (PNG/JPEG/WebP/BMP, or a 1-page
+    TIFF) keep the original bare-text return shape so existing PNG
+    behavior is unchanged.
 
     Args:
-        content: Raw PNG bytes.
+        content: Raw image bytes.
         original_filename: Original filename, used in the fallback placeholder.
 
     Returns:
@@ -1010,6 +1029,40 @@ def _extract_image_text(content: bytes, original_filename: str) -> str:
 
     try:
         image = Image.open(io.BytesIO(content))
+        n_frames = getattr(image, "n_frames", 1)
+        # Gate multipage OCR to TIFF only. Pillow also sets n_frames > 1 for
+        # animated WebP/APNG; OCRing those frames would burn CPU and emit
+        # misleading ``## Page N`` markers for animation, not document pages.
+        # getattr: test fakes (and odd Pillow objects) may omit ``format``.
+        is_multipage_tiff = getattr(image, "format", None) == "TIFF" and n_frames > 1
+        if is_multipage_tiff:
+            from PIL import ImageSequence
+
+            page_parts: list[str] = []
+            any_text = False
+            for page_num, page in enumerate(ImageSequence.Iterator(image), start=1):
+                if page_num > _MAX_IMAGE_OCR_PAGES:
+                    logger.warning(
+                        "Image OCR page cap reached; stopping further pages",
+                        filename=original_filename,
+                        page_cap=_MAX_IMAGE_OCR_PAGES,
+                        total_frames=n_frames,
+                    )
+                    break
+                page_text = pytesseract.image_to_string(page).strip()
+                if page_text:
+                    any_text = True
+                    page_parts.append(f"## Page {page_num}\n{page_text}")
+                else:
+                    page_parts.append(f"## Page {page_num}")
+            if not any_text:
+                logger.warning(
+                    "OCR produced no text for multi-page image; returning placeholder",
+                    filename=original_filename,
+                )
+                return placeholder
+            return "\n\n".join(page_parts)
+
         text = pytesseract.image_to_string(image)
     except pytesseract.TesseractNotFoundError:
         logger.warning(

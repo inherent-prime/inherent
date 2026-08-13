@@ -350,6 +350,56 @@ class TestUploadDocumentValidation:
         assert response.json()["mime_type"] == "image/png"
         application.dependency_overrides.clear()
 
+    @pytest.mark.parametrize(
+        ("content", "filename", "content_type"),
+        [
+            (b"\xff\xd8\xff fake jpeg", "scan.jpg", "image/jpeg"),
+            (b"RIFF\x00\x00\x00\x00WEBP fake", "scan.webp", "image/webp"),
+            (b"II*\x00 fake tiff", "scan.tiff", "image/tiff"),
+            (b"MM\x00* fake tiff be", "scan.tif", "image/tiff"),
+            (b"BM fake bmp", "scan.bmp", "image/bmp"),
+        ],
+        ids=["jpeg", "webp", "tiff-le", "tiff-be", "bmp"],
+    )
+    async def test_image_ocr_siblings_accepted(
+        self, write_key, mock_db, mock_storage, mock_mq, content, filename, content_type
+    ):
+        """#120: JPEG/WebP/TIFF/BMP are accepted on REST (OCR in ingestion)."""
+        application = create_app()
+        application.dependency_overrides[get_api_key_info] = lambda: write_key
+        application.dependency_overrides[get_write_permission] = lambda: write_key
+        application.dependency_overrides[resolve_workspace_write] = lambda: ResolvedAuth(
+            key_info=write_key, workspace_id=write_key.workspace_id
+        )
+        application.dependency_overrides[get_database] = lambda: mock_db
+
+        with (
+            patch.object(document_intake, "get_storage_service", return_value=mock_storage),
+            patch.object(
+                document_intake,
+                "get_mq_service",
+                new_callable=AsyncMock,
+                return_value=mock_mq,
+            ),
+        ):
+            transport = ASGITransport(app=application)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                response = await ac.post(
+                    "/v1/documents",
+                    files=_file_payload(
+                        content=content,
+                        filename=filename,
+                        content_type=content_type,
+                    ),
+                    headers={"X-API-Key": "ink_test_key"},
+                )
+
+        assert response.status_code == 201, (
+            f"{content_type} should be accepted but got {response.status_code}: " f"{response.text}"
+        )
+        assert response.json()["mime_type"] == content_type
+        application.dependency_overrides.clear()
+
     async def test_empty_file(self, write_key, mock_db, mock_storage, mock_mq):
         application = create_app()
         application.dependency_overrides[get_api_key_info] = lambda: write_key

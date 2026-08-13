@@ -7,6 +7,15 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Added
 
+- **Image OCR for JPEG, WebP, TIFF, and BMP (#120).** Extends the existing
+  PNG OCR path (`image_ocr` extractor, optional `ocr` extra, placeholder
+  degradation) to `image/jpeg` (`.jpg`/`.jpeg`), `image/webp`, `image/tiff`
+  (`.tif`/`.tiff`), and `image/bmp`. Multi-page TIFF iterates frames via
+  `PIL.ImageSequence`, joins page text with `## Page N` markers, and caps
+  at 50 pages. Magic-byte sniffing covers both TIFF endiannesses
+  (`II*\x00` / `MM\x00*`) via `FileTypeSpec.magic_alternates`. REST-only;
+  GIF remains out of scope. Docs regenerated from `FILE_TYPE_REGISTRY`.
+
 - **Streamable HTTP transport for the MCP server (#220).** The same
   `_TOOLS` registry stdio serves is now mounted at `POST /mcp` inside
   `inh-public-api-svc` — same process, same port, same middleware stack as

@@ -40,6 +40,18 @@ DOC_PATH = REPO_ROOT / "docs" / "reference" / "file-types.md"
 EXAMPLES_DOC_PATH = REPO_ROOT / "docs" / "examples" / "README.md"
 MCP_TOOLS_DOC_PATH = REPO_ROOT / "docs" / "reference" / "mcp-tools.md"
 
+
+def _read_utf8(path: Path) -> str:
+    """Read a docs file as UTF-8.
+
+    Bare ``Path.read_text()`` on Windows uses the locale encoding (cp1252)
+    and raises ``UnicodeDecodeError`` on the em-dashes these docs contain.
+    CI (Linux, UTF-8 locale) never saw that; pin UTF-8 so the sync contract
+    is encoding-stable across platforms.
+    """
+    return path.read_text(encoding="utf-8")
+
+
 BEGIN_MARKER = (
     "<!-- BEGIN GENERATED FILE TYPES TABLE (#117; run "
     "scripts/generate_supported_formats.py to refresh) -->"
@@ -56,7 +68,7 @@ def test_file_types_doc_matches_registry():
     what render_markdown_table() produces right now. A mismatch means
     FILE_TYPE_REGISTRY changed (or the doc was hand-edited) without
     regenerating the doc -- exactly the drift #117 exists to prevent."""
-    text = DOC_PATH.read_text()
+    text = _read_utf8(DOC_PATH)
     assert BEGIN_MARKER in text, "missing generated-table BEGIN marker"
     assert END_MARKER in text, "missing generated-table END marker"
 
@@ -78,7 +90,7 @@ def test_every_registry_type_named_in_doc():
     refactor of render_markdown_table() that accidentally drops a row still
     gets caught even if someone (wrongly) updates this test's marker
     comparison alongside it."""
-    text = DOC_PATH.read_text()
+    text = _read_utf8(DOC_PATH)
     for mime in all_mime_types():
         assert mime in text, f"{mime} not documented in {DOC_PATH}"
 
@@ -110,7 +122,7 @@ def test_examples_readme_400_error_matches_registry():
         "Unsupported file type 'application/octet-stream'. "
         f"Allowed types: {', '.join(all_mime_types())}"
     )
-    text = EXAMPLES_DOC_PATH.read_text()
+    text = _read_utf8(EXAMPLES_DOC_PATH)
     assert expected_detail in text, (
         "docs/examples/README.md's 400 'Unsupported file type' example is out of "
         "sync with FILE_TYPE_REGISTRY. Expected this exact detail string:\n"
@@ -132,7 +144,7 @@ def test_examples_readme_mentions_every_mime_type():
     removing `application/toml` from only that line leaves this test
     green). If the 'Allowed MIME types' line itself needs a drift pin,
     that requires an assertion scoped to that line's text, not this one."""
-    text = EXAMPLES_DOC_PATH.read_text()
+    text = _read_utf8(EXAMPLES_DOC_PATH)
     for mime in all_mime_types():
         assert mime in text, f"{mime} not mentioned anywhere in {EXAMPLES_DOC_PATH}"
 
@@ -172,7 +184,7 @@ def test_mcp_tools_doc_does_not_claim_a_flat_default():
     the fallback for an unrecognized/absent extension, not "the" default.
     The specific misleading phrasing this pins against is the literal old
     table-cell text this doc carried before the fix."""
-    text = MCP_TOOLS_DOC_PATH.read_text()
+    text = _read_utf8(MCP_TOOLS_DOC_PATH)
     assert "`text/markdown` default" not in text, (
         f"{MCP_TOOLS_DOC_PATH} must not claim content_type has a flat "
         "'text/markdown default' -- the real default is derived from the "
@@ -187,7 +199,7 @@ def test_mcp_tools_doc_explains_extension_derived_default():
     unrecognized or absent -- and must link to file-types.md (the single,
     generated, test-verified source of truth for the exhaustive type list)
     rather than re-enumerating it by hand."""
-    text = MCP_TOOLS_DOC_PATH.read_text()
+    text = _read_utf8(MCP_TOOLS_DOC_PATH)
     assert "derived from" in text and "extension" in text, (
         f"{MCP_TOOLS_DOC_PATH} must explain that an omitted content_type is "
         "derived from the filename's extension (#197)"
@@ -208,7 +220,7 @@ def test_mcp_tools_doc_explains_explicit_value_is_never_overridden():
     as-is, never silently re-derived from the filename. Without this
     documented, a reader has no way to know whether an explicit value they
     pass is trustworthy or subject to a hidden override."""
-    text = MCP_TOOLS_DOC_PATH.read_text()
+    text = _read_utf8(MCP_TOOLS_DOC_PATH)
     assert "never re-derived from the filename" in text or "never re-derived" in text, (
         f"{MCP_TOOLS_DOC_PATH} must state that an explicitly-declared "
         "content_type is honored as-is and never re-derived from the filename"
