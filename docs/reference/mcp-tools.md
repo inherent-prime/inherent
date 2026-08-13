@@ -132,8 +132,8 @@ parameters below.
 | --- | --- | --- | --- | --- |
 | `upload_document` | ✅ | `filename`, `content` (required); `content_type` (optional — omit it: derived from `filename`'s extension, see below), `workspace_id` | **Text-only** ingestion sharing REST's validate/dedup/store/enqueue pipeline. Binary formats (PDF/DOCX/PNG) and JSON are REST-only — use `POST /v1/documents`. If the key owns several workspaces, `workspace_id` is required | `POST /v1/documents` |
 | `create_chunk` | ✅ | `document_id`, `content` (required) | Append a chunk at `max(chunk_index)+1`; PG then Weaviate (compensated on vector failure) | `POST /v1/chunks/{document_id}` |
-| `edit_chunk` | ✅ | `document_id`, `chunk_index`, `content` (required) | Edit by stable `chunk_index`; re-embeds. Vector failure restores prior PG content | `PATCH /v1/chunks/{document_id}/{chunk_index}` |
-| `delete_chunk` | ✅ | `document_id`, `chunk_index` (required) | Hard-delete one chunk (vector first); leaves gaps | `DELETE /v1/chunks/{document_id}/{chunk_index}` |
+| `edit_chunk` | ✅ | `document_id`, `chunk_index`, `content` (required) | Edit by stable `chunk_index`; re-embeds. Vector failure restores prior PG content | `PATCH /v1/chunks/{document_id}/index/{chunk_index}` |
+| `delete_chunk` | ✅ | `document_id`, `chunk_index` (required) | Hard-delete one chunk (vector first); leaves gaps | `DELETE /v1/chunks/{document_id}/index/{chunk_index}` |
 | `delete_document` | ✅ | `document_id` (required) | Permanently delete document + vectors + chunks + stored bytes | `DELETE /v1/documents/{id}` |
 | `refresh_stale_source` | ✅ | `document_id` (required) | Re-enqueue an uploaded document to clear staleness; on MQ failure a retried best-effort compensation marks it `failed`, matching REST (see the REST reference for exhaustion behavior) | `POST /v1/documents/{id}/refresh` |
 

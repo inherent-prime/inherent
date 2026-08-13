@@ -9,15 +9,19 @@ All notable changes to Inherent are documented here. The format follows
 
 - **Chunk CRUD on public-API REST + MCP (#133).** Agents can append, edit, and
   hard-delete individual chunks on both surfaces: `POST` /
-  `PATCH` / `DELETE /v1/chunks/...` and MCP `create_chunk` / `edit_chunk` /
-  `delete_chunk` (write permission). Ordering is Option A — append at
-  `max(chunk_index)+1`, delete leaves gaps (`chunk_index` is a stable id).
-  Writes run synchronously in public-api (PG + Weaviate with embedding);
-  vector failure compensates (Create rolls back PG; Update restores prior
-  content; Delete aborts before PG). PG delete is workspace-scoped and
-  aborts (no `chunk_count` decrement) when `DELETE` rowcount ≠ 1 under
-  concurrent races. Failure parity pinned in `test_failure_parity.py`.
-  MCP surface is stdio 17 / HTTP 13.
+  `PATCH` / `DELETE /v1/chunks/{document_id}/index/{chunk_index}` and MCP
+  `create_chunk` / `edit_chunk` / `delete_chunk` (write permission). Ordering
+  is Option A — append at `max(chunk_index)+1`, delete leaves gaps
+  (`chunk_index` is a stable id). Write routes use `/index/{chunk_index}` so
+  they cannot collide with `GET` by BIGSERIAL `id`. Writes run synchronously
+  in public-api (PG + Weaviate with `embed_passage` / TEI `truncate`); empty
+  content is rejected on both surfaces. Vector failure compensates (Create
+  rolls back PG; Update restores prior content only if this request's hash is
+  still on the row; Delete aborts before PG). Create scans `content_risk`
+  rather than writing `"none"`. PG delete is workspace-scoped and aborts (no
+  `chunk_count` decrement) when `DELETE` rowcount ≠ 1 under concurrent races.
+  Failure parity pinned in `test_failure_parity.py`. MCP surface is stdio 17
+  / HTTP 13.
 
 - **Streamable HTTP transport for the MCP server (#220).** The same
   `_TOOLS` registry stdio serves is now mounted at `POST /mcp` inside
@@ -31,7 +35,7 @@ All notable changes to Inherent are documented here. The format follows
   `X-API-Key` / `Authorization: Bearer` header and `api_key` is stripped
   from every advertised tool schema (computed from the registry schema, not
   hand-duplicated) so an agent is never prompted to source a secret it
-  might echo into context or logs. The surface is 10 tools, not stdio's 13:
+  might echo into context or logs. The surface is 13 tools, not stdio's 17:
   `verify_claim` (a lexical token-overlap counter that cannot detect
   negation — it scores "Neither party may cancel this Agreement" as
   `strong, 0.833` against source text saying the opposite), `search_memory`

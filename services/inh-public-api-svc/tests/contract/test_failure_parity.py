@@ -1103,6 +1103,10 @@ class TestChunkCreateVectorDownParity:
     async def test_rest_create_vector_down_returns_503(self):
         key = _write_key()
         db = _mock_db()
+        db.append_document_chunk = AsyncMock(return_value=_sample_chunk(4, "new"))
+        db.delete_document_chunk = AsyncMock(return_value=_sample_chunk(4, "new"))
+        failing_search = AsyncMock()
+        failing_search.upsert_chunk_vector = AsyncMock(side_effect=RuntimeError("weaviate down"))
         application = create_app()
         application.dependency_overrides[resolve_workspace_write] = lambda: ResolvedAuth(
             key_info=key, workspace_id=WS
@@ -1110,8 +1114,8 @@ class TestChunkCreateVectorDownParity:
         application.dependency_overrides[get_database] = lambda: db
         try:
             with patch(
-                "src.api.v1.chunks.create_chunk_everywhere",
-                AsyncMock(side_effect=RuntimeError("weaviate down")),
+                "src.services.chunk_writes.get_search_service",
+                new=AsyncMock(return_value=failing_search),
             ):
                 transport = ASGITransport(app=application)
                 async with AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -1124,6 +1128,7 @@ class TestChunkCreateVectorDownParity:
             application.dependency_overrides.clear()
 
         assert response.status_code == 503
+        db.delete_document_chunk.assert_awaited_once_with("doc-1", WS, 4)
 
 
 class TestChunkUpdateVectorDownParity:
@@ -1154,7 +1159,45 @@ class TestChunkUpdateVectorDownParity:
 
         assert "Error" in result[0].text
         assert db.update_document_chunk.await_count == 2
-        assert db.update_document_chunk.await_args_list[1].args[3] == "old"
+        restore_call = db.update_document_chunk.await_args_list[1]
+        assert restore_call.args[3] == "old"
+        assert restore_call.kwargs.get("only_if_content_hash") == "nh"
+
+    async def test_rest_update_vector_down_restores_prior_content(self):
+        key = _write_key()
+        db = _mock_db()
+        prior = _sample_chunk(1, "old")
+        updated = _sample_chunk(1, "new")
+        updated.metadata = {"content_hash": "nh"}
+        db.get_document_chunk_by_index = AsyncMock(return_value=prior)
+        db.update_document_chunk = AsyncMock(side_effect=[updated, prior])
+        failing_search = AsyncMock()
+        failing_search.upsert_chunk_vector = AsyncMock(side_effect=RuntimeError("embed fail"))
+        application = create_app()
+        application.dependency_overrides[resolve_workspace_write] = lambda: ResolvedAuth(
+            key_info=key, workspace_id=WS
+        )
+        application.dependency_overrides[get_database] = lambda: db
+        try:
+            with patch(
+                "src.services.chunk_writes.get_search_service",
+                new=AsyncMock(return_value=failing_search),
+            ):
+                transport = ASGITransport(app=application)
+                async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                    response = await ac.patch(
+                        "/v1/chunks/doc-1/index/1",
+                        headers={"X-API-Key": "ink_test"},
+                        json={"content": "new"},
+                    )
+        finally:
+            application.dependency_overrides.clear()
+
+        assert response.status_code == 503
+        assert db.update_document_chunk.await_count == 2
+        restore_call = db.update_document_chunk.await_args_list[1]
+        assert restore_call.args[3] == "old"
+        assert restore_call.kwargs.get("only_if_content_hash") == "nh"
 
 
 class TestChunkDeleteVectorDownParity:
@@ -1181,6 +1224,10 @@ class TestChunkDeleteVectorDownParity:
     async def test_rest_delete_vector_down_returns_503(self):
         key = _write_key()
         db = _mock_db()
+        db.get_document_chunk_by_index = AsyncMock(return_value=_sample_chunk(2))
+        db.delete_document_chunk = AsyncMock()
+        failing_search = AsyncMock()
+        failing_search.delete_chunk_vector = AsyncMock(side_effect=RuntimeError("weaviate down"))
         application = create_app()
         application.dependency_overrides[resolve_workspace_write] = lambda: ResolvedAuth(
             key_info=key, workspace_id=WS
@@ -1188,16 +1235,54 @@ class TestChunkDeleteVectorDownParity:
         application.dependency_overrides[get_database] = lambda: db
         try:
             with patch(
-                "src.api.v1.chunks.delete_chunk_everywhere",
-                AsyncMock(side_effect=RuntimeError("weaviate down")),
+                "src.services.chunk_writes.get_search_service",
+                new=AsyncMock(return_value=failing_search),
             ):
                 transport = ASGITransport(app=application)
                 async with AsyncClient(transport=transport, base_url="http://test") as ac:
                     response = await ac.delete(
-                        "/v1/chunks/doc-1/2",
+                        "/v1/chunks/doc-1/index/2",
                         headers={"X-API-Key": "ink_test"},
                     )
         finally:
             application.dependency_overrides.clear()
 
         assert response.status_code == 503
+        db.delete_document_chunk.assert_not_awaited()
+
+
+class TestChunkEmptyContentParity:
+    """REST and MCP both reject empty content before any store write."""
+
+    async def test_mcp_create_empty_content_errors(self):
+        db = _mock_db()
+        result = await _call_mcp_tool(
+            "create_chunk",
+            {"api_key": "ink_k", "document_id": "doc-1", "content": ""},
+            db,
+        )
+        text = result[0].text.lower()
+        assert "error" in text or "non-empty" in text or "validation" in text
+        db.append_document_chunk.assert_not_awaited()
+
+    async def test_rest_create_empty_content_returns_422(self):
+        key = _write_key()
+        db = _mock_db()
+        application = create_app()
+        application.dependency_overrides[resolve_workspace_write] = lambda: ResolvedAuth(
+            key_info=key, workspace_id=WS
+        )
+        application.dependency_overrides[get_database] = lambda: db
+        try:
+            transport = ASGITransport(app=application)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                response = await ac.post(
+                    "/v1/chunks/doc-1",
+                    headers={"X-API-Key": "ink_test"},
+                    json={"content": ""},
+                )
+        finally:
+            application.dependency_overrides.clear()
+
+        assert response.status_code == 422
+        db.append_document_chunk.assert_not_awaited()

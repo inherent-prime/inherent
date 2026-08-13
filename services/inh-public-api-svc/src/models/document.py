@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Final
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 # --- Document-context pagination bounds (#219) ------------------------------
 # A 169-chunk PDF's combined text measured 117,086 chars (~29,300 tokens) --
@@ -15,6 +15,9 @@ from pydantic import BaseModel
 DEFAULT_MAX_CHARS: Final[int] = 20_000
 MIN_MAX_CHARS: Final[int] = 1
 MAX_MAX_CHARS: Final[int] = 100_000
+# Single-chunk write body cap (#133). Same ceiling as one /context page so a
+# Create/Update cannot land a blob larger than the bounded-read surface.
+MAX_CHUNK_CONTENT_CHARS: Final[int] = MAX_MAX_CHARS
 
 
 class Document(BaseModel):
@@ -47,7 +50,32 @@ class DocumentChunk(BaseModel):
 class ChunkContentRequest(BaseModel):
     """Body for Create / Update chunk (#133)."""
 
-    content: str
+    content: str = Field(..., min_length=1, max_length=MAX_CHUNK_CONTENT_CHARS)
+
+    @field_validator("content")
+    @classmethod
+    def reject_whitespace_only(cls, value: str) -> str:
+        """Whitespace-only would embed as a zero vector with no TEI call."""
+        if not value.strip():
+            raise ValueError("content must contain non-whitespace characters")
+        return value
+
+
+def chunk_content_error(raw: object) -> str | None:
+    """MCP-side validation matching ``ChunkContentRequest`` (REST 422).
+
+    Returns an ``Error: ...`` message, or None when ``raw`` is valid content.
+    """
+    if raw is None:
+        return "Error: content is required"
+    try:
+        ChunkContentRequest(content=str(raw))
+    except ValidationError:
+        text = str(raw)
+        if not text.strip():
+            return "Error: content is required"
+        return "Error: content exceeds maximum length"
+    return None
 
 
 class DocumentListResponse(BaseModel):

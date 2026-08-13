@@ -148,7 +148,7 @@ class TestUpdateChunkRest:
             AsyncMock(return_value=ChunkWriteOutcome(found=True, chunk=chunk)),
         ):
             resp = await client.patch(
-                "/v1/chunks/doc-001/1",
+                "/v1/chunks/doc-001/index/1",
                 headers={"X-API-Key": "ink_test"},
                 json={"content": "edited"},
             )
@@ -161,7 +161,7 @@ class TestUpdateChunkRest:
             AsyncMock(return_value=ChunkWriteOutcome(found=False)),
         ):
             resp = await client.patch(
-                "/v1/chunks/doc-001/99",
+                "/v1/chunks/doc-001/index/99",
                 headers={"X-API-Key": "ink_test"},
                 json={"content": "x"},
             )
@@ -173,7 +173,7 @@ class TestUpdateChunkRest:
             AsyncMock(side_effect=RuntimeError("embed fail")),
         ):
             resp = await client.patch(
-                "/v1/chunks/doc-001/0",
+                "/v1/chunks/doc-001/index/0",
                 headers={"X-API-Key": "ink_test"},
                 json={"content": "x"},
             )
@@ -187,7 +187,7 @@ class TestDeleteChunkRest:
             AsyncMock(return_value=ChunkDeleteOutcome(found=True)),
         ):
             resp = await client.delete(
-                "/v1/chunks/doc-001/0",
+                "/v1/chunks/doc-001/index/0",
                 headers={"X-API-Key": "ink_test"},
             )
         assert resp.status_code == 204
@@ -198,7 +198,7 @@ class TestDeleteChunkRest:
             AsyncMock(return_value=ChunkDeleteOutcome(found=False)),
         ):
             resp = await client.delete(
-                "/v1/chunks/doc-001/99",
+                "/v1/chunks/doc-001/index/99",
                 headers={"X-API-Key": "ink_test"},
             )
         assert resp.status_code == 404
@@ -209,7 +209,41 @@ class TestDeleteChunkRest:
             AsyncMock(side_effect=RuntimeError("weaviate down")),
         ):
             resp = await client.delete(
-                "/v1/chunks/doc-001/0",
+                "/v1/chunks/doc-001/index/0",
                 headers={"X-API-Key": "ink_test"},
             )
         assert resp.status_code == 503
+
+
+class TestChunkWriteUrlIdentity:
+    """GET-by-id and PATCH/DELETE-by-index must not share a URL (#133 review)."""
+
+    async def test_patch_on_id_url_is_not_a_write(self, client):
+        with patch("src.api.v1.chunks.update_chunk_everywhere") as update:
+            resp = await client.patch(
+                "/v1/chunks/doc-001/1",
+                headers={"X-API-Key": "ink_test"},
+                json={"content": "edited"},
+            )
+        assert resp.status_code in (404, 405, 422)
+        update.assert_not_awaited()
+
+    async def test_empty_content_returns_422(self, client):
+        with patch("src.api.v1.chunks.create_chunk_everywhere") as create:
+            resp = await client.post(
+                "/v1/chunks/doc-001",
+                headers={"X-API-Key": "ink_test"},
+                json={"content": ""},
+            )
+        assert resp.status_code == 422
+        create.assert_not_awaited()
+
+    async def test_whitespace_content_returns_422(self, client):
+        with patch("src.api.v1.chunks.create_chunk_everywhere") as create:
+            resp = await client.post(
+                "/v1/chunks/doc-001",
+                headers={"X-API-Key": "ink_test"},
+                json={"content": "   "},
+            )
+        assert resp.status_code == 422
+        create.assert_not_awaited()

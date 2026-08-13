@@ -312,7 +312,8 @@ class SearchService:
         stale after an edit. ``create=True`` POSTs a new object (append);
         ``create=False`` PATCHes properties + vector (update).
         """
-        from src.services.embedder import embed_query
+        from src.services.content_risk import compute_content_risk
+        from src.services.embedder import embed_passage
 
         collection_name = _get_workspace_collection_name(workspace_id)
         tenant_name = _get_user_tenant_name(user_id)
@@ -321,27 +322,29 @@ class SearchService:
         object_id = chunk_vector_uuid(workspace_id, user_id, document_id, chunk_index)
 
         # Blocking TEI HTTP — offload so the event loop stays responsive (#19).
-        vector = list(await asyncio.to_thread(embed_query, content))
+        # embed_passage (not embed_query): truncate=True + no query LRU cache.
+        vector = list(await asyncio.to_thread(embed_passage, content))
         ingested_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        risk_level, risk_reasons = compute_content_risk(content)
 
         client = await self._get_client()
         if create:
+            # Omit start_char/end_char: an appended chunk has no source span.
+            # Writing 0,0 looks like a real highlight at the start of the file.
             properties = {
                 "document_id": document_id,
                 "workspace_id": workspace_id,
                 "user_id": user_id,
                 "content": content,
                 "chunk_index": chunk_index,
-                "start_char": 0,
-                "end_char": 0,
                 "original_filename": original_filename or "",
                 "content_type": content_type or "",
                 "created_at": ingested_at,
                 "content_hash": content_hash,
                 "source_uri": source_uri,
                 "ingested_at": ingested_at,
-                "content_risk": "none",
-                "content_risk_reasons": [],
+                "content_risk": risk_level,
+                "content_risk_reasons": risk_reasons,
                 "chunking_strategy": "manual_append",
             }
             response = await client.request(
@@ -365,6 +368,8 @@ class SearchService:
                         "content": content,
                         "content_hash": content_hash,
                         "ingested_at": ingested_at,
+                        "content_risk": risk_level,
+                        "content_risk_reasons": risk_reasons,
                     },
                     "vector": vector,
                 },

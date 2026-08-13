@@ -193,7 +193,7 @@ async def get_document_context(
     )
 
 
-@router.patch("/chunks/{document_id}/{chunk_index}", response_model=DocumentChunk)
+@router.patch("/chunks/{document_id}/index/{chunk_index}", response_model=DocumentChunk)
 async def update_document_chunk(
     document_id: str,
     chunk_index: int,
@@ -203,7 +203,9 @@ async def update_document_chunk(
 ) -> DocumentChunk:
     """Edit one chunk by stable ``chunk_index`` (#133).
 
-    Updates PostgreSQL then re-embeds in Weaviate (vector + content_hash).
+    Path is ``/index/{chunk_index}`` so it cannot collide with
+    ``GET /chunks/{document_id}/{chunk_id}`` (BIGSERIAL id). Updates
+    PostgreSQL then re-embeds in Weaviate (vector + content_hash).
     Vector failure restores prior PG content. Requires **write** permission.
     """
     workspace_id = auth.workspace_id
@@ -236,7 +238,7 @@ async def update_document_chunk(
 
 
 @router.delete(
-    "/chunks/{document_id}/{chunk_index}",
+    "/chunks/{document_id}/index/{chunk_index}",
     status_code=status.HTTP_204_NO_CONTENT,
 )
 async def delete_document_chunk(
@@ -247,6 +249,7 @@ async def delete_document_chunk(
 ) -> Response:
     """Hard-delete one chunk (gaps allowed — Option A) (#133).
 
+    Path is ``/index/{chunk_index}`` so it cannot collide with GET-by-id.
     Deletes the Weaviate object first, then the PG row. Vector failure leaves
     the row intact (retryable). Requires **write** permission.
     """
@@ -293,9 +296,9 @@ async def get_document_chunk(
     as 404 (no cross-tenant existence leak). Registered AFTER the literal
     ``/context`` route above so that path is matched first (FastAPI/Starlette
     matches routes in registration order; this generic ``{chunk_id}`` path
-    would otherwise shadow it). Also registered AFTER PATCH/DELETE by
-    ``chunk_index`` so integer path segments hit the write routes for those
-    methods (GET still keys on BIGSERIAL id).
+    would otherwise shadow it). Write routes use a distinct
+    ``/index/{chunk_index}`` segment so GET-by-id and PATCH/DELETE-by-index
+    cannot address different rows at the same URL.
     """
     workspace_id = auth.workspace_id
     chunk = None

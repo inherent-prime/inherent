@@ -12,6 +12,26 @@ import math
 from src.services.chunk_math import compute_chunk_content_hash, estimate_tokens
 
 
+def _load_vectors():
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[4] / "tests" / "chunk_formula_vectors.py"
+    spec = importlib.util.spec_from_file_location("chunk_formula_vectors", path)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class TestFrozenVectorTable:
+    def test_hash_and_tokens_match_frozen_table(self):
+        vectors = _load_vectors()
+        for content, digest, tokens in vectors.HASH_TOKEN_CASES:
+            assert compute_chunk_content_hash(content) == digest
+            assert estimate_tokens(content) == tokens
+
+
 class TestComputeChunkContentHash:
     def test_sha256_of_utf8_bytes(self):
         content = "hello world"

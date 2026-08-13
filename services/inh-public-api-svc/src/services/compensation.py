@@ -162,18 +162,26 @@ async def restore_chunk_content_with_retry(
     content: str,
     *,
     operation: str,
+    only_if_content_hash: str | None = None,
     attempts: int = MARK_FAILED_ATTEMPTS,
     backoff_seconds: float = MARK_FAILED_BACKOFF_SECONDS,
 ) -> bool:
     """Restore a chunk's prior PG content after a failed vector update (#133).
 
     Same retry + loud-exhaustion pattern as :func:`delete_chunk_with_retry`.
-    ``None`` from ``update_document_chunk`` (row gone) counts as success —
-    nothing left to restore.
+    ``None`` from ``update_document_chunk`` (row gone, or CAS miss when
+    ``only_if_content_hash`` no longer matches) counts as success — a
+    concurrent edit won, so we must not clobber it.
     """
     for attempt in range(1, attempts + 1):
         try:
-            await database.update_document_chunk(document_id, workspace_id, chunk_index, content)
+            await database.update_document_chunk(
+                document_id,
+                workspace_id,
+                chunk_index,
+                content,
+                only_if_content_hash=only_if_content_hash,
+            )
             return True
         except Exception as exc:
             if attempt < attempts:

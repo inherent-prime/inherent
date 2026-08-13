@@ -56,9 +56,9 @@ writes ship.
 
 | Op | REST | MCP (perm) | Flow |
 | --- | --- | --- | --- |
-| Create | `POST /v1/chunks/{document_id}` body `{content}` → `DocumentChunk` | `create_chunk` (write) | PG insert (`chunk_index=max+1`, hash, tokens) → `embed_query` → Weaviate upsert. Vector fail → compensate (delete PG row). |
-| Update | `PATCH /v1/chunks/{document_id}/{chunk_index}` body `{content}` → `DocumentChunk` | `edit_chunk` (write) | PG update (recompute hash + tokens) → re-embed → Weaviate update **with new vector**. Vector fail → restore prior content or mark divergent loudly. |
-| Delete | `DELETE /v1/chunks/{document_id}/{chunk_index}` → 204 | `delete_chunk` (write) | Weaviate delete by UUID first → PG delete. Vector fail → abort before PG. |
+| Create | `POST /v1/chunks/{document_id}` body `{content}` → `DocumentChunk` | `create_chunk` (write) | PG insert (`chunk_index=max+1`, hash, tokens) → `embed_passage` → Weaviate upsert. Vector fail → compensate (delete PG row). |
+| Update | `PATCH /v1/chunks/{document_id}/index/{chunk_index}` body `{content}` → `DocumentChunk` | `edit_chunk` (write) | PG update (recompute hash + tokens) → re-embed → Weaviate update **with new vector**. Vector fail → restore prior content or mark divergent loudly. |
+| Delete | `DELETE /v1/chunks/{document_id}/index/{chunk_index}` → 204 | `delete_chunk` (write) | Weaviate delete by UUID first → PG delete. Vector fail → abort before PG. |
 | Read | Unchanged | Optional `get_chunk` for REST parity | — |
 
 **Auth:** `require_write_permission` + workspace ownership (parity with
@@ -114,10 +114,10 @@ upsert/re-embed/delete.
 
 | Task | Notes |
 | --- | --- |
-| Chunk vector write path | Mirror `delete_document_vectors` (raw HTTP + deterministic UUID + `embed_query`) |
+| Chunk vector write path | Mirror `delete_document_vectors` (raw HTTP + deterministic UUID + `embed_passage`) |
 | `POST /v1/chunks/{document_id}` | Append-only Create |
-| `PATCH /v1/chunks/{document_id}/{chunk_index}` | Update with **new vector** (do not leave content-only / stale embedding) |
-| `DELETE /v1/chunks/{document_id}/{chunk_index}` | Vector-first then PG |
+| `PATCH /v1/chunks/{document_id}/index/{chunk_index}` | Update with **new vector** (do not leave content-only / stale embedding) |
+| `DELETE /v1/chunks/{document_id}/index/{chunk_index}` | Vector-first then PG |
 | Auth + not-found | Write perm; workspace ownership; 404 cross-tenant |
 | Contract/unit tests | Happy path + DB down / vector down / not-found / permission |
 

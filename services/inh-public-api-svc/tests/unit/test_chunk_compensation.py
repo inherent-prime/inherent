@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from src.services.compensation import delete_chunk_with_retry
+from src.services.compensation import delete_chunk_with_retry, restore_chunk_content_with_retry
 from src.services.metrics import document_compensation_exhausted_total
 
 pytestmark = pytest.mark.asyncio
@@ -83,6 +83,28 @@ class TestDeleteChunkWithRetry:
         assert ok is False
         assert db.delete_document_chunk.await_count == 3
         assert _exhausted_count("chunk_create_vector_rollback") == before + 1
+
+
+class TestRestoreChunkContentWithRetry:
+    async def test_passes_cas_hash_and_treats_none_as_success(self):
+        """CAS miss (concurrent edit won) must not retry or exhaust."""
+        db = AsyncMock()
+        db.update_document_chunk = AsyncMock(return_value=None)
+
+        ok = await restore_chunk_content_with_retry(
+            db,
+            "doc-1",
+            "ws-1",
+            1,
+            "old",
+            only_if_content_hash="hash-we-wrote",
+            operation="chunk_update_vector_rollback",
+        )
+
+        assert ok is True
+        db.update_document_chunk.assert_awaited_once()
+        kwargs = db.update_document_chunk.await_args.kwargs
+        assert kwargs["only_if_content_hash"] == "hash-we-wrote"
 
 
 class TestCreatePathVectorFailRollback:

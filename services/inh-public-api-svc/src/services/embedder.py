@@ -66,16 +66,42 @@ def _client() -> httpx.Client:
     return _CLIENT
 
 
+def _embed_one(text: str, *, truncate: bool) -> list[float]:
+    """POST one text to TEI. Empty / whitespace-only → zero vector, no HTTP.
+
+    ``truncate=True`` tells TEI to silently truncate inputs longer than the
+    model's max_input_length (256 tokens for all-MiniLM-L6-v2) instead of
+    returning 413 — same as ingestion ``_post_embed``. Search queries stay
+    short, so ``embed_query`` leaves truncate off.
+    """
+    dim = _embedding_dim()
+    if not text or not text.strip():
+        return [0.0] * dim
+    payload: dict[str, object] = {"inputs": [text]}
+    if truncate:
+        payload["truncate"] = True
+    resp = _client().post("/embed", json=payload)
+    resp.raise_for_status()
+    vec = resp.json()[0]
+    return [float(x) for x in vec]
+
+
 @lru_cache(maxsize=1024)
 def embed_query(text: str) -> tuple[float, ...]:
     """Return a tuple of floats (hashable for LRU caching).
 
     Empty / whitespace-only input returns a zero vector without a network call.
+    Sized for short search queries — do not feed chunk bodies through this
+    cache; use :func:`embed_passage` for writes.
     """
-    dim = _embedding_dim()
-    if not text or not text.strip():
-        return tuple(0.0 for _ in range(dim))
-    resp = _client().post("/embed", json={"inputs": [text]})
-    resp.raise_for_status()
-    vec = resp.json()[0]
-    return tuple(float(x) for x in vec)
+    return tuple(_embed_one(text, truncate=False))
+
+
+def embed_passage(text: str) -> list[float]:
+    """Embed a chunk body for Weaviate writes (#133).
+
+    Sends ``truncate: True`` so a real paragraph does not 413 against TEI's
+    256-token cap. Not LRU-cached: chunk bodies would pin up to 1024 full
+    texts + vectors for the process lifetime.
+    """
+    return _embed_one(text, truncate=True)

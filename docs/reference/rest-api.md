@@ -74,17 +74,32 @@ retrieval — see [Keeping content current](../keeping-content-current.md).
 | Method | Path | Permission | Purpose |
 | --- | --- | --- | --- |
 | GET | `/v1/chunks/{document_id}` | `read` | All chunks (`content`, `chunk_index`, `token_count`, `metadata`) — unbounded, unlike `/context` below |
-| POST | `/v1/chunks/{document_id}` | `write` | Append one chunk at `max(chunk_index)+1` (#133 Option A). Body: `{"content": "..."}`. Returns the new `DocumentChunk` (`201`) |
+| POST | `/v1/chunks/{document_id}` | `write` | Append one chunk at `max(chunk_index)+1` (#133 Option A). Body: `{"content": "..."}` (min 1 char, max 100,000). Returns the new `DocumentChunk` (`201`) |
 | GET | `/v1/chunks/{document_id}/context` | `read` | Document metadata + a bounded window of chunks + combined `full_text`. Query: `max_chars` (1–100,000, default 20,000), `offset` (chars, default 0). Response adds `truncated`, `total_chars`, `offset`, `next_offset` — see below |
 | GET | `/v1/chunks/{document_id}/{chunk_id}` | `read` | Single chunk by BIGSERIAL `id`. Cross-tenant chunk reads as `404` |
-| PATCH | `/v1/chunks/{document_id}/{chunk_index}` | `write` | Edit chunk by stable `chunk_index` — PG update + Weaviate re-embed with new vector. Body: `{"content": "..."}` |
-| DELETE | `/v1/chunks/{document_id}/{chunk_index}` | `write` | Hard-delete one chunk (Weaviate first, then PG). Leaves gaps; no sibling re-index. `204` |
+| PATCH | `/v1/chunks/{document_id}/index/{chunk_index}` | `write` | Edit chunk by stable `chunk_index` — PG update + Weaviate re-embed with new vector. Body: `{"content": "..."}` (min 1 char, max 100,000). Empty content is `422` |
+| DELETE | `/v1/chunks/{document_id}/index/{chunk_index}` | `write` | Hard-delete one chunk (Weaviate first, then PG). Leaves gaps; no sibling re-index. `204` |
 
 **Ordering contract (#133 Option A):** `chunk_index` is a **stable id**, not a
 dense `0..N` sequence. Create always appends at `max+1`; Delete hard-deletes
 and leaves gaps. Mid-document insert is out of scope. Vector-store failure on
 Create/Update/Delete returns `503` after compensation (Create rolls back the
-PG row; Update restores prior content; Delete leaves the PG row intact).
+PG row; Update restores prior content only if this request's `content_hash` is
+still on the row; Delete leaves the PG row intact).
+
+**URL identity:** `GET /v1/chunks/{document_id}/{chunk_id}` keys on the
+BIGSERIAL `id`. `PATCH` / `DELETE` use `/index/{chunk_index}` so a client
+cannot read one row and write a different row at the same URL.
+
+**Offsets:** chunks created through this write path have no source span
+(`start_char` / `end_char` are omitted, not `0`). Citation consumers must
+treat missing offsets as "not in the source file". `chunking_strategy` is
+`manual_append` (evals/quality scoring do not switch on this value).
+
+**Two edit paths until Sprint 4:** public-API PATCH (this table) and
+ingestion-svc `PATCH /chunks/{doc}/{idx}` + `ChunkEditWorkflow` both exist.
+API keys never hit ingestion; Sprint 4 retires the internal path. Do not
+call both for the same chunk concurrently.
 
 `GET /v1/chunks/{document_id}/context` bounds BOTH `full_text` and `chunks`
 to the same `[offset, offset + max_chars)` window over the document's

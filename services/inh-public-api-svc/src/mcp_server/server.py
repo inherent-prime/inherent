@@ -107,8 +107,10 @@ from src.config.constants import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
 from src.models.api_key import APIKeyInfo
 from src.models.document import (
     DEFAULT_MAX_CHARS,
+    MAX_CHUNK_CONTENT_CHARS,
     MAX_MAX_CHARS,
     MIN_MAX_CHARS,
+    chunk_content_error,
     windowed_document_context,
 )
 from src.models.evals import FeedbackRequest
@@ -1005,8 +1007,9 @@ async def _handle_create_chunk(key_info: APIKeyInfo, arguments: dict) -> list[Te
     content = arguments.get("content")
     if not document_id:
         return [TextContent(type="text", text="Error: Document ID is required")]
-    if content is None or content == "":
-        return [TextContent(type="text", text="Error: content is required")]
+    content_err = chunk_content_error(content)
+    if content_err:
+        return [TextContent(type="text", text=content_err)]
 
     document, _, error = await _resolve_document_for_user(key_info, document_id)
     if error:
@@ -1028,7 +1031,7 @@ async def _handle_create_chunk(key_info: APIKeyInfo, arguments: dict) -> list[Te
 
 
 async def _handle_edit_chunk(key_info: APIKeyInfo, arguments: dict) -> list[TextContent]:
-    """Edit a chunk by chunk_index — same as PATCH /v1/chunks/... (#133)."""
+    """Edit a chunk by chunk_index — same as PATCH /v1/chunks/.../index/... (#133)."""
     document_id = arguments.get("document_id", "")
     content = arguments.get("content")
     chunk_index = arguments.get("chunk_index")
@@ -1036,8 +1039,9 @@ async def _handle_edit_chunk(key_info: APIKeyInfo, arguments: dict) -> list[Text
         return [TextContent(type="text", text="Error: Document ID is required")]
     if chunk_index is None:
         return [TextContent(type="text", text="Error: chunk_index is required")]
-    if content is None or content == "":
-        return [TextContent(type="text", text="Error: content is required")]
+    content_err = chunk_content_error(content)
+    if content_err:
+        return [TextContent(type="text", text=content_err)]
 
     try:
         chunk_index_int = int(chunk_index)
@@ -1064,7 +1068,7 @@ async def _handle_edit_chunk(key_info: APIKeyInfo, arguments: dict) -> list[Text
 
 
 async def _handle_delete_chunk(key_info: APIKeyInfo, arguments: dict) -> list[TextContent]:
-    """Hard-delete a chunk — same as DELETE /v1/chunks/... (#133 Option A)."""
+    """Hard-delete a chunk — same as DELETE /v1/chunks/.../index/... (#133 Option A)."""
     document_id = arguments.get("document_id", "")
     chunk_index = arguments.get("chunk_index")
     if not document_id:
@@ -1538,6 +1542,8 @@ _TOOLS: dict[str, ToolDef] = {
                 },
                 "content": {
                     "type": "string",
+                    "minLength": 1,
+                    "maxLength": MAX_CHUNK_CONTENT_CHARS,
                     "description": "Chunk text content",
                 },
             },
@@ -1548,9 +1554,9 @@ _TOOLS: dict[str, ToolDef] = {
     ),
     "edit_chunk": ToolDef(
         description="Edit one chunk by stable chunk_index (#133) — same as PATCH "
-        "/v1/chunks/{document_id}/{chunk_index}. Recomputes content_hash/token_count and "
-        "re-embeds in Weaviate; vector failure restores prior PG content. Requires "
-        "'write' permission.",
+        "/v1/chunks/{document_id}/index/{chunk_index}. Recomputes content_hash/token_count "
+        "and re-embeds in Weaviate; vector failure restores prior PG content if this "
+        "request's hash is still on the row. Requires 'write' permission.",
         input_schema={
             "type": "object",
             "properties": {
@@ -1565,6 +1571,8 @@ _TOOLS: dict[str, ToolDef] = {
                 },
                 "content": {
                     "type": "string",
+                    "minLength": 1,
+                    "maxLength": MAX_CHUNK_CONTENT_CHARS,
                     "description": "Replacement chunk text",
                 },
             },
@@ -1575,9 +1583,9 @@ _TOOLS: dict[str, ToolDef] = {
     ),
     "delete_chunk": ToolDef(
         description="Hard-delete one chunk by stable chunk_index (#133 Option A) — same "
-        "as DELETE /v1/chunks/{document_id}/{chunk_index}. Deletes the Weaviate object "
-        "first, then the PG row (gaps left; no sibling re-index). Vector failure leaves "
-        "the row intact. Requires 'write' permission.",
+        "as DELETE /v1/chunks/{document_id}/index/{chunk_index}. Deletes the Weaviate "
+        "object first, then the PG row (gaps left; no sibling re-index). Vector failure "
+        "leaves the row intact. Requires 'write' permission.",
         input_schema={
             "type": "object",
             "properties": {

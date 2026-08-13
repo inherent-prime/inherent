@@ -128,10 +128,12 @@ class TestUpdateChunkEverywhere:
         ):
             await update_chunk_everywhere(db, DOC, WS, 1, "new")
 
-        # Second update_document_chunk call restores prior content
+        # Second update_document_chunk call restores prior content, CAS'd on
+        # the hash this request wrote so a concurrent winner is not clobbered.
         assert db.update_document_chunk.await_count == 2
         restore_call = db.update_document_chunk.await_args_list[1]
         assert restore_call.args[3] == "old"
+        assert restore_call.kwargs.get("only_if_content_hash") == "nh"
 
 
 class TestDeleteChunkEverywhere:

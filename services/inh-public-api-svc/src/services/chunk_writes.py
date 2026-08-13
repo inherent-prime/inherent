@@ -140,6 +140,7 @@ async def update_chunk_everywhere(
             workspace_id,
             chunk_index,
             prior.content,
+            only_if_content_hash=content_hash,
             operation="chunk_update_vector_rollback",
         )
         raise

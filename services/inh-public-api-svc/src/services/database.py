@@ -947,12 +947,16 @@ class DatabaseService:
         workspace_id: str,
         chunk_index: int,
         content: str,
+        *,
+        only_if_content_hash: str | None = None,
     ) -> DocumentChunk | None:
         """Update one chunk's content by ``chunk_index`` (#133).
 
         Recomputes ``token_count`` / ``content_hash`` and bumps ``ingested_at``
         (ingestion ChunkEdit parity). Workspace-scoped via join; returns None
-        when the chunk is absent or in another workspace.
+        when the chunk is absent, in another workspace, or (when
+        ``only_if_content_hash`` is set) no longer holds that hash — a
+        concurrent edit won, so restore compensation must not clobber it.
         """
         from src.services.chunk_math import compute_chunk_content_hash, estimate_tokens
 
@@ -974,6 +978,10 @@ class DatabaseService:
                       AND dc.document_id = :document_id
                       AND dc.chunk_index = :chunk_index
                       AND pd.workspace_id = :workspace_id
+                      AND (
+                          CAST(:only_if_content_hash AS TEXT) IS NULL
+                          OR dc.content_hash = :only_if_content_hash
+                      )
                     RETURNING dc.id, dc.document_id, dc.content, dc.chunk_index,
                               dc.token_count, dc.metadata, dc.content_hash,
                               dc.source_uri, dc.ingested_at
@@ -987,6 +995,7 @@ class DatabaseService:
                     "document_id": document_id,
                     "chunk_index": chunk_index,
                     "workspace_id": workspace_id,
+                    "only_if_content_hash": only_if_content_hash,
                 },
             )
             row = result.fetchone()

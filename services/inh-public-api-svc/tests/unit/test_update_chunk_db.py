@@ -93,6 +93,26 @@ async def test_update_recomputes_hash_and_tokens():
     assert params["content_hash"] == hashlib.sha256(content.encode()).hexdigest()
     assert params["chunk_index"] == 1
     assert params["workspace_id"] == "ws-1"
+    assert params["only_if_content_hash"] is None
     sql = str(mock_session.execute.await_args.args[0])
     assert "workspace_id" in sql
+    assert "only_if_content_hash" in sql
     assert "RETURNING" in sql.upper()
+
+
+@pytest.mark.asyncio
+async def test_update_cas_passes_expected_hash():
+    db = DatabaseService.__new__(DatabaseService)
+    mock_result = MagicMock()
+    mock_result.fetchone = MagicMock(return_value=None)
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock(return_value=mock_result)
+    mock_session.commit = AsyncMock()
+    db.session = MagicMock(return_value=_session_ctx(mock_session))
+
+    result = await db.update_document_chunk(
+        "doc-1", "ws-1", 1, "old", only_if_content_hash="hash-we-wrote"
+    )
+    assert result is None
+    params = mock_session.execute.await_args.args[1]
+    assert params["only_if_content_hash"] == "hash-we-wrote"
