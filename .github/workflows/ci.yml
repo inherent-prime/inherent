@@ -32,10 +32,12 @@ jobs:
       matrix:
         # cov_fail_under is the OVERALL per-service coverage floor enforced in
         # the Test step (each service's pyproject addopts already adds --cov).
-        # Values are intentionally conservative so CI stays green today; they
-        # should be ratcheted UP over time. Per-core-module floors are enforced
-        # in the "Enforce per-core-module coverage floors" step below and should
-        # also ratchet UP over time -- see that step for the modules and floors.
+        # Floors track actual coverage minus a 1-point buffer (floor(actual) -
+        # 1) so run-to-run jitter (e.g. conditional imports) doesn't flake the
+        # gate, and are raised whenever measured coverage improves -- they are
+        # NEVER lowered. Per-core-module floors are enforced in the "Enforce
+        # per-core-module coverage floors" step below and follow the same
+        # policy -- see that step for the modules and floors.
         include:
           - service: inh-ingestion-svc
             path: services/inh-ingestion-svc
@@ -50,7 +52,9 @@ jobs:
             typecheck: uv run mypy src
             security: uv run bandit -c pyproject.toml -r src
             test: uv run pytest
-            cov_fail_under: 40
+            # Actual measured on CI run 31661196233 (main@bc6d56b): 83.35%.
+            # floor(83.35) - 1 = 82.
+            cov_fail_under: 82
           - service: inh-public-api-svc
             path: services/inh-public-api-svc
             python-version: "3.11"
@@ -59,7 +63,9 @@ jobs:
             typecheck: uv run mypy src
             security: uv run bandit -c pyproject.toml -r src
             test: uv run pytest
-            cov_fail_under: 45
+            # Actual measured on CI run 31661196233 (main@bc6d56b): 85.36%.
+            # floor(85.36) - 1 = 84.
+            cov_fail_under: 84
           # inh-contracts previously ran in NO automation (#132 item 4): a
           # change to a shared constant like DEFAULT_S3_REGION or the
           # Weaviate-naming derivation was caught by nothing, only a
@@ -75,7 +81,9 @@ jobs:
             typecheck: uv run mypy src
             security: uv run bandit -c pyproject.toml -r src
             test: uv run pytest
-            cov_fail_under: 95
+            # Actual measured on CI run 31661196233 (main@bc6d56b): 99.53%.
+            # floor(99.53) - 1 = 98.
+            cov_fail_under: 98
 
     services:
       postgres:
@@ -157,26 +165,28 @@ jobs:
 
       # Risk-based per-core-module coverage floors (#38). The Test step above
       # writes a .coverage file (pyproject addopts adds --cov); here we re-read
-      # it and enforce a floor for each high-risk core module. Floors are set
-      # at-or-BELOW currently measured coverage so CI stays green today -- they
-      # are a RATCHET: raise each --fail-under over time as the module gains
-      # tests. Per-module CI coverage is >= the values measured locally because
-      # CI provides Postgres (some tests skip locally without it).
+      # it and enforce a floor for each high-risk core module. POLICY: each
+      # floor tracks floor(actual) - 1 (a 1-point buffer absorbs run-to-run
+      # jitter, e.g. conditional imports) and is raised whenever measured
+      # coverage improves -- floors are NEVER lowered. Per-module CI coverage
+      # is >= the values measured locally because CI provides Postgres (some
+      # tests skip locally without it); the values below are sourced from CI
+      # run 31661196233 (main@bc6d56b, 2026-08-13).
       - name: Enforce per-core-module coverage floors (public-api)
         if: ${{ matrix.service == 'inh-public-api-svc' }}
         run: |
-          uv run coverage report --include='src/services/auth.py' --fail-under=85
-          uv run coverage report --include='src/services/search.py' --fail-under=60
-          uv run coverage report --include='src/services/verify.py' --fail-under=95
-          uv run coverage report --include='src/services/quality_gate.py' --fail-under=95
+          uv run coverage report --include='src/services/auth.py' --fail-under=92
+          uv run coverage report --include='src/services/search.py' --fail-under=87
+          uv run coverage report --include='src/services/verify.py' --fail-under=99
+          uv run coverage report --include='src/services/quality_gate.py' --fail-under=99
 
       - name: Enforce per-core-module coverage floors (ingestion)
         if: ${{ matrix.service == 'inh-ingestion-svc' }}
         run: |
-          uv run coverage report --include='src/services/quality.py' --fail-under=95
-          uv run coverage report --include='src/temporal/activities/extract.py' --fail-under=70
-          uv run coverage report --include='src/temporal/activities/store.py' --fail-under=35
-          uv run coverage report --include='src/temporal/activities/chunk.py' --fail-under=90
+          uv run coverage report --include='src/services/quality.py' --fail-under=99
+          uv run coverage report --include='src/temporal/activities/extract.py' --fail-under=91
+          uv run coverage report --include='src/temporal/activities/store.py' --fail-under=71
+          uv run coverage report --include='src/temporal/activities/chunk.py' --fail-under=91
 
       - name: Report check summary
         if: always()
