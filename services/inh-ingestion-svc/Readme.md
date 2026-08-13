@@ -36,6 +36,16 @@ The root `docker-compose.yml` starts the full local dependency stack.
 uv sync --extra dev --group dev
 ```
 
+Optional speech-to-text for mp3/wav/m4a (#128):
+
+```bash
+uv sync --extra asr
+# or with Compose: docker compose -f docker-compose.yml -f docker-compose.asr.yml up --build
+```
+
+Without the `asr` extra, audio uploads still succeed but extraction stores
+the placeholder `[audio: <name>, transcription unavailable]`.
+
 ### Run in Standalone Mode
 
 ```bash

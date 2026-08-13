@@ -218,6 +218,51 @@ Promoted eval cases persist until you disable them via
 | `make clean` | Stop the stack and remove local Compose volumes. |
 | `make check` | Run validation, lint, formatting, typing, security checks, and tests. |
 
+## Optional ASR (speech-to-text for audio uploads)
+
+Default Compose leaves audio extraction as a **placeholder**
+(`[audio: <name>, transcription unavailable]`). Real STT is opt-in (#128).
+
+See **[Optional audio ASR](../reference/audio-asr.md)** for the full flow,
+why `docker-compose.asr.yml` exists, extraction behavior, and guardrails.
+
+### Enable with Compose overlay
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.asr.yml up --build -d
+```
+
+This rebuilds `inh-ingestion-svc` from `services/inh-ingestion-svc/Dockerfile.asr`
+(OCR + `faster-whisper`) and mounts volume `asr_hf_cache` at
+`HF_HOME=/var/cache/huggingface`.
+
+First successful transcription downloads the Whisper **`base`** weights
+(~148 MB) into that volume. Later runs reuse the cache.
+
+### Enable without Docker
+
+```bash
+cd services/inh-ingestion-svc
+uv sync --extra asr
+# optional: export HF_HOME=/path/to/persistent/cache
+```
+
+### Air-gapped / offline hosts
+
+Pre-seed the Hugging Face cache (online machine or CI artifact), then copy
+into the Compose volume or `HF_HOME`:
+
+- Model id: `Systran/faster-whisper-base` (when `ASR_MODEL_SIZE=base`)
+- Typical cache root: `~/.cache/huggingface` on the host, or the
+  `asr_hf_cache` Docker volume
+
+Without network and without a seeded cache, model load fails and extraction
+falls back to the placeholder (or fails loudly if you treat load errors as
+hard — today load failures return the placeholder).
+
+Env knobs: see [Configuration — Optional ASR](../reference/configuration.md).
+Architecture and overlay rationale: [Optional audio ASR](../reference/audio-asr.md).
+
 ## Troubleshooting
 
 ### `make validate` prints Compose hostname warnings

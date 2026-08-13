@@ -1,0 +1,28 @@
+# Opt-in ASR overlay for local Compose (#128).
+#
+# Default `docker-compose.yml` keeps ingestion OCR-only (placeholder for audio).
+# This file rebuilds ingestion with `faster-whisper` and mounts an HF model cache.
+#
+# Usage (from repo root):
+#   docker compose -f docker-compose.yml -f docker-compose.asr.yml up --build -d
+#
+# First audio upload downloads the Whisper `base` weights (~148 MB) into the
+# `asr_hf_cache` volume. Air-gapped hosts: pre-seed that volume (see
+# docs/getting-started/local.md § Optional ASR).
+
+services:
+  inh-ingestion-svc:
+    build:
+      context: .
+      dockerfile: services/inh-ingestion-svc/Dockerfile.asr
+    environment:
+      ASR_MODEL_SIZE: ${ASR_MODEL_SIZE:-base}
+      ASR_DEVICE: ${ASR_DEVICE:-cpu}
+      ASR_COMPUTE_TYPE: ${ASR_COMPUTE_TYPE:-int8}
+      ASR_MAX_DURATION_SECONDS: ${ASR_MAX_DURATION_SECONDS:-7200}
+      HF_HOME: /var/cache/huggingface
+    volumes:
+      - asr_hf_cache:/var/cache/huggingface
+
+volumes:
+  asr_hf_cache:

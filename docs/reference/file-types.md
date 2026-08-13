@@ -44,6 +44,9 @@ the build if this table and the registry ever disagree.
 | code | `.py`, `.js`, `.ts`, `.tsx`, `.jsx`, `.go`, `.java`, `.rs`, `.c`, `.h`, `.cpp`, `.cs`, `.rb`, `.php`, `.swift`, `.kt`, `.scala`, `.sh`, `.sql`, `.r`, `.lua` | `text/x-python`, `application/javascript`, `text/javascript`, `application/typescript`, `text/x-go`, `text/x-java-source`, `text/x-rustsrc`, `text/x-csrc`, `text/x-chdr`, `text/x-c++src`, `text/x-csharp`, `text/x-ruby`, `text/x-php`, `text/x-swift`, `text/x-kotlin`, `text/x-scala`, `application/x-sh`, `text/x-sh`, `application/sql`, `text/x-sql`, `text/x-r-source`, `text/x-lua` | rest + mcp | code | — |
 | srt | `.srt` | `application/x-subrip` | rest + mcp | prose | — |
 | vtt | `.vtt` | `text/vtt` | rest + mcp | prose | — |
+| mp3 | `.mp3` | `audio/mpeg` | rest | prose | `asr` |
+| wav | `.wav` | `audio/wav` | rest | prose | `asr` |
+| m4a | `.m4a` | `audio/mp4`, `audio/x-m4a` | rest | prose | `asr` |
 
 <!-- END GENERATED FILE TYPES TABLE -->
 
@@ -57,9 +60,11 @@ type (`prose`, `tabular`, `structured`, `media`).
 
 **Extra required**: a pyproject optional-dependency group that must be
 installed for extraction to produce real text instead of degrading. Today
-only `image/png` has one (`ocr` — pytesseract + Pillow, plus the `tesseract`
-system binary): without it, OCR falls back to a placeholder string instead of
-failing the upload.
+image/png uses `ocr` (`pytesseract` + Pillow, plus the `tesseract` system
+binary) and audio (`audio/mpeg`, `audio/wav`, `audio/mp4` / `audio/x-m4a`)
+uses `asr` (`faster-whisper`, opt-in ? see #128): without the matching
+extra, extraction falls back to a placeholder string instead of failing the
+upload.
 
 ## Validation at upload
 

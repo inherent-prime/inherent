@@ -1,0 +1,41 @@
+# ASR-enabled variant of the ingestion image (#128).
+#
+# Default `Dockerfile` stays OCR-only (lean). This file adds the optional
+# `asr` extra (`faster-whisper`) for operators who opt in via
+# `docker-compose.asr.yml`. Keep the shared COPY/ENV/USER steps in sync with
+# `Dockerfile` when that file changes.
+
+FROM python:3.11-slim
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tesseract-ocr \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY services/inh-contracts /app/services/inh-contracts
+
+COPY services/inh-ingestion-svc/pyproject.toml services/inh-ingestion-svc/uv.lock services/inh-ingestion-svc/Readme.md /app/services/inh-ingestion-svc/
+COPY services/inh-ingestion-svc/src /app/services/inh-ingestion-svc/src
+COPY services/inh-ingestion-svc/scripts/migrations /app/services/inh-ingestion-svc/scripts/migrations
+
+WORKDIR /app/services/inh-ingestion-svc
+
+ENV PYTHONPATH=/app/services/inh-ingestion-svc
+# Hugging Face / faster-whisper model cache (persisted via Compose volume).
+ENV HF_HOME=/var/cache/huggingface
+
+# Same locked install as Dockerfile, plus `--extra asr` (faster-whisper + av).
+RUN uv export --frozen --no-dev --no-hashes --no-emit-project --extra ocr --extra asr -o /tmp/requirements.txt \
+    && uv pip install --system -r /tmp/requirements.txt \
+    && uv pip install --system --no-deps ".[ocr,asr]" \
+    && rm /tmp/requirements.txt
+
+RUN useradd -m -u 1000 appuser \
+    && mkdir -p /var/cache/huggingface \
+    && chown -R appuser:appuser /app /var/cache/huggingface
+USER appuser
+
+EXPOSE 8080
+
+CMD ["python", "-m", "src.main"]

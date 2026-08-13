@@ -617,6 +617,58 @@ FILE_TYPE_REGISTRY: tuple[FileTypeSpec, ...] = (
         extractor="vtt",
         chunking_hint="prose",
     ),
+    # -- #128: audio (speech-to-text behind optional `asr` extra) ----------
+    # Mirror PNG OCR: REST-only binary, optional_extra + placeholder
+    # degradation. Shared extractor key `audio_asr` (Sprint 1 stub returns
+    # the placeholder; Sprint 2/3 wire faster-whisper). Size inherits the
+    # global 50 MiB upload cap (`max_size_bytes=None`) -- do NOT raise it.
+    # Magic choices (Sprint 0): wav=`RIFF` (always at byte 0); m4a=`ftyp`
+    # (ISO BMFF, typically at offset 4); mp3=`None` because ID3 is optional
+    # and MPEG frame-sync bytes false-positive too easily in a wide window.
+    # Cross-format sniff (check 2) is ID3v2-aware for mp3: skip the tag body
+    # so embedded APIC album-art PNG/JPEG is not treated as a type mismatch
+    # (see `_id3v2_payload_offset` / `sniff_content_type`).
+    FileTypeSpec(
+        key="mp3",
+        mime_types=("audio/mpeg",),
+        extensions=(".mp3",),
+        magic=None,
+        surfaces=frozenset({"rest"}),
+        extractor="audio_asr",
+        chunking_hint="prose",
+        optional_extra="asr",
+        degradation="placeholder",
+    ),
+    FileTypeSpec(
+        key="wav",
+        mime_types=("audio/wav",),
+        extensions=(".wav",),
+        magic=b"RIFF",
+        # Real WAV files put RIFF at byte 0; keep the window tight so prose
+        # that happens to mention "RIFF" later in a text upload is not
+        # mislabeled (same class of defect as RTF's magic_anchor_window).
+        magic_anchor_window=12,
+        surfaces=frozenset({"rest"}),
+        extractor="audio_asr",
+        chunking_hint="prose",
+        optional_extra="asr",
+        degradation="placeholder",
+    ),
+    FileTypeSpec(
+        key="m4a",
+        # audio/mp4 is the IANA type; audio/x-m4a is a common alias clients
+        # still send for Apple/QuickTime exports.
+        mime_types=("audio/mp4", "audio/x-m4a"),
+        extensions=(".m4a",),
+        magic=b"ftyp",
+        # 'ftyp' sits at offset 4 after a 4-byte size field in ISO BMFF.
+        magic_anchor_window=16,
+        surfaces=frozenset({"rest"}),
+        extractor="audio_asr",
+        chunking_hint="prose",
+        optional_extra="asr",
+        degradation="placeholder",
+    ),
 )
 
 
@@ -921,6 +973,36 @@ def _contains_signature(content: bytes, magic: bytes, window: int = _SNIFF_WINDO
     return magic in content[:window]
 
 
+def _id3v2_payload_offset(content: bytes) -> int:
+    """Byte offset where the MPEG payload begins after an ID3v2 tag, or 0.
+
+    ID3v2 tags commonly embed album art (APIC frames) as PNG or JPEG. The
+    cross-format half of ``sniff_content_type`` (check 2) would otherwise
+    treat those embedded signatures inside the first ``_SNIFF_WINDOW`` bytes
+    as proof the upload is a PNG/JPEG rather than ``audio/mpeg`` -- a false
+    reject on ordinary phone/YouTube MP3s.
+
+    This is **not** a blanket "ignore PNG for audio" exception. We only skip
+    the metadata region the ID3v2 header declares (10-byte header + synchsafe
+    size). Conflicting magic in the audio payload *after* that region is still
+    rejected. Files that do not start with ``ID3`` return 0 (unchanged scan).
+
+    Synchsafe size: four bytes at offsets 6..9, each contributing 7 bits
+    (MSB must be clear per the ID3v2 spec). Total tag length = 10 + size.
+    """
+    if len(content) < 10 or content[:3] != b"ID3":
+        return 0
+    size = (
+        (content[6] & 0x7F) << 21
+        | (content[7] & 0x7F) << 14
+        | (content[8] & 0x7F) << 7
+        | (content[9] & 0x7F)
+    )
+    # Cap at EOF so a corrupt/overstated size cannot invent a negative slice
+    # or skip past bytes we do not have.
+    return min(10 + size, len(content))
+
+
 def _magic_families_overlap(a: bytes, b: bytes) -> bool:
     """Whether two magic signatures belong to the same underlying container
     format (#117 structural fix -- see the `docx` registry entry's comment).
@@ -968,6 +1050,10 @@ def sniff_content_type(
     check 1 -- there is nothing to compare against -- but remain subject to
     check 2, so a binary file mislabeled as text is still caught.
 
+    For ``audio/mpeg`` (mp3), check 2 scans only the post-ID3v2 payload when
+    the file begins with an ``ID3`` tag -- see ``_id3v2_payload_offset``.
+    Embedded APIC album art must not count as a conflicting outer type.
+
     Returns the resolved ``FileTypeSpec`` for `declared_mime` on success.
 
     Args:
@@ -1001,6 +1087,13 @@ def sniff_content_type(
             f"expected the '{spec.key}' file signature but the bytes did not match it",
         )
 
+    # For mp3, exclude the ID3v2 tag from check 2 so embedded APIC album art
+    # (PNG/JPEG) is not mistaken for a conflicting outer file type. Other
+    # formats keep scanning the raw prefix unchanged.
+    cross_scan = content
+    if spec.key == "mp3":
+        cross_scan = content[_id3v2_payload_offset(content) :]
+
     for other in FILE_TYPE_REGISTRY:
         if other.magic is None or other.key == spec.key:
             continue
@@ -1009,7 +1102,7 @@ def sniff_content_type(
         other_window = (
             other.magic_anchor_window if other.magic_anchor_window is not None else _SNIFF_WINDOW
         )
-        if _contains_signature(content, other.magic, other_window):
+        if _contains_signature(cross_scan, other.magic, other_window):
             raise ContentTypeMismatchError(
                 declared_mime,
                 f"the bytes match the '{other.key}' file signature instead",

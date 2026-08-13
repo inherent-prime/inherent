@@ -55,6 +55,13 @@ ocr = [
     "pytesseract>=0.3.10",
     "pillow>=10.0.0",
 ]
+# Optional speech-to-text for mp3/wav/m4a (#128). When absent, audio extraction
+# returns `[audio: <name>, transcription unavailable]` (see extract.py).
+# Opt-in only — not baked into the default ingestion image (see plan).
+# Decode uses PyAV (pulled in by faster-whisper); system ffmpeg is optional.
+asr = [
+    "faster-whisper>=1.1.0,<2",
+]
 # Dev tooling versions are normalized across all three services (M7 #21).
 # See docs/developer/dependencies.md for the shared pin policy.
 dev = [

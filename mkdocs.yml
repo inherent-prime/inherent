@@ -80,6 +80,7 @@ nav:
       - MCP tools: reference/mcp-tools.md
       - Configuration: reference/configuration.md
       - Supported file types: reference/file-types.md
+      - Optional audio ASR: reference/audio-asr.md
   - Release Notes: release-notes.md
   - Architecture:
       - System overview: architecture/overview.md

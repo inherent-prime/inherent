@@ -197,6 +197,26 @@ class TestIntakeDocumentValidation:
                 content_type="text/plain",
             )
 
+    async def test_oversized_audio_inherits_global_50mb_cap(self, mock_db, mock_storage, mock_mq):
+        """#128: audio specs leave max_size_bytes=None so they inherit the
+        global 50 MiB cap — must not silently raise the upload limit.
+        Size is checked before magic sniff, so any payload over the cap is
+        enough to pin the gate."""
+        big_content = b"x" * (50 * 1024 * 1024 + 1)
+        p1, p2 = _patches(mock_storage, mock_mq)
+        with p1, p2, pytest.raises(BadRequestError) as exc_info:
+            await document_intake.intake_document(
+                database=mock_db,
+                workspace_id="test-workspace-id",
+                user_id="test-user-id",
+                content_bytes=big_content,
+                filename="long.wav",
+                content_type="audio/wav",
+            )
+        assert "50 MB" in exc_info.value.detail
+        mock_storage.upload_file.assert_not_awaited()
+        mock_db.create_or_reset_pending_document.assert_not_awaited()
+
 
 class TestIntakeDocumentExplicitlyRejectedLegacyFormats:
     """#124/#126: legacy .doc and Outlook .msg are intentionally NOT in

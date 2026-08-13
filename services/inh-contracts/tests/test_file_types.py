@@ -72,7 +72,7 @@ class TestRegistryShape:
                 )
 
     def test_current_registered_formats_are_exactly_these(self):
-        """Pins the full registered format set (20 as of #121/#122/#127).
+        """Pins the full registered format set (23 as of #128).
 
         The eight pre-#117 formats migrated with no
         loss (acceptance criterion: 'All 8 current formats migrate to
@@ -99,6 +99,9 @@ class TestRegistryShape:
             "code",
             "srt",
             "vtt",
+            "mp3",
+            "wav",
+            "m4a",
         }
 
     def test_longtail_formats_present(self):
@@ -294,6 +297,11 @@ class TestLookups:
             # #127: subtitle transcripts
             "application/x-subrip",
             "text/vtt",
+            # #128: audio (ASR behind optional asr extra)
+            "audio/mpeg",
+            "audio/wav",
+            "audio/mp4",
+            "audio/x-m4a",
         ]
 
     def test_longtail_mime_types_present(self):
@@ -1155,6 +1163,125 @@ class TestOOXMLSiblingsFromBatch3:
         assert spec.surfaces == frozenset({"rest"})
         assert spec.chunking_hint == "tabular"
         assert spec.extractor == "xlsx"
+
+
+class TestAudioAsrRegistry:
+    """#128: mp3 / wav / m4a — REST-only, optional asr extra, placeholder
+    degradation, shared audio_asr extractor, inherit global upload size."""
+
+    @pytest.mark.parametrize(
+        "key,mime,extension,magic",
+        [
+            ("mp3", "audio/mpeg", ".mp3", None),
+            ("wav", "audio/wav", ".wav", b"RIFF"),
+            ("m4a", "audio/mp4", ".m4a", b"ftyp"),
+        ],
+    )
+    def test_audio_specs_registered(self, key, mime, extension, magic):
+        spec = get_spec_for_mime(mime)
+        assert spec is not None
+        assert spec.key == key
+        assert extension in spec.extensions
+        assert spec.surfaces == frozenset({"rest"})
+        assert spec.optional_extra == "asr"
+        assert spec.degradation == "placeholder"
+        assert spec.chunking_hint == "prose"
+        assert spec.extractor == "audio_asr"
+        assert spec.max_size_bytes is None
+        assert spec.magic == magic
+
+    def test_m4a_accepts_both_mime_aliases(self):
+        canonical = get_spec_for_mime("audio/mp4")
+        alias = get_spec_for_mime("audio/x-m4a")
+        assert canonical is not None and alias is not None
+        assert canonical.key == alias.key == "m4a"
+
+    def test_audio_types_are_absent_from_mcp_allow_list(self):
+        mcp = set(mcp_mime_types())
+        assert "audio/mpeg" not in mcp
+        assert "audio/wav" not in mcp
+        assert "audio/mp4" not in mcp
+        assert "audio/x-m4a" not in mcp
+
+    def test_wav_magic_rejects_plain_text_declared_as_wav(self):
+        with pytest.raises(ContentTypeMismatchError):
+            sniff_content_type(b"this is not a wav file at all", "audio/wav")
+
+    def test_real_wav_header_sniffs_clean(self):
+        # Minimal RIFF....WAVE header shape (size fields can be junk for sniff).
+        content = b"RIFF" + b"\x00\x00\x00\x00" + b"WAVE" + b"\x00" * 16
+        spec = sniff_content_type(content, "audio/wav")
+        assert spec.key == "wav"
+
+    def test_m4a_ftyp_sniffs_clean(self):
+        # ISO BMFF: size(4) + 'ftyp' at offset 4.
+        content = b"\x00\x00\x00\x18ftypM4A " + b"\x00" * 8
+        spec = sniff_content_type(content, "audio/mp4")
+        assert spec.key == "m4a"
+
+    def test_mp3_without_magic_still_resolves_when_not_another_binary(self):
+        """mp3 has no reliable always-present magic (ID3 is optional;
+        frame-sync bytes false-positive easily). Declared audio/mpeg with
+        non-matching-other-binary bytes must still resolve."""
+        spec = sniff_content_type(b"\xff\xfb\x90\x00 fake mpeg frame sync", "audio/mpeg")
+        assert spec.key == "mp3"
+
+    @staticmethod
+    def _id3v2_prefix(tag_body: bytes) -> bytes:
+        """Minimal ID3v2.3 header + body (synchsafe size = len(tag_body))."""
+        n = len(tag_body)
+        synchsafe = bytes(
+            [
+                (n >> 21) & 0x7F,
+                (n >> 14) & 0x7F,
+                (n >> 7) & 0x7F,
+                n & 0x7F,
+            ]
+        )
+        # "ID3" + version 2.3.0 + flags + 4-byte synchsafe size
+        return b"ID3\x03\x00\x00" + synchsafe + tag_body
+
+    def test_mp3_id3_with_embedded_png_apic_is_accepted(self):
+        """Regression: ID3 APIC album art embeds a real PNG signature inside
+        the tag. Check 2 must not treat that as "this file is a PNG" -- only
+        the post-ID3 payload is cross-scanned (#128 E2E / YouTube exports)."""
+        png = b"\x89PNG\r\n\x1a\n" + b"fake-ihdr"
+        # Place PNG well inside the first 1024 bytes of the *whole* file so
+        # a naive whole-prefix scan would false-positive (byte ~556 in the
+        # production failure). Tag body is large enough to own that region.
+        tag_body = b"APIC\x00" + (b"\x00" * 540) + png + b"\x00" * 32
+        mpeg = b"\xff\xfb\x90\x00" + b"\x00" * 64
+        content = self._id3v2_prefix(tag_body) + mpeg
+        assert content[:3] == b"ID3"
+        assert b"\x89PNG\r\n\x1a\n" in content[:1024]
+        spec = sniff_content_type(content, "audio/mpeg")
+        assert spec.key == "mp3"
+
+    def test_mp3_id3_without_album_art_is_accepted(self):
+        tag_body = b"TIT2\x00\x00\x00\x05\x00\x00\x00title"
+        mpeg = b"\xff\xfb\x90\x00" + b"\x00" * 32
+        spec = sniff_content_type(self._id3v2_prefix(tag_body) + mpeg, "audio/mpeg")
+        assert spec.key == "mp3"
+
+    def test_raw_png_declared_as_audio_mpeg_is_rejected(self):
+        """Conflicting magic at the start of the file (no ID3) still fails."""
+        with pytest.raises(ContentTypeMismatchError) as exc_info:
+            sniff_content_type(b"\x89PNG\r\n\x1a\n fake png bytes", "audio/mpeg")
+        assert "png" in str(exc_info.value).lower()
+
+    def test_png_in_post_id3_payload_declared_as_audio_mpeg_is_rejected(self):
+        """ID3 skip must not hide a PNG that lives in the *audio payload*
+        after the tag -- that is still evidence of a mislabeled binary."""
+        # Empty ID3 body (header only) then a PNG payload.
+        content = self._id3v2_prefix(b"") + b"\x89PNG\r\n\x1a\n fake png bytes"
+        with pytest.raises(ContentTypeMismatchError) as exc_info:
+            sniff_content_type(content, "audio/mpeg")
+        assert "png" in str(exc_info.value).lower()
+
+
+class TestOOXMLSiblingsSharedMagicFollowups:
+    """Shared-ZIP-magic follow-ups that belong with #118/#119 OOXML siblings
+    (kept after TestAudioAsrRegistry so #128 inserts do not nest them)."""
 
     def test_xlsx_bytes_declared_as_docx_pass_the_byte_sniff(self):
         """The reachable case this guarantee implies: a byte sniff CANNOT

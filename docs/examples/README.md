@@ -130,7 +130,8 @@ Allowed MIME types: `text/plain`, `text/markdown`, `text/csv`, `text/html`,
 (ODT), `application/yaml`/`text/yaml`, `application/toml`,
 `application/xml`/`text/xml`, source code (`text/x-python` and other
 language-specific aliases — see the extension allowlist below),
-`application/x-subrip` (SRT), `text/vtt` (WebVTT) — see the full
+`application/x-subrip` (SRT), `text/vtt` (WebVTT), `audio/mpeg` (MP3),
+`audio/wav` (WAV), `audio/mp4` / `audio/x-m4a` (M4A) — see the full
 [supported file types](../reference/file-types.md) reference for extensions,
 chunking strategy, and optional-dependency notes.
 Max size: 50 MB. Binary formats are magic-byte sniffed against the declared
@@ -276,6 +277,26 @@ Save the document ID for later examples:
 export DOC_ID="3fa85f64-5717-4562-b3fc-2c963f66afa6"  # replace with your value
 ```
 
+### Upload audio (optional ASR)
+
+```bash
+curl -s -X POST "$API_BASE/v1/documents" \
+  -H "X-API-Key: $API_KEY" \
+  -H "X-Workspace-Id: $WORKSPACE_ID" \
+  -F "file=@meeting.mp3;type=audio/mpeg" \
+  | jq .
+```
+
+Speech-to-text uses the ingestion service's optional `asr` extra
+(`faster-whisper`). Without it, extraction degrades to
+`[audio: <filename>, transcription unavailable]` instead of failing the
+upload — same placeholder pattern as PNG OCR. Enable with
+`uv sync --extra asr` in `inh-ingestion-svc`, or Compose overlay
+`docker compose -f docker-compose.yml -f docker-compose.asr.yml up --build`
+(not baked into the default image). Response shape matches other uploads
+above. See [supported file types](../reference/file-types.md) and
+[local getting started — Optional ASR](../getting-started/local.md).
+
 ### Upload error cases
 
 **Unsupported file type (400):**
@@ -293,7 +314,7 @@ curl -s -X POST "$API_BASE/v1/documents" \
   "type": "https://api.inherent.sh/errors/bad-request",
   "title": "Bad Request",
   "status": 400,
-  "detail": "Unsupported file type 'application/octet-stream'. Allowed types: text/plain, text/markdown, text/csv, text/html, application/pdf, application/json, application/vnd.openxmlformats-officedocument.wordprocessingml.document, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.openxmlformats-officedocument.presentationml.presentation, image/png, message/rfc822, application/epub+zip, application/rtf, text/rtf, application/vnd.oasis.opendocument.text, application/yaml, text/yaml, application/toml, application/xml, text/xml, text/x-python, application/javascript, text/javascript, application/typescript, text/x-go, text/x-java-source, text/x-rustsrc, text/x-csrc, text/x-chdr, text/x-c++src, text/x-csharp, text/x-ruby, text/x-php, text/x-swift, text/x-kotlin, text/x-scala, application/x-sh, text/x-sh, application/sql, text/x-sql, text/x-r-source, text/x-lua, application/x-subrip, text/vtt"
+  "detail": "Unsupported file type 'application/octet-stream'. Allowed types: text/plain, text/markdown, text/csv, text/html, application/pdf, application/json, application/vnd.openxmlformats-officedocument.wordprocessingml.document, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.openxmlformats-officedocument.presentationml.presentation, image/png, message/rfc822, application/epub+zip, application/rtf, text/rtf, application/vnd.oasis.opendocument.text, application/yaml, text/yaml, application/toml, application/xml, text/xml, text/x-python, application/javascript, text/javascript, application/typescript, text/x-go, text/x-java-source, text/x-rustsrc, text/x-csrc, text/x-chdr, text/x-c++src, text/x-csharp, text/x-ruby, text/x-php, text/x-swift, text/x-kotlin, text/x-scala, application/x-sh, text/x-sh, application/sql, text/x-sql, text/x-r-source, text/x-lua, application/x-subrip, text/vtt, audio/mpeg, audio/wav, audio/mp4, audio/x-m4a"
 }
 ```
 

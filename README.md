@@ -45,7 +45,7 @@ It gives you:
 
 ## Why Use It
 
-- Bring your own documents: ingest plain text, Markdown, PDF, DOCX, source code, and more — see the full [supported file types](docs/reference/file-types.md) list (PNG images are read via OCR, which requires the ingestion service's optional `ocr` extra and the `tesseract` system binary).
+- Bring your own documents: ingest plain text, Markdown, PDF, DOCX, source code, and more — see the full [supported file types](docs/reference/file-types.md) list (PNG images via optional `ocr` + tesseract; audio MP3/WAV/M4A via optional `asr` + faster-whisper — both degrade to a placeholder when the extra is missing).
 - Run locally: the repo ships with a Compose stack for the required databases and supporting services.
 - Separate ingestion from retrieval: one service writes and indexes data, another serves search requests.
 - Build on standard components: FastAPI, PostgreSQL, Weaviate, Temporal, Redis/Valkey, and S3-compatible storage.
@@ -59,7 +59,7 @@ It gives you:
 
 ## Key Features
 
-- Multi-format ingestion — plain text, Markdown, PDF, DOCX, source code, and more; see the full [supported file types](docs/reference/file-types.md) list (PNG images via OCR, which requires the optional `ocr` extra plus the `tesseract` system binary)
+- Multi-format ingestion — plain text, Markdown, PDF, DOCX, source code, and more; see the full [supported file types](docs/reference/file-types.md) list (PNG via optional `ocr` + tesseract; audio via optional `asr` + faster-whisper)
 - Chunking and embedding generation for semantic retrieval
 - PostgreSQL as structured storage for documents and chunks
 - Weaviate as vector index for similarity search

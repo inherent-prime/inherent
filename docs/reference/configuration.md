@@ -121,6 +121,39 @@ and binds all datastore ports to `127.0.0.1`.
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | unset | S3 credentials | yes |
 | `ALLOW_URL_BASED_INGESTION` | `false` | Gates `storage_backend="azure"` on `fetch_document`/`extract_text`. There is no real Azure Blob client in this codebase — `azure` means "fetch `storage_url` directly", which bypasses the #210 `storage_path`/`workspace_id` check entirely (#214). Off by default; enabling it leaves only #34's SSRF guard between a caller-supplied URL and the tenant's store | no |
 
+### Optional ASR (#128)
+
+Speech-to-text for `audio/mpeg` / `audio/wav` / `audio/mp4` requires the
+ingestion service's optional `asr` extra. Without it, extraction returns
+`[audio: <name>, transcription unavailable]`. **Not** baked into the default
+ingestion image.
+
+**Enable (Compose overlay):**
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.asr.yml up --build -d
+```
+
+**Enable (host venv):** `uv sync --extra asr` in `inh-ingestion-svc`.
+
+Decode uses PyAV (pulled by `faster-whisper`); system `ffmpeg` is optional.
+Model weights live under `HF_HOME` (Compose overlay defaults to
+`/var/cache/huggingface` on volume `asr_hf_cache`). First run downloads
+~148 MB for `base`; air-gap hosts must pre-seed that cache. See
+[local getting started — Optional ASR](../getting-started/local.md) and
+[Optional audio ASR](audio-asr.md) for flow and overlay rationale.
+
+| Variable | Default | Effect | Secret |
+| --- | --- | --- | --- |
+| `ASR_MODEL_SIZE` | `base` | faster-whisper model (`tiny` / `base` / `small` / `*.en`) | no |
+| `ASR_DEVICE` | `cpu` | `cpu` (default) or `cuda` when a GPU is available | no |
+| `ASR_COMPUTE_TYPE` | `int8` | CTranslate2 compute type (`int8` on CPU; `float16` typical on CUDA) | no |
+| `ASR_MAX_DURATION_SECONDS` | `7200` | Reject longer audio with a non-retryable extraction error | no |
+| `HF_HOME` | unset (library default `~/.cache/huggingface`) | Model weight cache directory | no |
+
+`extract_text` uses a **60-minute** Temporal activity timeout for `audio/*`
+content types (5 minutes for everything else).
+
 ### MQ
 
 | Variable | Default | Effect | Secret |

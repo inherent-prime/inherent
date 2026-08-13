@@ -732,6 +732,25 @@ class TestExtractSubtitleText:
         assert "Line one Line two" in result
 
 
+class TestAudioAsrStub:
+    """#128: without the optional asr extra, extraction returns the
+    placeholder (default CI/dev venv does not install faster-whisper)."""
+
+    def test_extract_audio_returns_placeholder_when_extra_absent(self):
+        from src.temporal.activities.extract import _extract_audio_text
+
+        text = _extract_audio_text(b"RIFF....WAVE fake", "meeting.mp3")
+        assert text == "[audio: meeting.mp3, transcription unavailable]"
+
+    def test_audio_asr_key_is_wired_in_extractors(self):
+        from src.temporal.activities.extract import EXTRACTORS
+
+        assert "audio_asr" in EXTRACTORS
+        assert EXTRACTORS["audio_asr"](b"x", "a.wav") == (
+            "[audio: a.wav, transcription unavailable]"
+        )
+
+
 # =========================================================================
 # set_document_status activity tests
 # =========================================================================
