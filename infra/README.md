@@ -145,9 +145,23 @@ infra/
 └── README.md                 # This file
 ```
 
-## CI e2e
+## CI e2e — REMOVED
 
-Workflow: [`.github/workflows/hetzner-e2e.yml`](../.github/workflows/hetzner-e2e.yml).
+`.github/workflows/hetzner-e2e.yml` has been removed. End-to-end coverage now
+runs entirely in GitHub Actions via `integration.yml` (full Compose stack on
+the runner). The Terraform in this directory is unchanged and still drives
+**production deploys** and the [laptop VM
+path](../docs/getting-started/local-vm-test.md) — only the CI lane is gone.
+
+[`hetzner-e2e-recover.yml`](../.github/workflows/hetzner-e2e-recover.yml) is
+retained as a manual-dispatch tool for destroying any leftover
+`inherent/ci/<run_id>/terraform.tfstate` from past runs.
+
+The sections below describe the removed workflow's configuration. They are kept
+because the same secrets, variables, and image-parity constraints apply to
+manual VM runs, and because reinstating the lane would need them — but nothing
+here runs automatically any more. See `docs/testing.md` for why it was removed
+and the two gaps to fix first if it comes back.
 
 ### GitHub Actions configuration
 

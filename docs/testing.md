@@ -152,26 +152,42 @@ is entirely post-merge, none of it in `smoke`.
 — Terraform apply from your machine with Object Storage remote state, smoke
 `/health`, optional bootstrap and `pytest -m compose`. Destroy when done.
 
-**Hetzner production-path e2e:** `.github/workflows/hetzner-e2e.yml` — Terraform
-apply on Hetzner (remote state key `inherent/ci/<run_id>/terraform.tfstate`),
-bootstrap, then public-api `pytest -m compose` against the VM. Not a PR gate.
+**Hetzner production-path e2e: REMOVED.** `.github/workflows/hetzner-e2e.yml`
+is gone; end-to-end coverage now lives entirely in GitHub Actions via
+`integration.yml` (above), which runs the full Compose stack on the runner.
 
-- **Triggers:** successful **Publish images** on a final `vX.Y.Z` tag
-  (`workflow_run`; RCs skipped), or manual **Run workflow** form.
-- **Form / inputs:** [infra/README.md § Manual run](https://github.com/inherent-prime/inherent/blob/main/infra/README.md#manual-run-github-form)
-  — `ref` (required; checkout + compose; needs `infra/`), optional
-  `inherent_version` (GHCR tag), `server_type` (default `cpx32`). “Use workflow
-  from” only selects the workflow YAML branch.
-- **Pin:** prefer aligned image tag + checkout when testing a release; use
-  `ref=main` + explicit `inherent_version` when the release tag lacks `infra/`.
-- **Secrets:** `HCLOUD_TOKEN`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`.
-- **Variables:** `HETZNER_S3_BUCKET`, `HETZNER_S3_ENDPOINT`, optional
-  `AWS_DEFAULT_REGION` (default `eu-central`).
-- **Recover orphans:** `.github/workflows/hetzner-e2e-recover.yml` (`run_id`
-  input) — same infra README section.
-- **Local `act`:** optional laptop simulation of the workflow; see infra README
-  § Local simulation and [audit/act-hetzner-e2e-weaviate-401.md](audit/act-hetzner-e2e-weaviate-401.md).
-  Smoke image parity before long runs ([releasing](maintainers/releasing.md#hetzner-act-e2e-image-parity)).
+Why it was removed rather than fixed: the lane had not produced a genuine pass
+since 2026-07-13, and its skip path reported **success** with every meaningful
+step skipped — so a green check meant either "fully verified" or "did nothing",
+indistinguishable without opening the run. v0.6.0 shipped believing it had e2e
+coverage it never had. A signal that can be silently absent is worse than no
+signal, because releasing.md pointed maintainers at it.
+
+Two real gaps it surfaced are worth remembering if the lane ever returns:
+
+- The **stdio** MCP test builds the server in-process on the runner and needs
+  direct datastore access (`localhost:15432` / `:27018` / `:18080`).
+  `docker-compose.release.yml` publishes no datastore ports and binds them to
+  `127.0.0.1` on the VM, so that test cannot work against release compose
+  without undoing that hardening. It is covered by `integration.yml`, which
+  runs dev compose on the runner itself.
+- `scripts/dev/bootstrap.sh` seeds the second tenancy principal only when
+  `SEED_PRINCIPAL_B=1` or `API_KEY` is the local dev default. Any lane using a
+  per-run key must set that flag or the cross-workspace isolation tests 401
+  instead of verifying anything.
+
+What GitHub Actions e2e does **not** cover, and is now untested in CI: the
+published GHCR images, `docker-compose.release.yml` itself (localhost-bound
+datastores, Weaviate API-key auth, required-secret guards), and any real-VM
+behaviour. Verify those manually before a release —
+[getting-started/local-vm-test.md](getting-started/local-vm-test.md) still
+provides a laptop Terraform path, and the published-image smoke check in
+[releasing](maintainers/releasing.md) still applies.
+
+- **Recover orphans:** `.github/workflows/hetzner-e2e-recover.yml` is retained
+  as a manual-dispatch cleanup tool for any leftover CI Terraform state.
+- **Local `act`:** see infra README § Local simulation and
+  [audit/act-hetzner-e2e-weaviate-401.md](audit/act-hetzner-e2e-weaviate-401.md).
 
 See [infra/README.md](https://github.com/inherent-prime/inherent/blob/main/infra/README.md#ci-e2e) and
 [releasing](maintainers/releasing.md#cutting-an-image-release).

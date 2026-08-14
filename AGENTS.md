@@ -43,7 +43,7 @@ Three lanes, by when they run and what they can block:
 | --- | --- | --- | --- |
 | **PR-blocking** | every PR into `main` | `Required tests before merge` (`ci.yml`: lint, format, mypy, bandit, unit+contract tests, coverage floors — all three services); `E2E smoke` (`e2e-smoke.yml`: boots the Compose stack, runs `-m "smoke and compose"`, 6 tests, 40-min job timeout); `Conventions` (`conventions.yml`: requires a `CHANGELOG.md` entry when `services/**` changes and a `docs/` touch when API routers / the MCP tool registry / shared contracts change — skippable per-PR with the `no-changelog` / `no-docs-needed` labels) | merging the PR |
 | **Post-merge** | push to `main`, nightly cron, manual dispatch | `integration.yml`: full Compose suite, the retrieval-eval hard gate (tolerance derived from corpus resolution, #236 — see `docs/testing.md`), search + ingestion benchmarks, dead-letter recovery E2E, baseline ratchet and regression-alert jobs | nothing directly — it reports and files issues against code already on `main` |
-| **Release-only** | a final `vX.Y.Z` tag / manual dispatch | `publish.yml` (human-approved GHCR image publish); `hetzner-e2e.yml` (real-VM Terraform + Compose E2E, triggered by a successful `publish.yml` run on a final tag) | cutting/publishing a release |
+| **Release-only** | a final `vX.Y.Z` tag / manual dispatch | `publish.yml` (human-approved GHCR image publish) | cutting/publishing a release |
 
 The three PR-blocking checks above are the required-status-check *intent* for
 `main-protect`; their registration on the ruleset is a separate, later step

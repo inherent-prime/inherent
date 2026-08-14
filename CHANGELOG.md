@@ -5,6 +5,36 @@ All notable changes to Inherent are documented here. The format follows
 
 ## [Unreleased]
 
+### Removed
+
+- **Hetzner real-VM e2e lane removed; e2e now lives entirely in GitHub
+  Actions.** `.github/workflows/hetzner-e2e.yml` is deleted. The lane had not
+  produced a genuine pass since 2026-07-13, and — more seriously — its skip
+  path reported **success**: the final-tag filter lived inside the first step
+  while every other step carried `if: steps.meta.outputs.skip != 'true'`, so a
+  skipped run completed with zero work done and a green check identical to a
+  full-stack pass. `v0.6.0-rc1` produced exactly that, and since
+  `docs/maintainers/releasing.md` pointed maintainers at the signal, **v0.6.0
+  shipped believing it had e2e coverage it never had**. A gate that can be
+  silently absent is worse than no gate. `integration.yml` (full Compose stack
+  on the runner, gating every merge to `main`) is now the sole e2e lane.
+  `hetzner-e2e-recover.yml` is retained as a manual cleanup tool, and
+  `infra/` Terraform is untouched — production deploys and the laptop VM path
+  still use it.
+
+  When the lane first really ran (on the v0.6.0 publish) it found two genuine
+  harness gaps, recorded in `docs/testing.md` for whoever reinstates it: the
+  **stdio** MCP test needs direct datastore access that
+  `docker-compose.release.yml` deliberately does not publish, and
+  `scripts/dev/bootstrap.sh` seeds the second tenancy principal only under
+  `SEED_PRINCIPAL_B=1`, so the cross-workspace isolation tests were 401ing
+  rather than verifying isolation.
+
+  **Now untested in CI:** the published GHCR images,
+  `docker-compose.release.yml` itself, and real-VM behaviour. The
+  published-image smoke check in `releasing.md` is upgraded to required on
+  every release to partly cover this.
+
 ### Fixed
 
 - **Ingestion bulk-upload path: store_in_weaviate budget, retry load, Temporal visibility (#228, #229, #230).**

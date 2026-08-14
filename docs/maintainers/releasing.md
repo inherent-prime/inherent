@@ -108,16 +108,19 @@ job runs without pausing.
 4. In both cases, the workflow pauses on the `release-publish` environment until
    a reviewer approves the run in the **Actions** tab. Nothing is pushed to GHCR
    without that approval.
-5. After a **successful** Publish images run on a **final** `vX.Y.Z` tag (not
-   `-rcN`), [Hetzner e2e](https://github.com/inherent-prime/inherent/blob/main/.github/workflows/hetzner-e2e.yml) starts via
-   `workflow_run`. It pins the same release for checkout, GHCR image tag
-   `X.Y.Z`, and compose `compose_git_ref` (the tag). RC tags skip e2e.
-6. Re-run manually: Actions → **Hetzner e2e** → **Run workflow**. Form fields
-   and examples (Use workflow from vs `ref`, image tag, `cpx32`) live in
-   [infra/README.md § Manual run](https://github.com/inherent-prime/inherent/blob/main/infra/README.md#manual-run-github-form).
-   Short form: required `ref` (checkout + compose; must include `infra/`);
-   optional `inherent_version` (GHCR tag; empty = strip leading `v` from `ref`);
-   `server_type` default `cpx32`.
+5. **No automated post-publish e2e runs.** Hetzner e2e was removed — it had not
+   produced a genuine pass since 2026-07-13 and its skip path reported success
+   while doing nothing, so v0.6.0 shipped believing it had coverage it never
+   had. End-to-end testing now lives entirely in `integration.yml` (GitHub
+   Actions, full Compose stack on the runner), which gates every merge to
+   `main` — so the release commit is already e2e-tested **as source**.
+6. **What that leaves unverified, and what to do about it.** `integration.yml`
+   builds from source with `docker-compose.yml`. It does not exercise the
+   published GHCR images, `docker-compose.release.yml` (localhost-bound
+   datastores, Weaviate API-key auth, required-secret guards), or any real VM.
+   Before announcing a release, run the published-image smoke check below at
+   minimum; for a release with deploy-shaped changes, do a manual VM pass with
+   [getting-started/local-vm-test.md](../getting-started/local-vm-test.md).
 7. **Publish a GitHub Release from the final tag** (Releases → Draft a new
    release → pick `vX.Y.Z`). Title it exactly `vX.Y.Z` — bare tag, no theme
    or codename, matching step 6 of the
@@ -131,11 +134,14 @@ job runs without pausing.
 
 `make release-images` prints these steps.
 
-### Hetzner / act e2e image parity
+### Published-image parity
 
-Hetzner e2e and local `act` pull **published**
+Local `act`, the manual VM path, and anyone running
+`docker-compose.release.yml` all pull the **published**
 `ghcr.io/inherent-prime/public-api-svc:${INHERENT_VERSION:-latest}` — not
-workspace source.
+workspace source. With Hetzner e2e removed, the smoke check below is the
+only automated-ish verification that what shipped matches what CI tested, so
+treat it as required on every release rather than only before an `act` run.
 
 If Weaviate has API-key auth enabled (release compose) but the image’s
 `SearchService` does not send `Authorization: Bearer`, compose e2e fails with
@@ -147,18 +153,29 @@ a `v*` tag). Publish requires `release-publish` environment approval. Prefer
 also republishing `ingestion-svc` in the same workflow run (matrix already
 builds both).
 
-**Smoke (required before re-running act):**
+**Smoke (required on every release, and before re-running act):**
 
 ```bash
-docker pull ghcr.io/inherent-prime/public-api-svc:latest
+docker pull ghcr.io/inherent-prime/public-api-svc:X.Y.Z
 docker run --rm --entrypoint grep \
-  ghcr.io/inherent-prime/public-api-svc:latest \
+  ghcr.io/inherent-prime/public-api-svc:X.Y.Z \
   -n 'Bearer {self._api_key}' \
   /app/services/inh-public-api-svc/src/services/search.py
 ```
 
-Expect a matching line. No match → do not run Hetzner e2e; republish from
-current `main` first.
+Expect a matching line. No match → do not announce the release; republish from
+current `main` first. Run it against the exact tag you published, not
+`:latest` — a final tag moves `:latest`, but an `-rcN` does not, so `:latest`
+can silently be a different build than the one under test.
+
+Worth also confirming the bumped versions actually landed inside the image,
+since `uv.lock` pins them and the images build from the lock (#226):
+
+```bash
+docker run --rm --entrypoint grep \
+  ghcr.io/inherent-prime/ingestion-svc:X.Y.Z \
+  -m1 -n '^version' /app/services/inh-ingestion-svc/pyproject.toml
+```
 
 ## Documentation Rule
 
