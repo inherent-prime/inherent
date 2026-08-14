@@ -5,23 +5,28 @@ All notable changes to Inherent are documented here. The format follows
 
 ## [Unreleased]
 
-### Added
+### Fixed
 
-- **Chunk CRUD on public-API REST + MCP (#133).** Agents can append, edit, and
-  hard-delete individual chunks on both surfaces: `POST` /
-  `PATCH` / `DELETE /v1/chunks/{document_id}/index/{chunk_index}` and MCP
-  `create_chunk` / `edit_chunk` / `delete_chunk` (write permission). Ordering
-  is Option A — append at `max(chunk_index)+1`, delete leaves gaps
-  (`chunk_index` is a stable id). Write routes use `/index/{chunk_index}` so
-  they cannot collide with `GET` by BIGSERIAL `id`. Writes run synchronously
-  in public-api (PG + Weaviate with `embed_passage` / TEI `truncate`); empty
-  content is rejected on both surfaces. Vector failure compensates (Create
-  rolls back PG; Update restores prior content only if this request's hash is
-  still on the row; Delete aborts before PG). Create scans `content_risk`
-  rather than writing `"none"`. PG delete is workspace-scoped and aborts (no
-  `chunk_count` decrement) when `DELETE` rowcount ≠ 1 under concurrent races.
-  Failure parity pinned in `test_failure_parity.py`. MCP surface is stdio 17
-  / HTTP 13.
+- **Ingestion bulk-upload path: store_in_weaviate budget, retry load, Temporal visibility (#228, #229, #230).**
+  `store_in_weaviate` StartToClose now scales with chunk count and embed
+  concurrency waves (`weaviate_store_budget.py`: one-wave minimum covers
+  per-batch retry worst-case ≈130s, cap 15m) instead of a flat 60s that
+  could not cover multi-batch embedding under TEI queue load. Activity
+  retry initial/max intervals lengthened (5–60s) to reduce lockstep retry
+  herds. The embedder dispatches batches with bounded concurrency
+  (`EMBEDDING_MAX_CONCURRENCY`, default **2** — the product of this and
+  `TEMPORAL_MAX_CONCURRENT_ACTIVITIES` is the TEI in-flight cap) and
+  per-batch retry with exponential backoff + jitter so a single queue
+  spike does not burn a whole Temporal attempt. Terminal document
+  failures raise `ApplicationError(type=DocumentIngestionFailed)` after
+  status/DLQ/completion side-effects and staging cleanup so Temporal
+  close status is `Failed` (was always `Completed` with a success=False
+  payload — 70 losses invisible to workflow monitoring).
+  `/ingest?wait=true` and the sync trigger map that type back to
+  structured `success=False` (wait body carries error string only;
+  `chunks_created`/`processing_time_ms` are zero on that path).
+  **Residual:** Temporal activity retries still re-embed the whole
+  document — no durable partial-progress checkpoint yet (#229).
 
 ## [0.6.0] — 2026-08-13
 

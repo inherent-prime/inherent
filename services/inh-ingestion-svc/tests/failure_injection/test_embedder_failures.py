@@ -22,8 +22,15 @@ pytestmark = pytest.mark.failure_injection
 
 @pytest.fixture(autouse=True)
 def _reset_embedder_client(monkeypatch):
-    """Reset the cached module-level httpx client around each test."""
+    """Reset the cached module-level httpx client around each test.
+
+    Also disable real retry sleeps and collapse to a single attempt so
+    permanent-failure cases stay fast after #229 added per-batch retries
+    (default 3 attempts with exponential sleep would otherwise stall CI).
+    """
     monkeypatch.setattr(embedder, "_CLIENT", None, raising=False)
+    monkeypatch.setenv("EMBEDDING_BATCH_MAX_RETRIES", "1")
+    monkeypatch.setattr(embedder.time, "sleep", lambda _s: None)
     yield
     monkeypatch.setattr(embedder, "_CLIENT", None, raising=False)
 

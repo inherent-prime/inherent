@@ -449,6 +449,37 @@ class TestSyncTriggerWorkflowMemoIntegration:
             "sync_id": "sync_456",
         }
 
+    @pytest.mark.asyncio
+    async def test_document_ingestion_failed_maps_to_processing_result_success_false(
+        self, sample_upload_message
+    ):
+        """#230: terminal workflow failure must not look like a trigger/start
+        error — map ApplicationError(type=DocumentIngestionFailed) to
+        ProcessingResult(success=False) without the outer exception path."""
+        from temporalio.client import WorkflowFailureError
+        from temporalio.exceptions import ApplicationError
+
+        from src.temporal.document_failure import DOCUMENT_INGESTION_FAILED_TYPE
+
+        trigger = self._ready_trigger()
+        handle = MagicMock()
+        handle.result = AsyncMock(
+            side_effect=WorkflowFailureError(
+                cause=ApplicationError(
+                    "Weaviate storage failed: timed out",
+                    type=DOCUMENT_INGESTION_FAILED_TYPE,
+                    non_retryable=True,
+                )
+            )
+        )
+        trigger._client.start_workflow = AsyncMock(return_value=handle)
+
+        result = await trigger.trigger_workflow(sample_upload_message)
+
+        assert result.success is False
+        assert "Weaviate storage failed" in (result.error or "")
+        assert result.document_id == sample_upload_message["document_id"]
+
 
 # Workflow-id-collision supersession tests (#110)
 # ---------------------------------------------------------------------------

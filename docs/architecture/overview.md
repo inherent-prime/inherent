@@ -187,8 +187,8 @@ activity with its own timeout and retry policy:
 | Fetch from storage | `fetch_document` | 2 min | 3 (2–30s) | Propagates |
 | Extract text | `extract_text` | 5 min | 3 (2–30s), **unless non-retryable** | Propagates (or fails on attempt 1 for deterministic errors, §7) |
 | Chunk text | `chunk_text` | 2 min | 2 (1–10s) | Propagates |
-| Store PostgreSQL | `store_in_postgresql` | 60s | 5 (2–30s) | Propagates → workflow marks the document `failed` + dead-letters (§7) |
-| Store Weaviate (parallel with PG) | `store_in_weaviate` | 60s | 5 (2–30s) | Propagates → same failure path, even if PG already succeeded (§3) |
+| Store PostgreSQL | `store_in_postgresql` | 60s | 5 (2–30s) | Propagates → workflow marks the document `failed` + dead-letters, then raises so Temporal close status is Failed (#230) |
+| Store Weaviate (parallel with PG) | `store_in_weaviate` | scales with chunk count for **serial** batch worst-case (one-batch min ≈130s covers per-batch retries; cap 15m; `weaviate_store_budget.py` + `embedding_defaults`, #228) | 5 (5–60s, #229) | Same failure path as PG; activity embeds under bounded parallel batch concurrency (`EMBEDDING_MAX_CONCURRENCY` default 2, #231 phase 1) but the timeout always budgets serial completion so lowering concurrency cannot under-budget. **Residual (#229):** activity-level Temporal retries still re-embed the whole document — no durable checkpoint yet. |
 | Update workspace stats | `update_workspace_stats` | 15s | 3 (1–5s) | Propagates |
 | Publish completion | `publish_completion` | 15s | 3 (1–10s) | Best-effort — logged, never flips a complete ingestion to failed |
 | Record dead-letter (on failure) | `record_dead_letter` | 15s | 2 (1–5s) | Best-effort — must never mask the original error |
@@ -199,16 +199,18 @@ activity with its own timeout and retry policy:
 lines 296-654.)
 
 **What "processed" guarantees.** `store_in_postgresql` and `store_in_weaviate`
-run **in parallel** (`asyncio.gather`, `document_ingestion.py:485`) — chunk
-rows and vectors are written concurrently, not sequentially. If PostgreSQL
-storage fails, the workflow fails immediately (`:490-516`) — PostgreSQL is
-the relational truth, so a failure here is unconditional. If Weaviate storage
-fails *after* PostgreSQL succeeded (`:518-554`), the workflow **still marks
-the whole document `failed`**, deliberately: "a doc with no vectors in
-Weaviate is invisible to the search API — the customer sees `status=ready`
-and gets zero results... PG-only 'ghost' docs are worse than a clear
-failure" (`:518-527`, verbatim comment). A document is never left half-
-indexed and reported healthy.
+run **in parallel** (`asyncio.gather`) — chunk rows and vectors are written
+concurrently, not sequentially. If PostgreSQL storage fails, the workflow
+marks the document `failed`, dead-letters, publishes `document.failed`, then
+**raises** so Temporal close status is `Failed` (#230) — PostgreSQL is the
+relational truth, so a failure here is unconditional. If Weaviate storage
+fails *after* PostgreSQL succeeded, the same path runs, deliberately: "a doc
+with no vectors in Weaviate is invisible to the search API — the customer
+sees `status=ready` and gets zero results... PG-only 'ghost' docs are worse
+than a clear failure". A document is never left half-indexed and reported
+healthy. Returning `WorkflowResult(success=False)` without raising used to
+leave Temporal status `Completed` for every failure (#230 incident: 70
+losses, zero Failed workflows).
 
 ```mermaid
 sequenceDiagram
