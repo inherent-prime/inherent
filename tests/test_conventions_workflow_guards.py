@@ -39,6 +39,7 @@ RATCHET_FILES = [
     "services/inh-public-api-svc/tests/evals/corpus/retrieval_baseline.json",
     "services/inh-public-api-svc/tests/evals/corpus/retrieval_history.jsonl",
     "README.md",
+    "docs/_generated/retrieval-baseline.md",
 ]
 
 
@@ -201,7 +202,7 @@ def test_changelog_gate_allows_automated_eval_ratchet_diff(tmp_path: Path) -> No
 
     `eval-baseline-ratchet` (in `.github/workflows/integration.yml`) opens a
     PR touching only the two machine-generated eval corpus files plus the
-    README table rendered from them, then enables auto-merge on it. Those
+    README table and docs snippet rendered from them, then enables auto-merge on it. Those
     files live under `services/`, so an unqualified `^services/` gate blocks
     that PR forever: nothing merges, the committed baseline stays frozen, and
     the retrieval-eval floor silently stops rising -- the exact inert-gate

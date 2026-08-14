@@ -1,29 +1,45 @@
-"""Offline unit tests for the README baseline-table renderer (``render_baseline_table.py``).
+"""Offline unit tests for the retrieval-eval baseline-table renderer.
 
 No services required; runs in the default ``-m 'not compose'`` suite alongside
-``test_eval_gate.py``. These pin the two properties the CI wiring depends on:
-the rendered block is a pure function of the committed baseline, and rewriting
-an already-rendered README is a no-op (idempotent) so the ratchet job only
-touches README.md when the baseline actually moved.
+``test_eval_gate.py``. These pin the properties the CI wiring depends on: the
+rendered block is a pure function of the committed baseline, rewriting an
+already-rendered README or docs snippet is a no-op (idempotent) so the ratchet
+job only commits those files when the baseline actually moved, and the
+checked-in docs snippet cannot drift from the committed JSON.
 """
 
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
+from tests.evals.eval_gate import load_metrics
 from tests.evals.render_baseline_table import (
     MARKER_END,
     MARKER_START,
     MissingMarkersError,
     main,
     render_block,
+    render_snippet,
     render_table,
     replace_block,
 )
 
 pytestmark = pytest.mark.retrieval_eval
+
+REPO_ROOT = Path(__file__).resolve().parents[4]
+COMMITTED_BASELINE = (
+    REPO_ROOT
+    / "services"
+    / "inh-public-api-svc"
+    / "tests"
+    / "evals"
+    / "corpus"
+    / "retrieval_baseline.json"
+)
+COMMITTED_SNIPPET = REPO_ROOT / "docs" / "_generated" / "retrieval-baseline.md"
 
 
 # ---------------------------------------------------------------------------
@@ -46,6 +62,22 @@ def test_render_table_emits_one_row_per_mode_in_sorted_order():
     assert lines[2] == "| Hybrid | 1.000 | 0.750 | 0.500 |"
     assert lines[3] == "| Semantic | 0.500 | 0.250 | 0.125 |"
     assert len(lines) == 4
+
+
+def test_render_table_includes_all_gated_modes_and_metrics():
+    table = render_table(
+        {
+            "hybrid": {"recall@5": 0.1, "mrr": 0.2, "ndcg@5": 0.3},
+            "keyword": {"recall@5": 0.4, "mrr": 0.5, "ndcg@5": 0.6},
+            "semantic": {"recall@5": 0.7, "mrr": 0.8, "ndcg@5": 0.9},
+        }
+    )
+    assert "| Hybrid | 0.100 | 0.200 | 0.300 |" in table
+    assert "| Keyword | 0.400 | 0.500 | 0.600 |" in table
+    assert "| Semantic | 0.700 | 0.800 | 0.900 |" in table
+    assert "Recall@5" in table
+    assert "MRR" in table
+    assert "nDCG@5" in table
 
 
 def test_render_table_marks_metrics_the_baseline_does_not_track():
@@ -111,7 +143,7 @@ def test_replace_block_rejects_malformed_markers(text):
 
 
 # ---------------------------------------------------------------------------
-# render_block
+# render_block / render_snippet
 # ---------------------------------------------------------------------------
 
 
@@ -121,6 +153,21 @@ def test_render_block_is_wrapped_in_a_do_not_edit_notice():
     # The block body must not embed the markers; replace_block owns those.
     assert MARKER_START not in block
     assert MARKER_END not in block
+
+
+def test_render_snippet_is_render_block_plus_trailing_newline():
+    metrics = {"hybrid": {"recall@5": 1.0, "mrr": 1.0, "ndcg@5": 1.0}}
+    snippet = render_snippet(metrics)
+    assert snippet == render_block(metrics) + "\n"
+    assert snippet.endswith("\n")
+
+
+def test_render_snippet_is_deterministic():
+    metrics = {
+        "semantic": {"recall@5": 0.7, "mrr": 0.8, "ndcg@5": 0.9},
+        "hybrid": {"recall@5": 0.1, "mrr": 0.2, "ndcg@5": 0.3},
+    }
+    assert render_snippet(metrics) == render_snippet(metrics)
 
 
 # ---------------------------------------------------------------------------
@@ -173,3 +220,93 @@ def test_main_fails_when_the_readme_has_no_markers(tmp_path):
     # Non-zero exit so the CI step fails loudly instead of committing a README
     # that silently never updates again.
     assert main(["--baseline", str(baseline), "--readme", str(readme)]) == 1
+
+
+def test_main_writes_docs_snippet_from_the_baseline(tmp_path):
+    baseline = tmp_path / "retrieval_baseline.json"
+    baseline.write_text(
+        json.dumps(
+            {
+                "_comment": "not a mode",
+                "hybrid": {"recall@5": 0.75, "mrr": 0.5, "ndcg@5": 0.25},
+                "keyword": {"recall@5": 0.70, "mrr": 0.40, "ndcg@5": 0.20},
+                "semantic": {"recall@5": 0.65, "mrr": 0.30, "ndcg@5": 0.15},
+            }
+        )
+    )
+    snippet = tmp_path / "docs" / "_generated" / "retrieval-baseline.md"
+
+    assert main(["--baseline", str(baseline), "--docs-snippet", str(snippet)]) == 0
+
+    written = snippet.read_text(encoding="utf-8")
+    assert written == render_snippet(load_metrics(baseline))
+    assert "| Hybrid | 0.750 | 0.500 | 0.250 |" in written
+    assert "| Keyword | 0.700 | 0.400 | 0.200 |" in written
+    assert "| Semantic | 0.650 | 0.300 | 0.150 |" in written
+    assert "Recall@5" in written
+    assert "MRR" in written
+    assert "nDCG@5" in written
+    assert "_comment" not in written
+
+
+def test_main_docs_snippet_is_idempotent(tmp_path):
+    baseline = tmp_path / "retrieval_baseline.json"
+    baseline.write_text(json.dumps({"hybrid": {"recall@5": 0.75, "mrr": 0.5, "ndcg@5": 0.25}}))
+    snippet = tmp_path / "retrieval-baseline.md"
+
+    main(["--baseline", str(baseline), "--docs-snippet", str(snippet)])
+    first = snippet.read_bytes()
+    main(["--baseline", str(baseline), "--docs-snippet", str(snippet)])
+    assert snippet.read_bytes() == first
+
+
+def test_main_readme_and_docs_snippet_share_the_same_table(tmp_path):
+    baseline = tmp_path / "retrieval_baseline.json"
+    baseline.write_text(
+        json.dumps(
+            {
+                "hybrid": {"recall@5": 0.75, "mrr": 0.5, "ndcg@5": 0.25},
+                "keyword": {"recall@5": 0.70, "mrr": 0.40, "ndcg@5": 0.20},
+            }
+        )
+    )
+    readme = tmp_path / "README.md"
+    readme.write_text(_readme("stale"))
+    snippet = tmp_path / "retrieval-baseline.md"
+
+    assert (
+        main(
+            [
+                "--baseline",
+                str(baseline),
+                "--readme",
+                str(readme),
+                "--docs-snippet",
+                str(snippet),
+            ]
+        )
+        == 0
+    )
+
+    table = render_table(load_metrics(baseline))
+    assert table in readme.read_text(encoding="utf-8")
+    assert table in snippet.read_text(encoding="utf-8")
+
+
+def test_main_requires_an_output_path(tmp_path):
+    baseline = tmp_path / "retrieval_baseline.json"
+    baseline.write_text(json.dumps({"hybrid": {"recall@5": 1.0}}))
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--baseline", str(baseline)])
+    assert excinfo.value.code == 2
+
+
+def test_committed_docs_snippet_matches_committed_baseline():
+    """The checked-in snippet is generated output, not a hand-edited copy.
+
+    If this fails, re-run ``render_baseline_table.py --docs-snippet``; do not
+    edit ``docs/_generated/retrieval-baseline.md`` by hand.
+    """
+    expected = render_snippet(load_metrics(COMMITTED_BASELINE))
+    assert COMMITTED_SNIPPET.read_text(encoding="utf-8") == expected

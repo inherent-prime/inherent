@@ -51,10 +51,13 @@ plugins:
 
 # Internal artifacts never published to the site.
 # /README.md would collide with index.md (both map to site root).
+# _generated/ is snippet input for pymdownx.snippets (included into
+# testing.md), not a standalone page.
 exclude_docs: |
   /README.md
   superpowers/
   examples/__pycache__/
+  _generated/
 
 # Built (so in-repo links keep working) but intentionally not in the nav.
 not_in_nav: |

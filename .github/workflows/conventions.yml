@@ -28,7 +28,7 @@ jobs:
       # The two corpus paths excluded below are machine-generated: the
       # `eval-baseline-ratchet` job in integration.yml rewrites them on every
       # green main run and opens an auto-merging PR touching ONLY them (plus
-      # the README table rendered from the baseline). They are not user-facing
+      # the README table and docs snippet rendered from the baseline). They are not user-facing
       # changes and have nothing to say in a CHANGELOG. Without this
       # exclusion an unqualified `^services/` match blocks that PR forever --
       # `github-actions[bot]` never merges, the committed baseline freezes at

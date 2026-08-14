@@ -5,6 +5,16 @@ All notable changes to Inherent are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Retrieval-eval baseline published on the docs site (#153).** The per-mode
+  floor table already rendered into `README.md` (#158) is now also written to
+  `docs/_generated/retrieval-baseline.md` by the same
+  `render_baseline_table.py` / `eval-baseline-ratchet` path, and included in
+  `docs/testing.md` via `pymdownx.snippets`. The docs site therefore shows the
+  live gated numbers without hand-copying, and a ratchet PR updates README and
+  docs together.
+
 ### Removed
 
 - **Hetzner real-VM e2e lane removed; e2e now lives entirely in GitHub
