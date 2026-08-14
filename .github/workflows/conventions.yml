@@ -25,10 +25,32 @@ jobs:
           git fetch origin "$BASE_REF"
           git diff --name-only "origin/$BASE_REF...HEAD" > changed.txt
           echo "Changed files:" && cat changed.txt
+      # The two corpus paths excluded below are machine-generated: the
+      # `eval-baseline-ratchet` job in integration.yml rewrites them on every
+      # green main run and opens an auto-merging PR touching ONLY them (plus
+      # the README table rendered from the baseline). They are not user-facing
+      # changes and have nothing to say in a CHANGELOG. Without this
+      # exclusion an unqualified `^services/` match blocks that PR forever --
+      # `github-actions[bot]` never merges, the committed baseline freezes at
+      # whatever it last was, and the retrieval-eval floor silently stops
+      # rising, which is precisely the inert-gate failure the ratchet job
+      # exists to prevent. Self-applying a `no-changelog` label was the
+      # alternative and is weaker: the job degrades to the default
+      # `GITHUB_TOKEN` when `RATCHET_PR_TOKEN` is unset, so label writes are
+      # not guaranteed, and the exemption belongs to the paths themselves
+      # rather than to whoever remembered to label the PR.
+      #
+      # Scoped to these exact generated files, not to `tests/` broadly: a
+      # human test-only change to a service can still be user-visible
+      # (behavior pinned, contract tightened) and still owes a CHANGELOG
+      # entry. Kept in sync with the `paths-ignore` list in integration.yml
+      # and pinned by tests/test_conventions_workflow_guards.py.
       - name: CHANGELOG gate
         if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-changelog') }}
         run: |
-          if grep -qE '^services/' changed.txt && ! grep -qx 'CHANGELOG.md' changed.txt; then
+          if grep -E '^services/' changed.txt \
+               | grep -qvE '^services/inh-public-api-svc/tests/evals/corpus/(retrieval_baseline\.json|retrieval_history\.jsonl)$' \
+             && ! grep -qx 'CHANGELOG.md' changed.txt; then
             echo "::error::PR touches services/** but has no CHANGELOG.md entry. Add one under [Unreleased] or apply the 'no-changelog' label."
             exit 1
           fi

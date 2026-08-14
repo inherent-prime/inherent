@@ -37,6 +37,26 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Fixed
 
+- **CI: the CHANGELOG gate no longer deadlocks the automated eval-baseline
+  ratchet.** `conventions.yml`'s CHANGELOG gate failed any PR touching
+  `services/**` without a `CHANGELOG.md` entry, which included the PR that
+  `integration.yml`'s `eval-baseline-ratchet` job opens on every green `main`
+  run — its diff is only the two machine-generated corpus files
+  (`retrieval_baseline.json`, `retrieval_history.jsonl`) plus the README
+  table rendered from them. That PR is opened with auto-merge enabled and
+  never merged, because a required check it can never satisfy sat red on it
+  (observed on PR #269). The committed retrieval-eval baseline therefore
+  froze at its last merged value and the enforced quality floor silently
+  stopped rising — the same inert-gate failure the ratchet job was built to
+  prevent, reintroduced one gate upstream. The gate now excludes those two
+  generated paths specifically; service source changed alongside them still
+  requires an entry, and a human test-only change to a service is
+  deliberately still in scope. Pinned by four new cases in
+  `tests/test_conventions_workflow_guards.py`, which now extract each gate's
+  `run:` block and execute it against synthetic file lists rather than
+  regex-matching the workflow YAML — text pins proved a `grep` was spelled a
+  certain way, not that it classified a real diff correctly.
+
 - **Ingestion bulk-upload path: store_in_weaviate budget, retry load, Temporal visibility (#228, #229, #230).**
   `store_in_weaviate` StartToClose now scales with chunk count and embed
   concurrency waves (`weaviate_store_budget.py`: one-wave minimum covers

@@ -11,14 +11,20 @@ gate without becoming a source of false-positive blocks:
 - each gate must be skippable via its own label (`no-changelog`,
   `no-docs-needed`) so an intentionally-exempt PR is not stuck.
 
-These tests pin the YAML text rather than executing the workflow (this repo
-has no local GitHub Actions runner), matching the pattern in
-`tests/test_integration_workflow_guards.py`.
+Most of these tests pin the YAML text rather than executing the workflow
+(this repo has no local GitHub Actions runner), matching the pattern in
+`tests/test_integration_workflow_guards.py`. The gate *scripts* themselves
+are pure bash over a `changed.txt` file list, though, so those are extracted
+and actually executed against synthetic file lists -- pinning the text of a
+`grep` pattern proves the pattern is spelled a certain way, not that it
+classifies a real PR's diff correctly.
 """
 
 from __future__ import annotations
 
 import re
+import subprocess
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -27,10 +33,61 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "conventions.yml"
 
+# The exact file set the automated retrieval-eval ratchet job commits
+# (`eval-baseline-ratchet` in `.github/workflows/integration.yml`).
+RATCHET_FILES = [
+    "services/inh-public-api-svc/tests/evals/corpus/retrieval_baseline.json",
+    "services/inh-public-api-svc/tests/evals/corpus/retrieval_history.jsonl",
+    "README.md",
+]
+
 
 def _text() -> str:
     assert WORKFLOW.exists(), f"expected workflow at {WORKFLOW}"
     return WORKFLOW.read_text()
+
+
+def _step_script(step_name: str) -> str:
+    """Extract the `run: |` block of the named step as runnable bash.
+
+    The block runs verbatim under `bash -e` in `_run_gate` below, so the
+    workflow's real gate logic is what gets exercised -- not a paraphrase of
+    it maintained separately in this test file.
+    """
+    text = _text()
+    idx = text.index(f"- name: {step_name}")
+    run_idx = text.index("run: |", idx)
+    body = text[run_idx + len("run: |") :].lstrip("\n")
+
+    lines: list[str] = []
+    for line in body.splitlines():
+        # The block ends at the first non-blank line that is not indented
+        # deeper than the step's own `- name:` key.
+        if line.strip() and not line.startswith("          "):
+            break
+        lines.append(line)
+    script = textwrap.dedent("\n".join(lines))
+    assert script.strip(), f"step {step_name!r} has an empty `run:` block"
+    return script
+
+
+def _run_gate(step_name: str, changed: list[str], tmp_path: Path) -> int:
+    """Run a gate step against a synthetic `changed.txt`, return its exit code.
+
+    Exit 0 means the gate passed (PR allowed); non-zero means it blocked.
+    `bash -e` matches the default shell GitHub Actions runs `run:` blocks
+    with (`/usr/bin/bash -e {0}`).
+    """
+    (tmp_path / "changed.txt").write_text("".join(f"{p}\n" for p in changed))
+    script = tmp_path / "gate.sh"
+    script.write_text(_step_script(step_name))
+    proc = subprocess.run(
+        ["bash", "-e", str(script)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    return proc.returncode
 
 
 def _job_block(job: str, text: str) -> str:
@@ -108,6 +165,70 @@ def test_changelog_gate_checks_no_changelog_label() -> None:
     step = text[idx : idx + 600]
     assert "no-changelog" in step, (
         "CHANGELOG gate step must reference the `no-changelog` skip label"
+    )
+
+
+def test_changelog_gate_blocks_service_change_without_changelog(
+    tmp_path: Path,
+) -> None:
+    """The gate's whole point: a service source edit needs a CHANGELOG entry."""
+    assert (
+        _run_gate(
+            "CHANGELOG gate",
+            ["services/inh-public-api-svc/src/api/v1/search.py"],
+            tmp_path,
+        )
+        != 0
+    ), "expected the CHANGELOG gate to block a services/ change with no CHANGELOG.md"
+
+
+def test_changelog_gate_allows_service_change_with_changelog(
+    tmp_path: Path,
+) -> None:
+    """A service edit that ships a CHANGELOG entry passes."""
+    assert (
+        _run_gate(
+            "CHANGELOG gate",
+            ["services/inh-public-api-svc/src/api/v1/search.py", "CHANGELOG.md"],
+            tmp_path,
+        )
+        == 0
+    ), "expected the CHANGELOG gate to pass when CHANGELOG.md is in the diff"
+
+
+def test_changelog_gate_allows_automated_eval_ratchet_diff(tmp_path: Path) -> None:
+    """The automated baseline-ratchet PR must not need a CHANGELOG entry.
+
+    `eval-baseline-ratchet` (in `.github/workflows/integration.yml`) opens a
+    PR touching only the two machine-generated eval corpus files plus the
+    README table rendered from them, then enables auto-merge on it. Those
+    files live under `services/`, so an unqualified `^services/` gate blocks
+    that PR forever: nothing merges, the committed baseline stays frozen, and
+    the retrieval-eval floor silently stops rising -- the exact inert-gate
+    failure that job exists to prevent. `github-actions[bot]` cannot be
+    relied on to self-apply a `no-changelog` label (the fallback
+    `GITHUB_TOKEN` path has no such guarantee), so the exemption has to live
+    in the gate itself.
+    """
+    assert _run_gate("CHANGELOG gate", RATCHET_FILES, tmp_path) == 0, (
+        "expected the CHANGELOG gate to pass for the automated ratchet diff "
+        f"({RATCHET_FILES}); these are machine-generated eval artifacts, not "
+        "user-facing changes"
+    )
+
+
+def test_changelog_gate_still_blocks_ratchet_files_bundled_with_source(
+    tmp_path: Path,
+) -> None:
+    """The exemption must not become a loophole for real service changes.
+
+    A PR that edits service source and happens to also touch the eval corpus
+    is a normal change and still owes a CHANGELOG entry.
+    """
+    changed = [*RATCHET_FILES, "services/inh-public-api-svc/src/api/v1/search.py"]
+    assert _run_gate("CHANGELOG gate", changed, tmp_path) != 0, (
+        "exempting the eval corpus must not exempt service source changed "
+        "alongside it"
     )
 
 
