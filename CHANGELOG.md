@@ -7,26 +7,25 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Fixed
 
-- **Ingestion bulk-upload path: store_in_weaviate budget, retry load, Temporal visibility (#228, #229, #230).**
-  `store_in_weaviate` StartToClose now scales with chunk count and embed
-  concurrency waves (`weaviate_store_budget.py`: one-wave minimum covers
-  per-batch retry worst-case ≈130s, cap 15m) instead of a flat 60s that
-  could not cover multi-batch embedding under TEI queue load. Activity
-  retry initial/max intervals lengthened (5–60s) to reduce lockstep retry
-  herds. The embedder dispatches batches with bounded concurrency
-  (`EMBEDDING_MAX_CONCURRENCY`, default **2** — the product of this and
-  `TEMPORAL_MAX_CONCURRENT_ACTIVITIES` is the TEI in-flight cap) and
-  per-batch retry with exponential backoff + jitter so a single queue
-  spike does not burn a whole Temporal attempt. Terminal document
-  failures raise `ApplicationError(type=DocumentIngestionFailed)` after
-  status/DLQ/completion side-effects and staging cleanup so Temporal
-  close status is `Failed` (was always `Completed` with a success=False
-  payload — 70 losses invisible to workflow monitoring).
-  `/ingest?wait=true` and the sync trigger map that type back to
-  structured `success=False` (wait body carries error string only;
-  `chunks_created`/`processing_time_ms` are zero on that path).
-  **Residual:** Temporal activity retries still re-embed the whole
-  document — no durable partial-progress checkpoint yet (#229).
+- **CI: the CHANGELOG gate no longer deadlocks the automated eval-baseline
+  ratchet.** `conventions.yml`'s CHANGELOG gate failed any PR touching
+  `services/**` without a `CHANGELOG.md` entry, which included the PR that
+  `integration.yml`'s `eval-baseline-ratchet` job opens on every green `main`
+  run — its diff is only the two machine-generated corpus files
+  (`retrieval_baseline.json`, `retrieval_history.jsonl`) plus the README
+  table rendered from them. That PR is opened with auto-merge enabled and
+  never merged, because a required check it can never satisfy sat red on it
+  (observed on PR #269). The committed retrieval-eval baseline therefore
+  froze at its last merged value and the enforced quality floor silently
+  stopped rising — the same inert-gate failure the ratchet job was built to
+  prevent, reintroduced one gate upstream. The gate now excludes those two
+  generated paths specifically; service source changed alongside them still
+  requires an entry, and a human test-only change to a service is
+  deliberately still in scope. Pinned by four new cases in
+  `tests/test_conventions_workflow_guards.py`, which now extract each gate's
+  `run:` block and execute it against synthetic file lists rather than
+  regex-matching the workflow YAML — text pins proved a `grep` was spelled a
+  certain way, not that it classified a real diff correctly.
 
 ## [0.6.0] — 2026-08-13
 
