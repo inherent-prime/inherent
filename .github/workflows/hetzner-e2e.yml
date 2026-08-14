@@ -35,10 +35,25 @@ jobs:
     name: Hetzner Terraform compose e2e
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    # Dispatch always; workflow_run only after successful Publish images.
+    # Dispatch always; workflow_run only after a successful Publish images run
+    # on a FINAL v* tag (no hyphen -- v0.6.0 yes, v0.6.0-rc1 no).
+    #
+    # The final-tag filter lives here, at the job level, rather than only in
+    # the `meta` step below. When it lived solely in that step, every other
+    # step carried `if: steps.meta.outputs.skip != 'true'`, so a skipped run
+    # completed with ZERO work done and still reported **success** -- a green
+    # check identical to a genuinely passing full-stack run. v0.6.0-rc1 shipped
+    # exactly that: conclusion=success, every meaningful step skipped, nothing
+    # verified. Gating the job itself makes a skip render as *skipped* (grey),
+    # so "verified" and "did nothing" stop sharing a symbol. The step-level
+    # logic stays as a defensive backstop for refs this expression cannot
+    # evaluate.
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v') &&
+       !contains(github.event.workflow_run.head_branch, '-'))
     steps:
       - name: Resolve ref and image tag
         id: meta
@@ -157,6 +172,15 @@ jobs:
           API_KEY="ink_ci_$(openssl rand -hex 16)"
           echo "::add-mask::${API_KEY}"
           echo "INTEGRATION_API_KEY=${API_KEY}" >> "$GITHUB_ENV"
+          # Second principal for the tenancy suite. scripts/dev/bootstrap.sh
+          # seeds B only when SEED_PRINCIPAL_B=1 or API_KEY is the local dev
+          # default -- and this lane deliberately uses a per-run key, so B has
+          # to be requested explicitly (see the bootstrap step below). Without
+          # it the cross-workspace tests 401 on ink_dev_local_key_002 and the
+          # isolation guarantee they exist to prove goes untested.
+          API_KEY_B="ink_ci_$(openssl rand -hex 16)"
+          echo "::add-mask::${API_KEY_B}"
+          echo "INTEGRATION_API_KEY_B=${API_KEY_B}" >> "$GITHUB_ENV"
 
       - name: Set up Terraform
         if: steps.meta.outputs.skip != 'true'
@@ -329,7 +353,13 @@ jobs:
             -o ServerAliveInterval=5 \
             -o ServerAliveCountMax=3 \
             "root@${SERVER_IPV4}" \
-            "API_KEY=${INTEGRATION_API_KEY} bash -s" < scripts/dev/bootstrap.sh
+            "API_KEY=${INTEGRATION_API_KEY} \
+             SEED_PRINCIPAL_B=1 \
+             API_KEY_B=${INTEGRATION_API_KEY_B} \
+             KEY_ID_B=key_ci_002 \
+             WORKSPACE_ID_B=ws_ci_002 \
+             USER_ID_B=user_ci_002 \
+             bash -s" < scripts/dev/bootstrap.sh
 
       # Fail fast when public-api cannot auth to Weaviate (stale image / missing Bearer).
       - name: Preflight Weaviate auth via public-api search
@@ -364,10 +394,23 @@ jobs:
           PUBLIC_API_URL: http://${{ env.SERVER_IPV4 }}:18000
           INTEGRATION_API_KEY: ${{ env.INTEGRATION_API_KEY }}
           INTEGRATION_WORKSPACE_ID: ws_local_001
+          INTEGRATION_API_KEY_B: ${{ env.INTEGRATION_API_KEY_B }}
+          INTEGRATION_WORKSPACE_ID_B: ws_ci_002
           INTEGRATION_TIMEOUT: "600"
         run: |
           uv sync --frozen --extra dev --group dev
-          uv run pytest -m compose
+          # Deselect the stdio MCP test in this lane. It builds the MCP server
+          # in-process on the runner, so it needs DIRECT datastore access
+          # (tests/integration/test_compose_mcp.py::_LIVE_BACKENDS defaults to
+          # localhost:15432 / :27018 / :18080). Those are dev-compose host
+          # ports; docker-compose.release.yml publishes no datastore ports at
+          # all and binds them to 127.0.0.1 on the VM by design, so they are
+          # unreachable from here and pointing them at the VM would undo that
+          # hardening. The stdio surface stays covered by integration.yml,
+          # which runs dev compose on the runner itself. The MCP *HTTP*
+          # surface -- the one release compose actually exposes -- is still
+          # exercised here.
+          uv run pytest -m compose -k "not stdio"
 
       - name: Dump Compose logs on failure
         if: failure() && steps.meta.outputs.skip != 'true'
