@@ -76,11 +76,11 @@ MONGO_DB="${MONGO_DB:-main}"
 # Principal B gate. Seeding a SECOND well-known, write-capable key is only ever
 # safe on a throwaway local stack, and this script is NOT only run on one:
 # README's "run from published images" flow and
-# docs/deploy/production.md §8 both point real deployments at it, and
-# .github/workflows/hetzner-e2e.yml pipes it onto a VM with a public IP. Those
-# callers override API_KEY (Hetzner mints a random per-run `ink_ci_<32 hex>`),
-# so an UNCONDITIONAL second seed would plant `ink_dev_local_key_002` --
-# active, read/write/search -- on an internet-reachable box. Hence:
+# docs/deploy/production.md §8 both point real deployments at it, and any
+# VM-based lane pipes it onto a box with a public IP. Those callers override
+# API_KEY with something that is not the dev default, so an UNCONDITIONAL
+# second seed would plant `ink_dev_local_key_002` -- active,
+# read/write/search -- on an internet-reachable box. Hence:
 #
 #   seed B  <=>  SEED_PRINCIPAL_B=1  OR  API_KEY is the local dev default
 #
