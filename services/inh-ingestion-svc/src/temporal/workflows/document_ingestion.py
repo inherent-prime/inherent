@@ -16,6 +16,7 @@ from datetime import timedelta
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ApplicationError
 
 # Import activities using workflow.unsafe.imports_passed_through()
 # This is required because activities run in a separate context.
@@ -31,6 +32,7 @@ with workflow.unsafe.imports_passed_through():
     from src.temporal.activities.status import create_pending_document, set_document_status
     from src.temporal.activities.store import store_in_postgresql, store_in_weaviate
     from src.temporal.activities.tenant import ensure_tenant_ready, update_workspace_stats
+    from src.temporal.document_failure import DOCUMENT_INGESTION_FAILED_TYPE
     from src.temporal.models import (
         ChunkTextInput,
         CleanupStagingInput,
@@ -45,6 +47,16 @@ with workflow.unsafe.imports_passed_through():
         StoreDocumentInput,
         UpdateStatsInput,
         WorkflowResult,
+    )
+    from src.temporal.weaviate_store_budget import weaviate_store_timeout
+
+
+def _document_failure(message: str) -> ApplicationError:
+    """Non-retryable error so Temporal close status is Failed after cleanup (#230)."""
+    return ApplicationError(
+        message,
+        type=DOCUMENT_INGESTION_FAILED_TYPE,
+        non_retryable=True,
     )
 
 
@@ -267,6 +279,11 @@ class DocumentIngestionWorkflow:
         # .create_pending_document's docstrings for the failure this closes.
         workflow_start_time = workflow.info().start_time
 
+        # #230: capture terminal document failure, run finally cleanup, then
+        # raise so Temporal close status is Failed (not Completed with a
+        # success=False payload that monitoring never looks at).
+        terminal_failure: ApplicationError | None = None
+
         try:
             # Create a minimal 'processing' row up front so the document is
             # observable via the status API before the store step; a failure in
@@ -474,14 +491,17 @@ class DocumentIngestionWorkflow:
                 ),
             )
 
+            # #228: budget scales with chunk count (embedding is O(batches)).
+            # #229: longer initial interval spreads thundering-herd retries when
+            # the TEI sidecar is saturated (Temporal also applies ~20% jitter).
             wv_task = workflow.execute_activity(
                 store_in_weaviate,
                 store_input,
-                start_to_close_timeout=timedelta(seconds=60),
+                start_to_close_timeout=weaviate_store_timeout(chunk_output.chunk_count),
                 retry_policy=RetryPolicy(
                     maximum_attempts=5,
-                    initial_interval=timedelta(seconds=2),
-                    maximum_interval=timedelta(seconds=30),
+                    initial_interval=timedelta(seconds=5),
+                    maximum_interval=timedelta(seconds=60),
                     backoff_coefficient=2.0,
                 ),
             )
@@ -512,12 +532,7 @@ class DocumentIngestionWorkflow:
                     error=pg_error,
                     processing_time_ms=processing_time_ms,
                 )
-                return WorkflowResult(
-                    document_id=input.document_id,
-                    success=False,
-                    error=pg_error,
-                    processing_time_ms=processing_time_ms,
-                )
+                terminal_failure = _document_failure(pg_error)
 
             # Weaviate stores the embeddings that semantic/hybrid search reads.
             # PG is the truth layer (chunk text is durable), but a doc with no
@@ -529,7 +544,7 @@ class DocumentIngestionWorkflow:
             # transitions to "failed"). Customers can re-upload; ops can see
             # the problem in the dashboard. PG-only "ghost" docs are worse
             # than a clear failure.
-            if not wv_result.success:
+            elif not wv_result.success:
                 wv_error = f"Weaviate storage failed: {wv_result.error}"
                 workflow.logger.error(wv_error)
                 await self._set_status_best_effort(
@@ -550,56 +565,53 @@ class DocumentIngestionWorkflow:
                     error=wv_error,
                     processing_time_ms=processing_time_ms,
                 )
-                return WorkflowResult(
-                    document_id=input.document_id,
-                    success=False,
-                    error=wv_error,
-                    processing_time_ms=processing_time_ms,
+                terminal_failure = _document_failure(wv_error)
+
+            else:
+
+                # Step 6: Update workspace statistics (100%)
+                self._current_step = "updating_stats"
+
+                await workflow.execute_activity(
+                    update_workspace_stats,
+                    UpdateStatsInput(
+                        workspace_id=input.workspace_id,
+                        document_delta=1,
+                        chunk_delta=chunk_output.chunk_count,
+                        size_delta=input.size_bytes,
+                        workflow_run_id=workflow_run_id,
+                        document_id=input.document_id,
+                    ),
+                    start_to_close_timeout=timedelta(seconds=15),
+                    retry_policy=RetryPolicy(
+                        maximum_attempts=3,
+                        initial_interval=timedelta(seconds=1),
+                        maximum_interval=timedelta(seconds=5),
+                        backoff_coefficient=2.0,
+                    ),
                 )
 
-            # Step 6: Update workspace statistics (100%)
-            self._current_step = "updating_stats"
+                self._current_step = "completed"
+                self._progress_percent = 100
 
-            await workflow.execute_activity(
-                update_workspace_stats,
-                UpdateStatsInput(
-                    workspace_id=input.workspace_id,
-                    document_delta=1,
-                    chunk_delta=chunk_output.chunk_count,
-                    size_delta=input.size_bytes,
-                    workflow_run_id=workflow_run_id,
+                # Calculate final processing time
+                final_processing_time_ms = int((workflow.now() - start_time).total_seconds() * 1000)
+
+                # Tell the platform the document is ready (#88) — downstream
+                # consumers finalize their document records from this event.
+                await self._publish_completion_best_effort(
+                    input,
+                    success=True,
+                    chunks_created=chunk_output.chunk_count,
+                    processing_time_ms=final_processing_time_ms,
+                )
+
+                return WorkflowResult(
                     document_id=input.document_id,
-                ),
-                start_to_close_timeout=timedelta(seconds=15),
-                retry_policy=RetryPolicy(
-                    maximum_attempts=3,
-                    initial_interval=timedelta(seconds=1),
-                    maximum_interval=timedelta(seconds=5),
-                    backoff_coefficient=2.0,
-                ),
-            )
-
-            self._current_step = "completed"
-            self._progress_percent = 100
-
-            # Calculate final processing time
-            final_processing_time_ms = int((workflow.now() - start_time).total_seconds() * 1000)
-
-            # Tell the platform the document is ready (#88) — downstream
-            # consumers finalize their document records from this event.
-            await self._publish_completion_best_effort(
-                input,
-                success=True,
-                chunks_created=chunk_output.chunk_count,
-                processing_time_ms=final_processing_time_ms,
-            )
-
-            return WorkflowResult(
-                document_id=input.document_id,
-                success=True,
-                chunks_created=chunk_output.chunk_count,
-                processing_time_ms=final_processing_time_ms,
-            )
+                    success=True,
+                    chunks_created=chunk_output.chunk_count,
+                    processing_time_ms=final_processing_time_ms,
+                )
 
         except Exception as e:
             self._current_step = "failed"
@@ -654,12 +666,9 @@ class DocumentIngestionWorkflow:
                 processing_time_ms=processing_time_ms,
             )
 
-            return WorkflowResult(
-                document_id=input.document_id,
-                success=False,
-                error=cause_message,
-                processing_time_ms=processing_time_ms,
-            )
+            # Do not return WorkflowResult(success=False): that Completes the
+            # workflow in Temporal (#230). Raise after finally cleanup instead.
+            terminal_failure = _document_failure(cause_message)
 
         finally:
             # Always clean up staging data
@@ -677,3 +686,9 @@ class DocumentIngestionWorkflow:
                 )
             except Exception:
                 workflow.logger.warning("Failed to clean up staging data")
+
+        if terminal_failure is not None:
+            raise terminal_failure
+
+        # Unreachable: success returns inside try; failure raises above.
+        raise RuntimeError("DocumentIngestionWorkflow exited without result or failure")

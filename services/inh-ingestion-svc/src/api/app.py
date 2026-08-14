@@ -405,10 +405,32 @@ def create_app(settings: Settings) -> FastAPI:
                             status="superseded_by_newer_request",
                         ).model_dump(),
                     )
-                # Any other WorkflowFailureError (cancellation, timeout) is
-                # unexpected here -- the workflow normally reports its own
-                # failures via WorkflowResult(success=False, ...) rather than
-                # raising. Surface it rather than crashing without a body.
+                # #230: DocumentIngestionWorkflow raises ApplicationError
+                # type=DocumentIngestionFailed after marking the doc failed,
+                # dead-lettering, and publishing document.failed — so Temporal
+                # close status is Failed (monitorable) while wait=true callers
+                # still get a structured success=False body (not a 500).
+                from temporalio.exceptions import ApplicationError
+
+                from src.temporal.document_failure import DOCUMENT_INGESTION_FAILED_TYPE
+
+                if (
+                    isinstance(e.cause, ApplicationError)
+                    and e.cause.type == DOCUMENT_INGESTION_FAILED_TYPE
+                ):
+                    err_msg = e.cause.message or str(e.cause)
+                    return JSONResponse(
+                        status_code=200,
+                        content=IngestResultResponse(
+                            workflow_id=workflow_id,
+                            document_id=body.document_id,
+                            success=False,
+                            chunks_created=0,
+                            processing_time_ms=0,
+                            error=err_msg,
+                        ).model_dump(),
+                    )
+                # Cancellation / timeout / other unexpected close statuses.
                 logger.error(
                     "Unexpected workflow failure while waiting for result",
                     workflow_id=workflow_id,

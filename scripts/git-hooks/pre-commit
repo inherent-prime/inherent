@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# pre-commit — block commits that would fail CI Format check / Lint.
+#
+# For each service whose Python files are staged, run the same tools CI uses
+# (see .github/workflows/ci.yml matrix):
+#   uv run black …   # write format (re-staged into the commit)
+#   uv run ruff check …
+#
+# Black auto-writes so a missing format pass does not "bite" on GitHub;
+# ruff still fails the commit until lint is fixed. No full test suite —
+# keep this fast enough to run on every commit.
+#
+# Installed by: scripts/dev/install-graphify-hooks.sh (copies scripts/git-hooks/*)
+# Or once:      cp scripts/git-hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+# Bypass (rare): git commit --no-verify
+
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+# Staged Python only (Added / Copied / Modified). Deletes need no format.
+mapfile -t STAGED < <(
+  git diff --cached --name-only --diff-filter=ACM | grep -E '\.py$' || true
+)
+
+if [[ ${#STAGED[@]} -eq 0 ]]; then
+  exit 0
+fi
+
+# service dir under services/ -> relative paths within that service for uv run
+declare -A SVC_FILES=()
+
+for f in "${STAGED[@]}"; do
+  case "$f" in
+    services/inh-ingestion-svc/*)
+      rel="${f#services/inh-ingestion-svc/}"
+      SVC_FILES[inh-ingestion-svc]+="${rel}"$'\n'
+      ;;
+    services/inh-public-api-svc/*)
+      rel="${f#services/inh-public-api-svc/}"
+      SVC_FILES[inh-public-api-svc]+="${rel}"$'\n'
+      ;;
+    services/inh-contracts/*)
+      rel="${f#services/inh-contracts/}"
+      SVC_FILES[inh-contracts]+="${rel}"$'\n'
+      ;;
+  esac
+done
+
+if [[ ${#SVC_FILES[@]} -eq 0 ]]; then
+  # Python outside the three services (e.g. root tests/) — no CI format matrix.
+  exit 0
+fi
+
+fail=0
+
+for svc in "${!SVC_FILES[@]}"; do
+  # shellcheck disable=SC2206
+  files=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    # Only format files that still exist on disk (renames/deletes edge cases).
+    if [[ -f "services/${svc}/${line}" ]]; then
+      files+=("$line")
+    fi
+  done <<< "${SVC_FILES[$svc]}"
+
+  if [[ ${#files[@]} -eq 0 ]]; then
+    continue
+  fi
+
+  echo "pre-commit: ${svc} — black + ruff (${#files[@]} file(s))"
+  (
+    cd "services/${svc}"
+    # Same pins CI uses (service uv.lock / pyproject).
+    uv run black -- "${files[@]}"
+    uv run ruff check -- "${files[@]}"
+  ) || fail=1
+
+  # Re-stage whatever black rewrote so the commit contains formatted code.
+  for rel in "${files[@]}"; do
+    git add -- "services/${svc}/${rel}"
+  done
+done
+
+if [[ "$fail" -ne 0 ]]; then
+  echo ""
+  echo "pre-commit: ruff failed. Fix lint, then re-stage and commit."
+  echo "            (black already rewrote + re-staged where needed.)"
+  echo "            Bypass only if intentional: git commit --no-verify"
+  exit 1
+fi
+
+exit 0

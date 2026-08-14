@@ -5,6 +5,29 @@ All notable changes to Inherent are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Ingestion bulk-upload path: store_in_weaviate budget, retry load, Temporal visibility (#228, #229, #230).**
+  `store_in_weaviate` StartToClose now scales with chunk count and embed
+  concurrency waves (`weaviate_store_budget.py`: one-wave minimum covers
+  per-batch retry worst-case ≈130s, cap 15m) instead of a flat 60s that
+  could not cover multi-batch embedding under TEI queue load. Activity
+  retry initial/max intervals lengthened (5–60s) to reduce lockstep retry
+  herds. The embedder dispatches batches with bounded concurrency
+  (`EMBEDDING_MAX_CONCURRENCY`, default **2** — the product of this and
+  `TEMPORAL_MAX_CONCURRENT_ACTIVITIES` is the TEI in-flight cap) and
+  per-batch retry with exponential backoff + jitter so a single queue
+  spike does not burn a whole Temporal attempt. Terminal document
+  failures raise `ApplicationError(type=DocumentIngestionFailed)` after
+  status/DLQ/completion side-effects and staging cleanup so Temporal
+  close status is `Failed` (was always `Completed` with a success=False
+  payload — 70 losses invisible to workflow monitoring).
+  `/ingest?wait=true` and the sync trigger map that type back to
+  structured `success=False` (wait body carries error string only;
+  `chunks_created`/`processing_time_ms` are zero on that path).
+  **Residual:** Temporal activity retries still re-embed the whole
+  document — no durable partial-progress checkpoint yet (#229).
+
 ## [0.6.0] — 2026-08-13
 
 ### Added
