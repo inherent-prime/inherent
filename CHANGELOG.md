@@ -47,6 +47,23 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Fixed
 
+- **Dead-letter jobs now reach `status=resolved` after a successful retry
+  (#249).** Nothing in the codebase ever wrote `"resolved"`:
+  `update_dead_letter_status` had exactly two call sites — reset to
+  `"pending"` when the retry re-trigger itself fails, and `"abandoned"` on
+  the abandon route. A job whose retry fully succeeded (new workflow ran,
+  document reached `processed`, searchable again) therefore sat at
+  `"retrying"` forever, indistinguishable from a retry still in flight or one
+  that silently failed downstream — so `GET /dead-letter` could never answer
+  "what is actually still broken". `DocumentIngestionWorkflow`'s success path
+  now best-effort resolves the document's outstanding `retrying` rows via the
+  new `resolve_dead_letter_jobs` activity and
+  `DatabaseService.resolve_dead_letter_jobs_for_document`. Keyed on
+  `document_id` rather than a dead-letter job id, so no id has to be threaded
+  through the re-published message; scoped to `status='retrying'` only, so
+  `pending` (never retried) and `abandoned` (explicitly given up on) rows are
+  untouched. No migration: `status` is an unconstrained `VARCHAR(20)`.
+
 - **Ingestion: an out-of-memory failure while extracting DOCX/XLSX/PPTX is
   retried instead of permanently dead-lettered (#215).** `_extract_docx_text`
   wrapped both the `Document()` construction and the paragraph-iteration

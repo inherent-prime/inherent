@@ -58,20 +58,17 @@ references as of this writing:
     - ``POST /dead-letter/{job_id}/abandon?workspace_id=...`` (app.py:938)
       -- not used by this test.
 
-  NOTE (discovered while reading the retry path, worth flagging): nothing
-  in the codebase ever calls ``update_dead_letter_status(job_id,
-  "resolved")`` -- grepped every call site of that method
-  (src/api/app.py:935 sets it back to "pending" on a retry *failure*;
-  app.py:960 sets "abandoned"). A successfully-retried job's row is left
-  permanently in ``status="retrying"`` even after the new workflow run
-  completes and the document is fully processed and searchable again. This
-  test does not depend on that field (it polls document status + search
-  instead, per the brief), but it is a real product gap: the dead-letter
-  list can never be used to see "which of these are actually resolved" --
-  everything that was ever retried, however long ago and however
-  successfully, looks identical to one that is currently mid-retry. Filed
-  as https://github.com/inherent-prime/inherent/issues/249 rather than
-  blocking on it here (see task-7-report.md for the full writeup).
+  FIXED by #249 (was previously an open gap, discovered while writing this
+  test -- see git history for the original NOTE if you need the pre-fix
+  writeup): a successful ingestion of ``document_id`` now resolves that
+  document's outstanding ``status='retrying'`` dead-letter rows. The write
+  happens from ``DocumentIngestionWorkflow``'s single success path via the
+  ``resolve_dead_letter_jobs`` activity ->
+  ``DatabaseService.resolve_dead_letter_jobs_for_document`` (best-effort,
+  keyed on ``document_id`` rather than the dead-letter job id -- see that
+  method's docstring). Step 7 below now asserts the row reaches
+  ``status="resolved"`` after the retried run completes and the document is
+  searchable again.
 
 * Temporal retry policy that determines pacing -- the Weaviate storage step
   (services/inh-ingestion-svc/src/temporal/workflows/document_ingestion.py,
@@ -393,36 +390,42 @@ def test_dependency_outage_dead_letters_then_recovers() -> None:
         assert body["status"] == "processed"
         _wait_searchable(client, document_id, outage_marker, timeout=TIMEOUT)
 
-        # --- 7. The dead-letter job row must still be readable after a
-        # successful retry (the retry endpoint must not have deleted or
-        # corrupted it). We deliberately do NOT assert status == "resolved"
-        # here -- #249 (filed while writing this test) found that no code
-        # path ever transitions a dead-letter job to "resolved" after a
-        # successful retry, so the row is stuck at "retrying" forever even
-        # though the document above is fully processed and searchable. This
-        # pins that DEFECT-CONSISTENT state on purpose: if #249 is fixed,
-        # this assertion should be tightened to status == "resolved" (or
-        # whatever the fix lands on), and its failure here is the signal to
-        # do that.
-        job_after_retry_resp = client.get(
-            f"{INGESTION_API_URL}/dead-letter/{job_id}",
-            headers=INGESTION_HEADERS,
-            params={"workspace_id": WORKSPACE_ID},
-        )
-        assert job_after_retry_resp.status_code == 200, (
-            f"dead-letter job {job_id} not readable after retry: "
-            f"{job_after_retry_resp.status_code} {job_after_retry_resp.text}"
-        )
-        job_after_retry = job_after_retry_resp.json()
-        assert job_after_retry["id"] == job_id
-        assert job_after_retry["document_id"] == document_id
-        # Defect-consistent per #249: still "retrying", never advanced to
-        # "resolved" despite the document being processed+searchable above.
-        assert job_after_retry.get("status") == "retrying", (
-            f"dead-letter job {job_id} status changed from the #249 defect "
-            f"baseline ('retrying') to {job_after_retry.get('status')!r} -- "
-            f"if #249 was fixed, tighten this assertion to the new resolved "
-            f"state instead of loosening it"
+        # --- 7. #249: the dead-letter job row must reach status="resolved"
+        # once the retried workflow run genuinely completes -- the document
+        # above is processed AND searchable, so its dead-letter row must not
+        # still read "retrying" (indistinguishable from a retry still in
+        # flight or one that silently failed). The resolve write is
+        # best-effort and keyed on document_id (see
+        # DatabaseService.resolve_dead_letter_jobs_for_document), so this
+        # polls briefly rather than asserting on the very first read --
+        # it runs as one of the last activities in the workflow's success
+        # path, after the document is already visibly processed+searchable,
+        # so in practice it should already be set by the time we get here,
+        # but poll for a short window to absorb ordinary scheduling lag.
+        deadline = time.monotonic() + 30
+        job_after_retry: dict = {}
+        while time.monotonic() < deadline:
+            job_after_retry_resp = client.get(
+                f"{INGESTION_API_URL}/dead-letter/{job_id}",
+                headers=INGESTION_HEADERS,
+                params={"workspace_id": WORKSPACE_ID},
+            )
+            assert job_after_retry_resp.status_code == 200, (
+                f"dead-letter job {job_id} not readable after retry: "
+                f"{job_after_retry_resp.status_code} {job_after_retry_resp.text}"
+            )
+            job_after_retry = job_after_retry_resp.json()
+            if job_after_retry.get("status") == "resolved":
+                break
+            time.sleep(POLL_INTERVAL)
+
+        assert job_after_retry.get("id") == job_id
+        assert job_after_retry.get("document_id") == document_id
+        assert job_after_retry.get("status") == "resolved", (
+            f"dead-letter job {job_id} did not reach status='resolved' "
+            f"within 30s of the retried document becoming processed+"
+            f"searchable (#249) -- last observed status="
+            f"{job_after_retry.get('status')!r}"
         )
     finally:
         # Unconditional: never leave the shared stack with Weaviate down --

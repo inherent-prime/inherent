@@ -1727,6 +1727,52 @@ class DatabaseService:
             )
             return bool(result.rowcount > 0)  # type: ignore[return-value]
 
+    async def resolve_dead_letter_jobs_for_document(self, document_id: str) -> int:
+        """Mark a document's outstanding 'retrying' dead-letter rows resolved (#249).
+
+        Before this method existed, NOTHING ever wrote status='resolved':
+        ``update_dead_letter_status`` had exactly two call sites (the retry
+        route resetting to 'pending' on a re-trigger failure, and the abandon
+        route), so a job whose retry fully succeeded sat at status='retrying'
+        forever -- indistinguishable from a retry still in flight or one that
+        silently failed.
+
+        Keyed on ``document_id`` (not the dead-letter job id): a successful
+        ingestion of document X genuinely resolves X's outstanding retried
+        dead-letter rows, and this avoids threading a job id through the
+        re-published message payload (the retry route re-publishes the
+        original upload-event message, which has no room for it).
+
+        Scoped to rows CURRENTLY in status='retrying' only -- a plain
+        "set every row for this document_id to resolved" would also flip
+        'pending' rows (never retried at all) and 'abandoned' rows
+        (explicitly given up on by an operator) to 'resolved', which is
+        wrong in both directions. The WHERE clause is the whole point of
+        this method existing as scoped SQL rather than a bare
+        ``update_dead_letter_status`` call.
+
+        Args:
+            document_id: The document identifier whose dead-letter rows to
+                resolve.
+
+        Returns:
+            Number of dead-letter rows updated (0 if none were 'retrying').
+        """
+        if not self.engine:
+            raise RuntimeError("Database not connected")
+
+        with self.get_session() as session:
+            now = datetime.now(UTC)
+            result = session.execute(
+                self.dead_letter_jobs.update()
+                .where(
+                    self.dead_letter_jobs.c.document_id == document_id,
+                    self.dead_letter_jobs.c.status == "retrying",
+                )
+                .values(status="resolved", resolved_at=now, updated_at=now)
+            )
+            return int(result.rowcount)  # type: ignore[return-value]
+
     async def increment_dead_letter_retry(self, job_id: int) -> bool:
         """Increment the retry count and set status to 'retrying'.
 

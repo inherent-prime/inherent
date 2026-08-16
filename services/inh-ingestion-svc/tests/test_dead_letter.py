@@ -1,9 +1,11 @@
 """Tests for dead-letter queue (DE-S021)."""
 
+from contextlib import contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.config.settings import Settings
 from src.services.database import DatabaseService
 
 
@@ -63,6 +65,80 @@ class TestDeadLetterDBTableExists:
         assert hasattr(DatabaseService, "get_dead_letter_job")
         assert hasattr(DatabaseService, "update_dead_letter_status")
         assert hasattr(DatabaseService, "increment_dead_letter_retry")
+
+
+def _db_with_session(session) -> DatabaseService:
+    """Build a DatabaseService whose get_session() yields a given mock
+    session, without needing a real PostgreSQL connection (same pattern as
+    tests/test_dead_letter_dedup.py's ``_db`` helper)."""
+    db = DatabaseService.__new__(DatabaseService)
+    DatabaseService.__init__(db, Settings.model_construct())
+    db.engine = MagicMock()
+
+    @contextmanager
+    def _gs():
+        yield session
+
+    db.get_session = _gs
+    return db
+
+
+class TestResolveDeadLetterJobsForDocument:
+    """DatabaseService.resolve_dead_letter_jobs_for_document (#249).
+
+    A successful ingestion of document X must resolve X's outstanding
+    'retrying' dead-letter rows -- and ONLY those rows: 'pending' (never
+    retried) and 'abandoned' (explicitly given up on) rows must be left
+    alone. These tests pin the WHERE/SET clause shape via a mocked SQLAlchemy
+    session rather than a live database.
+    """
+
+    def test_method_exists(self):
+        assert hasattr(DatabaseService, "resolve_dead_letter_jobs_for_document")
+
+    @pytest.mark.asyncio
+    async def test_scopes_update_to_document_and_retrying_status(self):
+        session = MagicMock()
+        result = MagicMock()
+        result.rowcount = 1
+        session.execute.return_value = result
+
+        db = _db_with_session(session)
+        count = await db.resolve_dead_letter_jobs_for_document("doc-249")
+
+        assert count == 1
+        assert session.execute.call_count == 1
+        # Inspect the compiled UPDATE statement to confirm it is scoped to
+        # this document_id AND status='retrying' -- NOT a blanket update of
+        # every row for the document (which would wrongly flip 'pending' and
+        # 'abandoned' rows to 'resolved' too).
+        stmt = session.execute.call_args[0][0]
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "dead_letter_jobs" in compiled
+        assert "'retrying'" in compiled
+        assert "'resolved'" in compiled
+        assert "'doc-249'" in compiled
+
+    @pytest.mark.asyncio
+    async def test_returns_zero_when_nothing_was_retrying(self):
+        session = MagicMock()
+        result = MagicMock()
+        result.rowcount = 0
+        session.execute.return_value = result
+
+        db = _db_with_session(session)
+        count = await db.resolve_dead_letter_jobs_for_document("doc-no-retry")
+
+        assert count == 0
+
+    @pytest.mark.asyncio
+    async def test_raises_when_not_connected(self):
+        db = DatabaseService.__new__(DatabaseService)
+        DatabaseService.__init__(db, Settings.model_construct())
+        db.engine = None
+
+        with pytest.raises(RuntimeError, match="not connected"):
+            await db.resolve_dead_letter_jobs_for_document("doc-1")
 
 
 class TestDeadLetterAPIRoutes:
