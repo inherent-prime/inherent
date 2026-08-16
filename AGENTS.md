@@ -1,5 +1,3 @@
-Guidance for working in this repository.
-
 ## General Guidance
 - Consult the knowledge-graph `graphify-out/` when require context about the repo. If its not there, ask the user to build one.
 - Always thinks the end user as an AI agent, so always develop solutions that is performant and cost effective for the end user.
@@ -9,10 +7,9 @@ Guidance for working in this repository.
 - If there is a major decision or change that has happened in the repository, add a dated one-line entry to `.memory/timeline/<YYYY-MM>.md`, refresh `.memory/index.md` if the current state changed, and update the `./docs` folder
 - Before commit always check if the code build, lint, tests and smoke tests are passing in local to save building time in Cloud
 - Whenever you commit some code, always make sure you write proper description of the change
-- Always raise PRs against `main` — it is the sole protected integration
-  branch (GitHub ruleset `main-protect`, id 16976743). `dev` is retired to
-  scratch status: no protection, no required flow, not a PR target.
-- No commit should be without a Github Issue. If there is no issue or adhoc work, make sure to create an issue with details and then proceed to write the code
+- Always raise PRs against `main`
+- No commit should be without a Github Issue. If there is no issue or adhoc work, make sure to create an issue with details and then proceed to write the code.
+- Always create branch names and commit messages following conventional commits principles. Don't use model-name-feature-random patterns, keep it simple so that it conveys exactly what is going on here 
 
 ## Mandatory Quality Gates (ALL agents must follow)
 
