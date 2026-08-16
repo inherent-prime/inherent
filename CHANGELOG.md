@@ -65,6 +65,23 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Fixed
 
+- **MCP: extensionless and unregistered-extension uploads are labelled
+  `text/plain`, not `text/markdown` (#208).** Omitting `content_type` on
+  `upload_document` with a filename the registry doesn't recognize stored
+  `text/markdown` — so `Dockerfile`, `Makefile`, `README`, `.gitignore` and
+  `archive.tar.gz` were all recorded as markdown, which none of them are.
+  `content_type` is an indexed Postgres column and a Weaviate chunk property
+  callers filter on, so a caller narrowing to `text/markdown` to find their
+  documentation got Dockerfiles and tarball names back, with nothing
+  signalling the label was a guess. Both fallback branches now return
+  `text/plain`, the honest generic for "a text file whose format we did not
+  recognize". Note this is a labelling fix only: contrary to the issue's
+  framing, extraction and chunking are unchanged, because the `txt` and
+  `markdown` registry specs both declare `extractor="text_passthrough"` and
+  `chunking_hint="prose"` — affected documents chunk byte-for-byte
+  identically. Documents already stored under the old fallback keep their
+  stale `text/markdown` label; no backfill ships here.
+
 - **Compose-dependent test targets no longer exit 0 having run nothing
   (#209).** `make test-integration` — documented as the release e2e gate —
   reported success with everything skipped when no stack was up, as did the
