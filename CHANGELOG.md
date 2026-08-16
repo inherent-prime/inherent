@@ -65,6 +65,24 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Fixed
 
+- **Compose-dependent test targets no longer exit 0 having run nothing
+  (#209).** `make test-integration` — documented as the release e2e gate —
+  reported success with everything skipped when no stack was up, as did the
+  `pytest -m benchmark` / `-m retrieval_eval` commands in `docs/testing.md`.
+  A command-line `-m` *replaces* each service's `addopts` default of
+  `-m 'not compose'` rather than intersecting with it, so those markers
+  selected precisely the compose tests the default excluded; each then
+  skipped at fixture setup, and pytest exits 0 for an all-skipped run. A
+  gate that cannot fail is worse than no gate — the same silent-success
+  failure that let v0.6.0 ship believing it had e2e coverage it never had.
+  Two layers now: `scripts/dev/require-stack.sh` pre-flights the stack
+  (wired as a `require-stack` prerequisite on every compose target) and
+  fails with an actionable "run `make dev` first"; `scripts/dev/run-compose-suite.sh`
+  then asserts from pytest's own JUnit report that a non-zero number of
+  tests actually *executed*, catching every other way a suite can run
+  nothing while exiting 0. New `test-benchmark` and `test-retrieval-eval`
+  targets pass the correct `"compose and <marker>"` expressions.
+
 - **Dead-letter jobs now reach `status=resolved` after a successful retry
   (#249).** Nothing in the codebase ever wrote `"resolved"`:
   `update_dead_letter_status` had exactly two call sites — reset to
