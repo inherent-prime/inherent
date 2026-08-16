@@ -220,6 +220,7 @@ HAPPY_OUTPUTS = {
     "chunk_text": ChunkTextOutput(chunk_count=3),
     "store_in_postgresql": StoreDocumentOutput(success=True, chunks_stored=3),
     "store_in_weaviate": StoreDocumentOutput(success=True, chunks_stored=3),
+    "resolve_dead_letter_jobs": 0,
     "publish_completion": True,
 }
 
@@ -486,3 +487,106 @@ class TestWorkflowPublishesCompletion:
 
         assert result.success is True
         assert result.chunks_created == 3
+
+
+# ---------------------------------------------------------------------------
+# #249: successful ingestion resolves this document's 'retrying' dead-letter
+# rows. See DocumentIngestionWorkflow._resolve_dead_letter_best_effort and
+# src.temporal.activities.dead_letter.resolve_dead_letter_jobs.
+# ---------------------------------------------------------------------------
+
+
+class TestWorkflowResolvesDeadLetterOnSuccess:
+    @pytest.mark.asyncio
+    async def test_success_resolves_dead_letter_jobs_for_document(self):
+        """The one true success path (workflow.run's `else` branch, after
+        PostgreSQL AND Weaviate storage both succeed) must call
+        resolve_dead_letter_jobs exactly once, scoped to this run's
+        document_id -- the fix for #249's "retrying" rows that never
+        advance to "resolved" after a successful retry."""
+        from src.temporal.workflows import document_ingestion
+
+        fake = FakeWorkflowModule(dict(HAPPY_OUTPUTS))
+        wf = document_ingestion.DocumentIngestionWorkflow()
+        with patch.object(document_ingestion, "workflow", fake):
+            result = await wf.run(make_workflow_input(document_id="doc-249"))
+
+        assert result.success is True
+        resolve_calls = fake.calls_for("resolve_dead_letter_jobs")
+        assert len(resolve_calls) == 1
+        assert resolve_calls[0].document_id == "doc-249"
+
+    @pytest.mark.asyncio
+    async def test_postgresql_failure_does_not_resolve_dead_letter(self):
+        """A terminal FAILURE must not resolve anything -- that would mark a
+        job resolved for a run that just dead-lettered it."""
+        from temporalio.exceptions import ApplicationError
+
+        from src.temporal.workflows import document_ingestion
+
+        outputs = dict(HAPPY_OUTPUTS)
+        outputs["store_in_postgresql"] = StoreDocumentOutput(
+            success=False, chunks_stored=0, error="pg down"
+        )
+        fake = FakeWorkflowModule(outputs)
+        wf = document_ingestion.DocumentIngestionWorkflow()
+        with patch.object(document_ingestion, "workflow", fake):
+            with pytest.raises(ApplicationError):
+                await wf.run(make_workflow_input())
+
+        assert fake.calls_for("resolve_dead_letter_jobs") == []
+
+    @pytest.mark.asyncio
+    async def test_weaviate_failure_does_not_resolve_dead_letter(self):
+        from temporalio.exceptions import ApplicationError
+
+        from src.temporal.workflows import document_ingestion
+
+        outputs = dict(HAPPY_OUTPUTS)
+        outputs["store_in_weaviate"] = StoreDocumentOutput(
+            success=False, chunks_stored=0, error="weaviate down"
+        )
+        fake = FakeWorkflowModule(outputs)
+        wf = document_ingestion.DocumentIngestionWorkflow()
+        with patch.object(document_ingestion, "workflow", fake):
+            with pytest.raises(ApplicationError):
+                await wf.run(make_workflow_input())
+
+        assert fake.calls_for("resolve_dead_letter_jobs") == []
+
+    @pytest.mark.asyncio
+    async def test_unexpected_activity_error_does_not_resolve_dead_letter(self):
+        from temporalio.exceptions import ApplicationError
+
+        from src.temporal.workflows import document_ingestion
+
+        fake = FakeWorkflowModule(
+            dict(HAPPY_OUTPUTS), raising={"extract_text": RuntimeError("boom")}
+        )
+        wf = document_ingestion.DocumentIngestionWorkflow()
+        with patch.object(document_ingestion, "workflow", fake):
+            with pytest.raises(ApplicationError):
+                await wf.run(make_workflow_input())
+
+        assert fake.calls_for("resolve_dead_letter_jobs") == []
+
+    @pytest.mark.asyncio
+    async def test_resolve_dead_letter_failure_does_not_fail_successful_ingestion(self):
+        """Best-effort, mirroring _record_dead_letter_best_effort (#8) and
+        _publish_completion_best_effort (#88): a broken DB write here must
+        not fail an otherwise-complete ingestion (per #249's fix design and
+        AGENTS.md's log-and-swallow rule for observability side-channels)."""
+        from src.temporal.workflows import document_ingestion
+
+        fake = FakeWorkflowModule(
+            dict(HAPPY_OUTPUTS),
+            raising={"resolve_dead_letter_jobs": RuntimeError("db gone")},
+        )
+        wf = document_ingestion.DocumentIngestionWorkflow()
+        with patch.object(document_ingestion, "workflow", fake):
+            result = await wf.run(make_workflow_input())
+
+        assert result.success is True
+        assert result.chunks_created == 3
+        # The completion event must still fire despite the resolve failure.
+        assert len(fake.calls_for("publish_completion")) == 1

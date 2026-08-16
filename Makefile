@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help setup quickstart env install validate up dev down restart ps logs health doctor bootstrap seed dev-seed check test test-fast test-integration release-check release-images release-up release-down lint format-check type-check security-check clean graphify-hooks graphify-refresh check-index-consistency reindex-orphaned-document
+.PHONY: help setup quickstart env install validate up dev down restart ps logs health doctor bootstrap seed dev-seed check test test-fast require-stack test-integration test-benchmark test-retrieval-eval release-check release-images release-up release-down lint format-check type-check security-check clean graphify-hooks graphify-refresh check-index-consistency reindex-orphaned-document
 
 COMPOSE              ?= docker compose
 PUBLIC_API_URL       ?= http://localhost:18000
@@ -171,9 +171,42 @@ test-fast:
 	@cd $(CONTRACTS_DIR) && uv run pytest
 	@uvx 'pytest==9.0.2' tests/ -q
 
+## require-stack: Pre-flight guard -- fails fast with an actionable message
+##                 if the local Compose stack isn't up. Wired as a
+##                 prerequisite on every target below that runs
+##                 compose-marked tests, so a missing stack is a loud
+##                 failure instead of a silent all-skipped pass (#209).
+require-stack:
+	@bash scripts/dev/require-stack.sh
+
 ## test-integration: Run Compose-backed integration tests (requires a running stack).
-test-integration:
-	@cd $(PUBLIC_API_DIR) && uv run pytest -m compose
+##                    Fails if the stack isn't up (require-stack) or if the
+##                    suite executes zero tests even though it is (#209) --
+##                    a bare pytest exit code cannot tell "24 passed" apart
+##                    from "24 skipped"; run-compose-suite.sh checks the
+##                    JUnit report directly instead of trusting $?.
+test-integration: require-stack
+	@bash scripts/dev/run-compose-suite.sh $(PUBLIC_API_DIR) compose test-integration
+
+## test-benchmark: Run Compose-backed latency/throughput benchmarks for both
+##                 services (requires a running stack). NOT `pytest -m
+##                 benchmark`: a bare `-m benchmark` REPLACES each service's
+##                 `-m 'not compose'` addopts default rather than
+##                 intersecting with it, so it silently selects only the
+##                 compose-marked benchmarks and then all-skips against no
+##                 stack (#209) -- this target passes the full "compose and
+##                 benchmark" expression instead.
+test-benchmark: require-stack
+	@bash scripts/dev/run-compose-suite.sh $(PUBLIC_API_DIR) "compose and benchmark" test-benchmark-public-api
+	@bash scripts/dev/run-compose-suite.sh $(INGESTION_DIR) "compose and benchmark" test-benchmark-ingestion
+
+## test-retrieval-eval: Run the Compose-backed retrieval-eval hard gate
+##                      (requires a running stack). Same `-m` replaces
+##                      `addopts` footgun as test-benchmark above (#209) --
+##                      passes "compose and retrieval_eval", never a bare
+##                      "-m retrieval_eval".
+test-retrieval-eval: require-stack
+	@bash scripts/dev/run-compose-suite.sh $(PUBLIC_API_DIR) "compose and retrieval_eval" test-retrieval-eval
 
 ## release-check: Run the offline release-acceptance suites across both services.
 ##                Excludes the slow Compose e2e gate (run via integration.yml /

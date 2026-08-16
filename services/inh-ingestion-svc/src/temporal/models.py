@@ -74,6 +74,20 @@ class RecordDeadLetterInput:
 
 
 @dataclass
+class ResolveDeadLetterJobsInput:
+    """Input for the resolve_dead_letter_jobs activity (#249).
+
+    Deliberately scoped to ``document_id`` only, not a dead-letter job id --
+    a successful ingestion of document X resolves X's outstanding retried
+    dead-letter rows regardless of which job/run recorded them, and this
+    avoids threading a job id through the re-published upload-event payload
+    (see DatabaseService.resolve_dead_letter_jobs_for_document's docstring).
+    """
+
+    document_id: str
+
+
+@dataclass
 class PublishCompletionInput:
     """Input for the publish_completion activity (#88).
 

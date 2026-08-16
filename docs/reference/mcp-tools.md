@@ -140,8 +140,11 @@ formats are REST-only (binary). When `content_type` is omitted, it is
 **derived from `filename`'s extension** when recognized (`.py` ->
 `text/x-python`, `.md` -> `text/markdown`, `.csv` -> `text/csv`, `.yaml` ->
 `application/yaml`, `.sql` -> `application/sql`, and more — see the registry
-link above for the full extension list), falling back to `text/markdown`
-only for an unrecognized or absent extension (#117). For an extension whose
+link above for the full extension list), falling back to `text/plain`
+only for an unrecognized or absent extension (#117, #208 — e.g. `Dockerfile`,
+`Makefile`, `README`, `.gitignore`, `archive.tar.gz`; `text/plain` is the
+honest generic for "a text file whose format we did not recognize," not a
+`text/markdown` guess). For an extension whose
 registry entry covers several distinct languages (source code — `.py`,
 `.go`, `.java`, ...), the derived type resolves to that specific extension's
 own MIME type, not a fixed first entry (#197: a `.go` upload with

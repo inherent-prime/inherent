@@ -1217,15 +1217,44 @@ class DatabaseService:
             await session.commit()
             return result.rowcount or 0
 
-    async def delete_eval_events(self, *, workspace_id: str) -> int:
-        """Delete all captured events for a workspace (DELETE /v1/evals/events); returns rows deleted."""
+    async def delete_eval_events(
+        self, *, workspace_id: str, include_cases: bool = False
+    ) -> dict[str, int]:
+        """Delete captured events for a workspace (DELETE /v1/evals/events); #250.
+
+        Default (``include_cases=False``) deletes only ``eval_query_events`` --
+        the documented contract that raw events are ephemeral while labeled
+        ``eval_cases`` are durable (ADR 0003; asserted end-to-end by
+        tests/evals/test_evals_flywheel.py:183-193). ``include_cases=True`` is
+        an explicit, opt-in reset that additionally purges the workspace's
+        promoted cases -- both deletes commit in the same transaction.
+
+        No FK/cascade ordering concerns here: migrations/015_evals.sql gives
+        neither ``eval_runs`` nor ``eval_run_results`` a foreign key to
+        ``eval_cases`` (run results denormalize ``case_id`` as a plain
+        column), so deleting cases never touches run history and the two
+        deletes can run in either order.
+
+        Returns ``{"events_deleted": n, "cases_deleted": n}`` (the latter
+        always 0 when ``include_cases`` is False).
+        """
         async with self.session() as session:
-            result = await session.execute(
+            events_result = await session.execute(
                 text("DELETE FROM eval_query_events WHERE workspace_id = :workspace_id"),
                 {"workspace_id": workspace_id},
             )
+            cases_deleted = 0
+            if include_cases:
+                cases_result = await session.execute(
+                    text("DELETE FROM eval_cases WHERE workspace_id = :workspace_id"),
+                    {"workspace_id": workspace_id},
+                )
+                cases_deleted = cases_result.rowcount or 0
             await session.commit()
-            return result.rowcount or 0
+            return {
+                "events_deleted": events_result.rowcount or 0,
+                "cases_deleted": cases_deleted,
+            }
 
     async def get_eval_event(self, *, event_id: str, workspace_ids: list[str]) -> dict | None:
         """Fetch one captured event, scoped to the caller's workspaces.
@@ -1377,22 +1406,93 @@ class DatabaseService:
             await session.commit()
             return result.rowcount > 0
 
-    async def get_active_eval_cases(self, *, workspace_id: str) -> list[dict]:
-        """Fetch the active cases used as the replay set for eval runs."""
+    async def get_active_eval_cases(
+        self,
+        *,
+        workspace_id: str,
+        case_ids: list[str] | None = None,
+        since: datetime | None = None,
+    ) -> list[dict]:
+        """Fetch the active cases used as the replay set for eval runs.
+
+        Optional scoping (#250): ``case_ids`` restricts to specific promoted
+        cases; ``since`` restricts to cases created at/after that instant.
+        Both are ANDed onto the base workspace+active filter (and with each
+        other, when both given). Omitting both is the default,
+        backward-compatible path -- every active case for the workspace, in
+        the accumulate-over-time order ADR 0003 specifies -- so every caller
+        that predates this scoping keeps its exact prior behavior.
+
+        Called from both ``start_run`` (the 409/case_count decision) and
+        ``execute_run`` (the actual replay); callers MUST pass the same
+        ``case_ids``/``since`` to both so the two independent fetches agree
+        on the replay set (the bug #250 closes was scoping only one).
+        """
+        conditions = ["workspace_id = :workspace_id", "active"]
+        params: dict[str, Any] = {"workspace_id": workspace_id}
+        if case_ids:
+            conditions.append("case_id = ANY(:case_ids)")
+            params["case_ids"] = list(case_ids)
+        if since is not None:
+            conditions.append("created_at >= :since")
+            params["since"] = since
+        where_clause = " AND ".join(conditions)
+        # SAFETY (#250): `where_clause` is assembled ONLY from the static string
+        # literals appended to `conditions` above -- a closed set fixed at author
+        # time and selected by branch, never derived from caller input. Every
+        # caller-supplied value (workspace_id, case_ids, since) travels as a
+        # BOUND parameter in `params`; none of them reaches the SQL text. Keep it
+        # that way: appending a caller-derived string to `conditions` would turn
+        # this into a real injection site.
+        #
+        # Built by concatenation rather than the f-string this originally used,
+        # which tripped bandit B608 (hardcoded_sql_expressions) and failed CI.
+        # Note the security posture is IDENTICAL either way -- concatenation is
+        # not inherently safer, it simply sits below B608's heuristic. The real
+        # guarantee is the literal-only invariant stated above, which is why it
+        # is documented here rather than left to a `# nosec` marker.
+        #
+        # The fully-static alternative -- `(:case_ids IS NULL OR case_id =
+        # ANY(:case_ids))` -- was rejected: a NULL array bind needs explicit
+        # `::text[]` casts under asyncpg, and these unit tests run against a
+        # mocked session, so a cast mistake would surface only in the compose
+        # lane. Conditional predicate assembly is what the rest of this module
+        # already does.
+        select_clause = (
+            "SELECT case_id, query_text, expected_doc_ids, relevance_grade FROM eval_cases WHERE "
+        )
+        query = text(select_clause + where_clause + " ORDER BY created_at")
+        async with self.session() as session:
+            result = await session.execute(
+                query,
+                params,
+            )
+            rows = result.fetchall()
+            return [dict(row._mapping) for row in rows]
+
+    async def get_eval_case_ids(self, *, workspace_id: str, case_ids: list[str]) -> set[str]:
+        """Return the subset of ``case_ids`` that exist in this workspace (#250).
+
+        Membership check only -- active AND inactive cases both count as
+        "belongs to this workspace", so a caller naming a disabled case gets
+        the normal "excluded from replay" outcome (same as the unscoped
+        default) rather than a spurious "unknown id" rejection. Used to
+        validate a run's optional ``case_ids`` scope before replay: any id
+        NOT in the returned set is either genuinely unknown or belongs to a
+        different workspace, and the caller must reject the whole request
+        rather than silently drop or leak it.
+        """
         async with self.session() as session:
             result = await session.execute(
                 text(
                     """
-                    SELECT case_id, query_text, expected_doc_ids, relevance_grade
-                    FROM eval_cases
-                    WHERE workspace_id = :workspace_id AND active
-                    ORDER BY created_at
+                    SELECT case_id FROM eval_cases
+                    WHERE workspace_id = :workspace_id AND case_id = ANY(:case_ids)
                     """
                 ),
-                {"workspace_id": workspace_id},
+                {"workspace_id": workspace_id, "case_ids": list(case_ids)},
             )
-            rows = result.fetchall()
-            return [dict(row._mapping) for row in rows]
+            return {row.case_id for row in result.fetchall()}
 
     async def eval_scorecard_counts(self, *, workspace_id: str, window_days: int) -> dict:
         """Assemble the raw counts behind the operator scorecard for the trailing window."""

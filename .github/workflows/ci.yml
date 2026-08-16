@@ -188,9 +188,21 @@ jobs:
           uv run coverage report --include='src/temporal/activities/store.py' --fail-under=71
           uv run coverage report --include='src/temporal/activities/chunk.py' --fail-under=91
 
+      # #205: this step used to run unconditionally under `if: always()` and
+      # unconditionally echo a "checks passed" line -- so a red job (a failed
+      # Lint/Format/Type/Security/Test step above) still printed a green
+      # summary. `job.status` reflects the accumulated outcome of every step
+      # that has already run in this job, so branching on it keeps
+      # `always()` (the summary must still print when something upstream
+      # failed) while making the printed line match reality either way.
       - name: Report check summary
         if: always()
-        run: echo "### ${{ matrix.service }} checks passed :white_check_mark:" >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then
+            echo "### ${{ matrix.service }} checks passed :white_check_mark:" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### ${{ matrix.service }} checks failed :x:" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   # Root-level tests/ (#183): pins repo-root artifacts (docker-compose.yml's
   # init behavior, the initial migration) that don't belong to either
@@ -227,9 +239,16 @@ jobs:
       - name: Test
         run: uvx 'pytest==9.0.2' tests/ -q
 
+      # #205: see the identical comment on service-checks' "Report check
+      # summary" step -- same copy-pasted bug (added for #183), same fix.
       - name: Report check summary
         if: always()
-        run: echo "### root tests/ checks passed :white_check_mark:" >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then
+            echo "### root tests/ checks passed :white_check_mark:" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### root tests/ checks failed :x:" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   required-tests:
     name: Required tests before merge

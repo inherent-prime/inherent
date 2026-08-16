@@ -97,9 +97,49 @@ returning the entire document must now check `truncated` and page with
 | GET | `/v1/evals/scorecard` | `search` | Workspace retrieval health: `answer_rate`, `verdict_distribution`, `corpus_gaps`, `eval_case_count`, `low_confidence`, `last_run` |
 | GET | `/v1/evals/cases` | `search` | Page labeled cases (`limit` 1–200, `offset`) |
 | PATCH | `/v1/evals/cases/{case_id}` | `write` | Enable/disable a case (`{"active": bool}`) |
-| POST | `/v1/evals/runs` | `write` | Start a keyword-vs-semantic-vs-hybrid comparison run. `202` with `run_id`; `409` when no active cases |
+| POST | `/v1/evals/runs` | `write` | Start a keyword-vs-semantic-vs-hybrid comparison run over the workspace's active cases, optionally scoped (see below). `202` with `run_id`; `409` when no active cases (after scoping); `404` when a `case_ids` entry doesn't belong to the caller's workspace |
 | GET | `/v1/evals/runs/{run_id}` | `search` | Run report: per-mode recall@k / MRR / nDCG aggregates + per-case metrics |
-| DELETE | `/v1/evals/events` | `write` | Purge the workspace's captured search events |
+| DELETE | `/v1/evals/events` | `write` | Purge the workspace's captured search events. `?include_cases=true` also purges labeled `eval_cases` (opt-in; default leaves cases intact) |
+
+**`POST /v1/evals/runs` optional scoping (#250).** The JSON body is optional
+and every field on it is optional; omitting the body (or sending `{}`) keeps
+the original behavior — replay every active case for the workspace, the
+accumulate-over-time default from [ADR 0003](../adr/0003-traffic-mined-retrieval-evals.md).
+Two independent, AND-able filters narrow the replay set instead:
+
+- `case_ids: string[]` — replay only these cases. Every id must belong to the
+  caller's workspace (active or disabled); an id that's unknown or belongs to
+  a different workspace rejects the **whole request** with `404` — it is
+  never silently dropped (which would quietly narrow the run) or silently
+  accepted across tenants (which would leak existence). This is the same
+  cross-tenant-id convention the rest of the API uses (e.g. chunk/document
+  reads 404 on a foreign id).
+- `since: string` (ISO 8601 datetime) — replay only cases created at/after
+  that instant.
+
+```bash
+# Unscoped (default): replay everything ever promoted for the workspace.
+curl -X POST -H "X-API-Key: $KEY" -H "X-Workspace-Id: $WS" \
+  http://localhost:18000/v1/evals/runs
+
+# Scoped: replay only the cases just promoted from this trial session.
+curl -X POST -H "X-API-Key: $KEY" -H "X-Workspace-Id: $WS" \
+  -H "Content-Type: application/json" \
+  -d '{"case_ids": ["case_abc123", "case_def456"]}' \
+  http://localhost:18000/v1/evals/runs
+```
+
+**`DELETE /v1/evals/events?include_cases=true` (#250).** By default this
+endpoint only purges `eval_query_events` (raw, ephemeral search capture) —
+promoted `eval_cases` are durable by design and survive the purge, matching
+ADR 0003's "raw events ephemeral, labeled cases durable" contract. Passing
+`include_cases=true` additionally deletes the workspace's `eval_cases`
+(there is no supported way to purge cases without also purging events).
+This purges captured events and labeled cases only -- `eval_feedback`,
+`eval_runs`, and `eval_run_results` (run history) are left intact, so a
+scorecard can report `eval_case_count: 0` next to a completed prior run
+after the purge; it is not a full reset of the workspace's evals data.
+Response: `{"deleted": <events>, "cases_deleted": <cases, 0 unless include_cases=true>}`.
 
 ## Rate limiting
 

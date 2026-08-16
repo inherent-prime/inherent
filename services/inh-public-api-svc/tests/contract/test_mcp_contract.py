@@ -846,8 +846,8 @@ class TestUploadDocumentTool:
             ("data.csv", "text/csv"),
             ("page.html", "text/html"),
             ("notes.md", "text/markdown"),
-            ("notes", "text/markdown"),  # no extension -> the historical default
-            ("notes.log", "text/markdown"),  # unrecognized extension -> default
+            ("notes", "text/plain"),  # no extension -> honest generic (#208)
+            ("notes.log", "text/plain"),  # unrecognized extension -> honest generic (#208)
             # #197: the "code" spec pools 22 MIME aliases across 21 distinct
             # languages under ONE registry entry -- `mime_types[0]` used to
             # answer "text/x-python" for every one of these regardless of
@@ -858,6 +858,20 @@ class TestUploadDocumentTool:
             ("q.sql", "application/sql"),
             ("s.sh", "application/x-sh"),
             ("x.rs", "text/x-rustsrc"),
+            # #208: extensionless / unregistered-extension filenames a real
+            # agent actually sends -- these used to be mislabelled
+            # text/markdown (confidently wrong, not honestly unknown). All
+            # fall through the SAME "no extension" or "unrecognized
+            # extension" branches as "notes"/"notes.log" above.
+            ("Dockerfile", "text/plain"),  # no extension at all
+            ("Makefile", "text/plain"),  # no extension at all
+            ("README", "text/plain"),  # no extension at all
+            (".gitignore", "text/plain"),  # dotfile: "." in filename is True,
+            # so this takes the EXTENSION branch (derived extension
+            # ".gitignore") rather than the no-dot branch -- both must land
+            # on text/plain, see test_dotfile_resolves_via_extension_branch_not_no_dot_branch
+            # below for a pin on which branch actually fires.
+            ("archive.tar.gz", "text/plain"),  # unrecognized extension ".gz"
         ],
     )
     async def test_omitted_content_type_derives_from_filename_extension(
@@ -869,7 +883,10 @@ class TestUploadDocumentTool:
         upload_document(filename="notes.txt", ...) and omitting the optional
         content_type (exactly as the schema invites) must NOT self-reject.
         The default is now derived from the filename's extension, falling
-        back to text/markdown only when the extension is absent/unknown.
+        back to text/plain only when the extension is absent/unknown (#208:
+        changed from the old text/markdown fallback, which mislabelled
+        Dockerfile/Makefile/README/.gitignore/archive.tar.gz as markdown --
+        confidently wrong rather than honestly unknown).
 
         Extended for #197 (review of #121/#122/#127): the "code" spec's
         added multi-MIME shape broke the "one MIME type per spec" assumption
@@ -929,6 +946,47 @@ class TestUploadDocumentTool:
         stored_content_type = db.create_or_reset_pending_document.call_args.kwargs["content_type"]
         assert stored_content_type == "text/x-go"
         assert stored_content_type != "text/x-python"
+
+    async def test_dotfile_resolves_via_extension_branch_not_no_dot_branch(self):
+        """#208 trap: ``.gitignore`` contains a "." (at index 0), so
+        `_default_upload_content_type` takes the EXTENSION branch (deriving
+        extension ``".gitignore"``, which `get_spec_for_extension` does not
+        recognize) rather than the "no dot at all" branch that fires for
+        ``Dockerfile``/``Makefile``/``README``. Both branches must still
+        agree on ``text/plain`` -- this test pins the specific branch a
+        dotfile takes (via `get_spec_for_extension` returning None for
+        ``.gitignore``, not via any special-casing of dotfiles), asserted
+        against the value actually PERSISTED to the DB, not just the JSON
+        response body (same rigor as
+        `test_go_file_with_omitted_content_type_is_not_labelled_python`)."""
+        from inh_contracts.file_types import get_spec_for_extension
+
+        # Pin the premise the rest of this test relies on: ".gitignore" is
+        # genuinely unregistered, so the extension branch's registry lookup
+        # is what falls through to text/plain -- not a special dotfile case.
+        assert get_spec_for_extension(".gitignore") is None
+
+        db = AsyncMock()
+        db.validate_api_key = AsyncMock(return_value=self._key())
+        db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
+        db.get_document_id_by_content_hash = AsyncMock(return_value=None)
+        db.get_document_id_by_filename = AsyncMock(return_value=None)
+        db.create_or_reset_pending_document = AsyncMock(return_value=None)
+
+        storage = self._storage()
+        mq = self._mq()
+        p1, p2 = self._intake_patches(storage, mq)
+
+        with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)), p1, p2:
+            content = await _call_tool(
+                "upload_document",
+                {"api_key": "x", "filename": ".gitignore", "content": "node_modules/\n*.pyc\n"},
+            )
+
+        assert not content[0].text.startswith("Error"), content[0].text
+        stored_content_type = db.create_or_reset_pending_document.call_args.kwargs["content_type"]
+        assert stored_content_type == "text/plain"
+        assert stored_content_type != "text/markdown"
 
     async def test_explicit_content_type_is_never_overridden_by_extension(self):
         """Coordinator adversarial-review regression pin (#193 blocker): an

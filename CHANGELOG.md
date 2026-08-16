@@ -7,6 +7,27 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Added
 
+- **Evals: `POST /v1/evals/runs` accepts optional replay scoping, and
+  `DELETE /v1/evals/events` an opt-in case purge (#250).** Run-replay was
+  unscoped — `start_run` and `execute_run` each independently selected *every*
+  active case for the workspace — so any caller expecting a run to reflect
+  only what it just promoted was fragile to promotion order and to how many
+  prior sessions had run against the same workspace. The request body now
+  takes optional `case_ids` and `since` filters, which AND together and are
+  threaded through *both* selection paths. Omitting the body is unchanged
+  behavior (replay everything active, ADR 0003's accumulate-over-time
+  default), so pre-#250 clients keep working. A `case_ids` entry that is
+  unknown or belongs to another workspace rejects the whole request with
+  `404` rather than being silently dropped (which would quietly narrow the
+  run) or silently honored (which would leak existence across tenants).
+  Separately, labeled cases previously accumulated forever with no supported
+  reset; `DELETE /v1/evals/events?include_cases=true` now also purges
+  `eval_cases`. The default stays `false`, preserving the documented "raw
+  events ephemeral, labeled cases durable" contract. Note the purge covers
+  captured events and labeled cases only — `eval_feedback`, `eval_runs` and
+  `eval_run_results` survive it, so a scorecard can still report a completed
+  last run against zero cases.
+
 - **Retrieval-eval baseline published on the docs site (#153).** The per-mode
   floor table already rendered into `README.md` (#158) is now also written to
   `docs/_generated/retrieval-baseline.md` by the same
@@ -46,6 +67,74 @@ All notable changes to Inherent are documented here. The format follows
   every release to partly cover this.
 
 ### Fixed
+
+- **MCP: extensionless and unregistered-extension uploads are labelled
+  `text/plain`, not `text/markdown` (#208).** Omitting `content_type` on
+  `upload_document` with a filename the registry doesn't recognize stored
+  `text/markdown` — so `Dockerfile`, `Makefile`, `README`, `.gitignore` and
+  `archive.tar.gz` were all recorded as markdown, which none of them are.
+  `content_type` is an indexed Postgres column and a Weaviate chunk property
+  callers filter on, so a caller narrowing to `text/markdown` to find their
+  documentation got Dockerfiles and tarball names back, with nothing
+  signalling the label was a guess. Both fallback branches now return
+  `text/plain`, the honest generic for "a text file whose format we did not
+  recognize". Note this is a labelling fix only: contrary to the issue's
+  framing, extraction and chunking are unchanged, because the `txt` and
+  `markdown` registry specs both declare `extractor="text_passthrough"` and
+  `chunking_hint="prose"` — affected documents chunk byte-for-byte
+  identically. Documents already stored under the old fallback keep their
+  stale `text/markdown` label; no backfill ships here.
+
+- **Compose-dependent test targets no longer exit 0 having run nothing
+  (#209).** `make test-integration` — documented as the release e2e gate —
+  reported success with everything skipped when no stack was up, as did the
+  `pytest -m benchmark` / `-m retrieval_eval` commands in `docs/testing.md`.
+  A command-line `-m` *replaces* each service's `addopts` default of
+  `-m 'not compose'` rather than intersecting with it, so those markers
+  selected precisely the compose tests the default excluded; each then
+  skipped at fixture setup, and pytest exits 0 for an all-skipped run. A
+  gate that cannot fail is worse than no gate — the same silent-success
+  failure that let v0.6.0 ship believing it had e2e coverage it never had.
+  Two layers now: `scripts/dev/require-stack.sh` pre-flights the stack
+  (wired as a `require-stack` prerequisite on every compose target) and
+  fails with an actionable "run `make dev` first"; `scripts/dev/run-compose-suite.sh`
+  then asserts from pytest's own JUnit report that a non-zero number of
+  tests actually *executed*, catching every other way a suite can run
+  nothing while exiting 0. New `test-benchmark` and `test-retrieval-eval`
+  targets pass the correct `"compose and <marker>"` expressions.
+
+- **Dead-letter jobs now reach `status=resolved` after a successful retry
+  (#249).** Nothing in the codebase ever wrote `"resolved"`:
+  `update_dead_letter_status` had exactly two call sites — reset to
+  `"pending"` when the retry re-trigger itself fails, and `"abandoned"` on
+  the abandon route. A job whose retry fully succeeded (new workflow ran,
+  document reached `processed`, searchable again) therefore sat at
+  `"retrying"` forever, indistinguishable from a retry still in flight or one
+  that silently failed downstream — so `GET /dead-letter` could never answer
+  "what is actually still broken". `DocumentIngestionWorkflow`'s success path
+  now best-effort resolves the document's outstanding `retrying` rows via the
+  new `resolve_dead_letter_jobs` activity and
+  `DatabaseService.resolve_dead_letter_jobs_for_document`. Keyed on
+  `document_id` rather than a dead-letter job id, so no id has to be threaded
+  through the re-published message; scoped to `status='retrying'` only, so
+  `pending` (never retried) and `abandoned` (explicitly given up on) rows are
+  untouched. No migration: `status` is an unconstrained `VARCHAR(20)`.
+
+- **Ingestion: an out-of-memory failure while extracting DOCX/XLSX/PPTX is
+  retried instead of permanently dead-lettered (#215).** `_extract_docx_text`
+  wrapped both the `Document()` construction and the paragraph-iteration
+  comprehension in one broad `except Exception` that re-raised as
+  `ApplicationError(non_retryable=True)`, so a `MemoryError` from a document
+  with a very large number of paragraphs was classified as a permanent,
+  property-of-the-bytes failure — dead-lettering a load-dependent failure a
+  retry on a less-contended worker could plausibly resolve. The `try` is now
+  scoped to only the construction call, with an `except MemoryError: raise`
+  carve-out ahead of the broad handler and the iteration left unwrapped,
+  exactly mirroring `_extract_pdf_text` (whose own docstring already cited
+  this as the pattern to follow, from #195). The pattern sweep found the same
+  missing carve-out at `_extract_xlsx_text`'s `load_workbook()` and
+  `_extract_pptx_text`'s `Presentation()` construction sites; both are fixed
+  here too.
 
 - **CI: the CHANGELOG gate no longer deadlocks the automated eval-baseline
   ratchet.** `conventions.yml`'s CHANGELOG gate failed any PR touching

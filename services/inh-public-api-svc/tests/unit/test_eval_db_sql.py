@@ -18,6 +18,7 @@ EVAL_METHODS = [
     "list_eval_cases",
     "set_eval_case_active",
     "get_active_eval_cases",
+    "get_eval_case_ids",
     "eval_scorecard_counts",
     "insert_eval_run",
     "finish_eval_run",
@@ -42,3 +43,28 @@ def test_eval_methods_are_workspace_scoped():
     for name in set(EVAL_METHODS) - exempt:
         params = inspect.signature(getattr(DatabaseService, name)).parameters
         assert "workspace_id" in params or "workspace_ids" in params, name
+
+
+def test_get_active_eval_cases_accepts_optional_scoping():
+    # #250: run-replay scoping. Both params optional and default to None so
+    # every existing unscoped caller keeps working unchanged.
+    params = inspect.signature(DatabaseService.get_active_eval_cases).parameters
+    assert "case_ids" in params
+    assert params["case_ids"].default is None
+    assert "since" in params
+    assert params["since"].default is None
+
+
+def test_get_eval_case_ids_is_workspace_scoped():
+    params = inspect.signature(DatabaseService.get_eval_case_ids).parameters
+    assert "workspace_id" in params
+    assert "case_ids" in params
+
+
+def test_delete_eval_events_accepts_include_cases_defaulting_false():
+    # #250: purge of labeled cases is opt-in. Default False preserves the
+    # documented contract (raw events ephemeral, labeled cases durable) that
+    # tests/evals/test_evals_flywheel.py asserts against a live stack.
+    params = inspect.signature(DatabaseService.delete_eval_events).parameters
+    assert "include_cases" in params
+    assert params["include_cases"].default is False

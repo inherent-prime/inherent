@@ -61,6 +61,20 @@ Both services default to **excluding Compose-backed tests** via `addopts`
 (`-m 'not compose'`), so a bare `uv run pytest` is safe to run on a laptop with
 no Docker stack up. Coverage (`--cov`) is on by default in both services.
 
+**Footgun (#209): a command-line `-m` REPLACES `addopts`, it does not
+intersect with it.** `pytest -m benchmark` or `pytest -m retrieval_eval` does
+**not** mean "the offline default, narrowed to benchmark/retrieval_eval
+tests" — it means "ignore the `-m 'not compose'` default entirely and select
+only tests carrying that marker", which for both `benchmark` and
+`retrieval_eval` are *exactly* the Compose-marked tests the default exists to
+exclude. Each of those then skips itself individually at fixture setup when
+it can't reach the stack, and an all-skipped pytest run still exits **0** —
+so running either command on a laptop with no stack up reports success
+having run nothing. Always include `compose` explicitly when you mean to run
+against a live stack: `pytest -m 'compose and benchmark'` / `pytest -m
+'compose and retrieval_eval'` — or use the guarded Make targets below, which
+pass the correct expression for you and fail loudly if the stack isn't up.
+
 ## Test profiles
 
 Run these from the relevant service directory (`cd services/<svc>`).
@@ -115,11 +129,41 @@ real Postgres / Weaviate / Redis / S3 and are the release e2e gate:
 uv run pytest -m compose
 ```
 
-Repo-wide shortcut:
+**Failure mode if the stack is not up (#209):** a raw `uv run pytest -m
+compose` does **not** fail when the stack is down — every compose-marked
+test skips itself at fixture setup ("public API not reachable at
+http://localhost:18000: ..."), and an all-skipped pytest run exits **0**.
+Nothing distinguishes that from "the gate passed" unless you read the test
+names in the output. Use the guarded Make targets instead of raw `pytest -m`
+whenever you want a real pass/fail signal:
 
 ```bash
-make test-integration   # public-api compose suite (stack must be up)
+make test-integration     # public-api compose suite (stack must be up)
+make test-benchmark       # compose+benchmark tests, both services
+make test-retrieval-eval  # compose+retrieval_eval tests (public-api)
 ```
+
+Each of these:
+
+1. Runs `scripts/dev/require-stack.sh` first (a Makefile prerequisite),
+   which reuses `doctor.sh`'s own health probes against every service the
+   stack should expose. If anything is unreachable, the target **fails with
+   a non-zero exit and an actionable message** ("Run `make dev` first")
+   *before* pytest ever starts.
+2. Even once the stack passes that check, wraps the pytest invocation via
+   `scripts/dev/run-compose-suite.sh`, which reads pytest's own JUnit report
+   and fails the target if it executed **zero** tests — i.e. every selected
+   test skipped for some other reason (a partially-up stack, a marker
+   expression that matched nothing, a fixture skip unrelated to
+   reachability). This closes the all-skipped-exits-0 case even when the
+   stack looks healthy but the suite still verified nothing.
+
+A raw `cd services/<svc> && uv run pytest -m compose` still works and is
+still the command CI runs — the Make targets exist because the raw form
+gives no distinguishable signal locally when the stack isn't up; CI's
+`integration.yml` avoids the failure mode a different way (it boots the
+stack and waits for `/health` before running pytest at all, so `-m compose`
+never runs with nothing to talk to).
 
 **Local compose CI:** `.github/workflows/integration.yml` (or `make test-integration`
 against a laptop stack). Runs on push to `main`, nightly cron, and manual
@@ -220,17 +264,31 @@ cd services/inh-public-api-svc && uv run pytest -m security
 # REST/MCP contract regressions
 cd services/inh-public-api-svc && uv run pytest -m contract
 
-# Retrieval quality benchmarks
-cd services/inh-public-api-svc && uv run pytest -m retrieval_eval
-
 # Ingestion extraction/chunking evaluations
 cd services/inh-ingestion-svc && uv run pytest -m eval
 
 # Ingestion dependency-failure injection
 cd services/inh-ingestion-svc && uv run pytest -m failure_injection
+```
 
-# Benchmarks (either service)
-cd services/<svc> && uv run pytest -m benchmark
+`retrieval_eval` and `benchmark` are both **also** `compose`-marked (see the
+table above), so — unlike the offline markers above — a bare `-m
+retrieval_eval` / `-m benchmark` hits the #209 footgun described under
+[Default behavior](#default-behavior): it replaces the `-m 'not compose'`
+default rather than narrowing it, silently selecting only the Compose tests
+and all-skipping to a false pass with no stack up. Require the stack
+explicitly and prefer the guarded Make targets:
+
+```bash
+# Retrieval quality benchmarks -- requires a running stack
+make test-retrieval-eval
+# equivalent raw form:
+cd services/inh-public-api-svc && uv run pytest -m 'compose and retrieval_eval'
+
+# Latency/throughput benchmarks (both services) -- requires a running stack
+make test-benchmark
+# equivalent raw form:
+cd services/<svc> && uv run pytest -m 'compose and benchmark'
 ```
 
 ## Retrieval-eval gate, baseline ratchet, and trend history (#139)

@@ -81,7 +81,9 @@ and the schema description below are; some MCP-eligible types are not
 "TEXT content" describes the wire transport, not the declared MIME type).
 Omitting ``content_type`` derives it from ``filename``'s
 extension when recognized as MCP-eligible, falling back to
-``text/markdown`` otherwise (see ``_default_upload_content_type``). Binary
+``text/plain`` otherwise (see ``_default_upload_content_type``; #208 --
+was ``text/markdown`` until #208, which mislabelled Dockerfile/Makefile/
+README/.gitignore/archive.tar.gz as markdown). Binary
 uploads (PDF, DOCX, PNG, ...) remain REST-only by design — the tool rejects
 an unsupported ``content_type`` with a message pointing the caller at
 POST /v1/documents. Both surfaces share the exact same
@@ -1055,14 +1057,19 @@ def _default_upload_content_type(filename: str) -> str:
 
     Derived from `filename`'s extension when the registry recognizes it AND
     that type is MCP-eligible (e.g. ``notes.txt`` -> ``text/plain``,
-    ``data.csv`` -> ``text/csv``) -- falls back to ``text/markdown`` only for
-    an unrecognized or absent extension. Historically (#117 review BLOCKER 2)
-    the default was a flat ``"text/markdown"`` regardless of filename, which
-    meant the tool's own documented default broke itself the moment #117's
-    extension-consistency check landed: calling
-    ``upload_document(filename="notes.txt", ...)`` and omitting the optional
-    `content_type` got ``notes.txt`` defaulted to ``text/markdown`` and then
-    rejected as a mismatch against its own ``.txt`` extension.
+    ``data.csv`` -> ``text/csv``) -- falls back to ``text/plain`` only for an
+    unrecognized or absent extension (#208: was ``text/markdown`` until
+    #208 -- confidently mislabelling ``Dockerfile``, ``Makefile``,
+    ``README``, ``.gitignore``, and ``archive.tar.gz`` as markdown, which
+    none of them are. ``text/plain`` is the honest generic for "a text file
+    whose format we did not recognize," not a guess dressed up as a real
+    answer). Historically (#117 review BLOCKER 2) the default was a flat
+    ``"text/markdown"`` regardless of filename, which meant the tool's own
+    documented default broke itself the moment #117's extension-consistency
+    check landed: calling ``upload_document(filename="notes.txt", ...)`` and
+    omitting the optional `content_type` got ``notes.txt`` defaulted to
+    ``text/markdown`` and then rejected as a mismatch against its own
+    ``.txt`` extension.
 
     #197 fix: resolving the spec's ``mime_types[0]`` unconditionally was
     correct only by accident, because every spec registered at the time
@@ -1079,12 +1086,12 @@ def _default_upload_content_type(filename: str) -> str:
     unchanged.
     """
     if "." not in filename:
-        return "text/markdown"
+        return "text/plain"
     extension = "." + filename.rsplit(".", 1)[-1]
     spec = get_spec_for_extension(extension)
     if spec is not None and "mcp" in spec.surfaces:
         return mime_type_for_extension(spec, extension)
-    return "text/markdown"
+    return "text/plain"
 
 
 async def _handle_upload_document(key_info: APIKeyInfo, arguments: dict) -> list[TextContent]:
@@ -1459,8 +1466,9 @@ _TOOLS: dict[str, ToolDef] = {
                     "use POST /v1/documents for binary uploads. RECOMMENDED: omit "
                     "this field. When omitted, the type is derived from filename's "
                     "extension when recognized (e.g. main.go -> text/x-go), falling "
-                    "back to text/markdown only for an unrecognized/absent "
-                    "extension. There is deliberately no schema `default` here: "
+                    "back to text/plain only for an unrecognized/absent "
+                    "extension (e.g. Dockerfile, Makefile, README, .gitignore, "
+                    "archive.tar.gz). There is deliberately no schema `default` here: "
                     "many MCP clients auto-fill an omitted argument from its "
                     "advertised default BEFORE the server ever sees the call, which "
                     "would turn every filename-based derivation into the same fixed "

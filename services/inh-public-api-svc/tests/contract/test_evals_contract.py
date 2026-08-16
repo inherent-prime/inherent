@@ -166,12 +166,13 @@ def evals_db() -> AsyncMock:
 
     # Runs path
     db.get_active_eval_cases = AsyncMock(return_value=[])
+    db.get_eval_case_ids = AsyncMock(return_value=set())
     db.insert_eval_run = AsyncMock(return_value=None)
     db.get_eval_run = AsyncMock(return_value=None)
     db.get_eval_run_results = AsyncMock(return_value=[])
 
     # Events purge
-    db.delete_eval_events = AsyncMock(return_value=5)
+    db.delete_eval_events = AsyncMock(return_value={"events_deleted": 5, "cases_deleted": 0})
 
     return db
 
@@ -333,6 +334,133 @@ class TestStartRun:
         assert body["status"] == "running"
         assert "run_id" in body
 
+    # ------------------------------------------------------------------- #
+    # Run scoping (#250): optional case_ids / since narrow the replay set.
+    # Omitting both keeps the default (every active case) -- covered above.
+    # ------------------------------------------------------------------- #
+    async def test_start_run_unscoped_replays_every_active_case(
+        self, write_key, evals_db, mock_search_service
+    ):
+        """Regression guard: no body at all -> both DB fetches stay unscoped."""
+        evals_db.get_active_eval_cases = AsyncMock(
+            return_value=[
+                {
+                    "case_id": "case_1",
+                    "query_text": "revenue this quarter",
+                    "expected_doc_ids": ["doc-1"],
+                    "relevance_grade": 2,
+                }
+            ]
+        )
+        app = _build_app(
+            key=write_key, db=evals_db, search_svc=mock_search_service, workspace_id="ws-1"
+        )
+        async with _client(app) as c:
+            r = await c.post("/v1/evals/runs", headers=_HDR)
+        assert r.status_code == 202
+        # BackgroundTasks run inline under ASGITransport, so both the initial
+        # (start_run) and executing (execute_run) fetches have happened by now.
+        assert evals_db.get_active_eval_cases.await_count == 2
+        for call in evals_db.get_active_eval_cases.call_args_list:
+            assert call.kwargs == {"workspace_id": "ws-1", "case_ids": None, "since": None}
+        evals_db.get_eval_case_ids.assert_not_awaited()
+
+    async def test_start_run_with_case_ids_scopes_both_db_fetches(
+        self, write_key, evals_db, mock_search_service
+    ):
+        """The same case_ids scope must reach BOTH start_run's and
+        execute_run's independent get_active_eval_cases call (#250's core bug:
+        scoping only one of the two call sites)."""
+        evals_db.get_eval_case_ids = AsyncMock(return_value={"case_1"})
+        evals_db.get_active_eval_cases = AsyncMock(
+            return_value=[
+                {
+                    "case_id": "case_1",
+                    "query_text": "revenue this quarter",
+                    "expected_doc_ids": ["doc-1"],
+                    "relevance_grade": 2,
+                }
+            ]
+        )
+        app = _build_app(
+            key=write_key, db=evals_db, search_svc=mock_search_service, workspace_id="ws-1"
+        )
+        async with _client(app) as c:
+            r = await c.post("/v1/evals/runs", json={"case_ids": ["case_1"]}, headers=_HDR)
+        assert r.status_code == 202
+        evals_db.get_eval_case_ids.assert_awaited_once_with(
+            workspace_id="ws-1", case_ids=["case_1"]
+        )
+        assert evals_db.get_active_eval_cases.await_count == 2
+        for call in evals_db.get_active_eval_cases.call_args_list:
+            assert call.kwargs == {
+                "workspace_id": "ws-1",
+                "case_ids": ["case_1"],
+                "since": None,
+            }
+
+    async def test_start_run_with_since_scopes_both_db_fetches(
+        self, write_key, evals_db, mock_search_service
+    ):
+        evals_db.get_active_eval_cases = AsyncMock(
+            return_value=[
+                {
+                    "case_id": "case_1",
+                    "query_text": "revenue this quarter",
+                    "expected_doc_ids": ["doc-1"],
+                    "relevance_grade": 2,
+                }
+            ]
+        )
+        app = _build_app(
+            key=write_key, db=evals_db, search_svc=mock_search_service, workspace_id="ws-1"
+        )
+        async with _client(app) as c:
+            r = await c.post(
+                "/v1/evals/runs",
+                json={"since": "2026-08-01T00:00:00Z"},
+                headers=_HDR,
+            )
+        assert r.status_code == 202
+        for call in evals_db.get_active_eval_cases.call_args_list:
+            assert call.kwargs["case_ids"] is None
+            assert call.kwargs["since"] is not None
+
+    async def test_start_run_with_foreign_case_id_returns_404(
+        self, write_key, evals_db, mock_search_service
+    ):
+        """A case_id the caller's workspace does not own must be rejected
+        outright, never silently dropped from the replay set (#250) -- matches
+        this codebase's existing cross-tenant-id convention (404, no leak)."""
+        evals_db.get_eval_case_ids = AsyncMock(return_value=set())  # nothing found in ws-1
+        app = _build_app(
+            key=write_key, db=evals_db, search_svc=mock_search_service, workspace_id="ws-1"
+        )
+        async with _client(app) as c:
+            r = await c.post("/v1/evals/runs", json={"case_ids": ["case_other_ws"]}, headers=_HDR)
+        assert r.status_code == 404
+        assert "case_other_ws" in r.json()["detail"]
+        # Must reject before ever touching the replay set.
+        evals_db.get_active_eval_cases.assert_not_awaited()
+        evals_db.insert_eval_run.assert_not_awaited()
+
+    async def test_start_run_with_partial_foreign_case_ids_returns_404(
+        self, write_key, evals_db, mock_search_service
+    ):
+        """Mixed request (one real id, one foreign/unknown id) rejects the
+        whole request rather than silently widening or silently narrowing."""
+        evals_db.get_eval_case_ids = AsyncMock(return_value={"case_1"})  # case_2 missing
+        app = _build_app(
+            key=write_key, db=evals_db, search_svc=mock_search_service, workspace_id="ws-1"
+        )
+        async with _client(app) as c:
+            r = await c.post(
+                "/v1/evals/runs", json={"case_ids": ["case_1", "case_2"]}, headers=_HDR
+            )
+        assert r.status_code == 404
+        assert "case_2" in r.json()["detail"]
+        evals_db.get_active_eval_cases.assert_not_awaited()
+
 
 # =========================================================================== #
 # 10. GET run — unknown -> 404
@@ -378,13 +506,42 @@ class TestDeleteEvents:
         async with _client(app) as c:
             r = await c.delete("/v1/evals/events", headers=_HDR)
         assert r.status_code == 200
-        assert r.json() == {"deleted": 5}
+        assert r.json() == {"deleted": 5, "cases_deleted": 0}
+        evals_db.delete_eval_events.assert_awaited_once_with(
+            workspace_id="ws-1", include_cases=False
+        )
 
     async def test_delete_events_requires_write_permission(self, search_only_key, evals_db):
         app = _build_app(key=search_only_key, db=evals_db, override_permissions=False)
         async with _client(app) as c:
             r = await c.delete("/v1/evals/events", headers=_HDR)
         assert r.status_code == 403
+
+    # ------------------------------------------------------------------- #
+    # Case purge (#250): opt-in via ?include_cases=true. Default False keeps
+    # the documented contract (raw events ephemeral, labeled cases durable)
+    # that tests/evals/test_evals_flywheel.py:183-193 asserts against a live
+    # stack -- this is the offline regression guard for the same contract.
+    # ------------------------------------------------------------------- #
+    async def test_delete_events_default_leaves_cases_untouched(self, write_key, evals_db):
+        app = _build_app(key=write_key, db=evals_db, workspace_id="ws-1")
+        async with _client(app) as c:
+            r = await c.delete("/v1/evals/events", headers=_HDR)
+        assert r.status_code == 200
+        assert evals_db.delete_eval_events.call_args.kwargs["include_cases"] is False
+
+    async def test_delete_events_include_cases_true_purges_cases(self, write_key, evals_db):
+        evals_db.delete_eval_events = AsyncMock(
+            return_value={"events_deleted": 5, "cases_deleted": 3}
+        )
+        app = _build_app(key=write_key, db=evals_db, workspace_id="ws-1")
+        async with _client(app) as c:
+            r = await c.delete("/v1/evals/events?include_cases=true", headers=_HDR)
+        assert r.status_code == 200
+        assert r.json() == {"deleted": 5, "cases_deleted": 3}
+        evals_db.delete_eval_events.assert_awaited_once_with(
+            workspace_id="ws-1", include_cases=True
+        )
 
 
 # =========================================================================== #

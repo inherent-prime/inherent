@@ -26,7 +26,7 @@ with workflow.unsafe.imports_passed_through():
     from src.temporal.activities.chunk import chunk_text
     from src.temporal.activities.cleanup import cleanup_staging
     from src.temporal.activities.completion import publish_completion
-    from src.temporal.activities.dead_letter import record_dead_letter
+    from src.temporal.activities.dead_letter import record_dead_letter, resolve_dead_letter_jobs
     from src.temporal.activities.extract import extract_text
     from src.temporal.activities.fetch import fetch_document
     from src.temporal.activities.status import create_pending_document, set_document_status
@@ -43,6 +43,7 @@ with workflow.unsafe.imports_passed_through():
         FetchDocumentInput,
         PublishCompletionInput,
         RecordDeadLetterInput,
+        ResolveDeadLetterJobsInput,
         SetDocumentStatusInput,
         StoreDocumentInput,
         UpdateStatsInput,
@@ -209,6 +210,50 @@ class DocumentIngestionWorkflow:
             )
         except Exception:
             workflow.logger.warning("Failed to record dead-letter job (non-fatal)")
+
+    async def _resolve_dead_letter_best_effort(self, document_id: str) -> None:
+        """Mark this document's outstanding 'retrying' dead-letter rows
+        resolved (best-effort). Called only from the workflow's SUCCESS path.
+
+        #249: before this existed, nothing ever wrote status='resolved' to
+        dead_letter_jobs -- a job whose retry fully succeeded (new workflow
+        ran, document reached 'processed', searchable again) sat at
+        status='retrying' forever, indistinguishable from a retry still in
+        flight or one that silently failed. Keyed on document_id (not a
+        dead-letter job id) per the design: a successful ingestion of
+        document X genuinely resolves X's outstanding retried dead-letter
+        rows, and this avoids threading a job id through the re-published
+        message payload -- see ResolveDeadLetterJobsInput's docstring.
+
+        Temporal determinism: a workflow cannot touch the database directly,
+        so this write is routed through an activity exactly like
+        ``_record_dead_letter_best_effort`` below.
+
+        Best-effort / log-and-swallow (#249, mirrors ``_record_dead_letter_
+        best_effort`` and ``_publish_completion_best_effort``): this is an
+        observability/recovery side-channel, not the source of truth for
+        whether ingestion succeeded -- per AGENTS.md, log-and-swallow is
+        acceptable here specifically BECAUSE a failure to mark a dead-letter
+        row resolved must never fail an otherwise-successful ingestion. It
+        does not leave persistent state that CONTRADICTS the response (the
+        document itself is genuinely processed either way); at worst a
+        dead-letter row stays at 'retrying' a little longer, which is the
+        pre-#249 status quo, not a regression.
+        """
+        try:
+            await workflow.execute_activity(
+                resolve_dead_letter_jobs,
+                ResolveDeadLetterJobsInput(document_id=document_id),
+                start_to_close_timeout=timedelta(seconds=15),
+                retry_policy=RetryPolicy(
+                    maximum_attempts=2,
+                    initial_interval=timedelta(seconds=1),
+                    maximum_interval=timedelta(seconds=5),
+                    backoff_coefficient=2.0,
+                ),
+            )
+        except Exception:
+            workflow.logger.warning("Failed to resolve dead-letter jobs for document (non-fatal)")
 
     async def _publish_completion_best_effort(
         self,
@@ -596,6 +641,16 @@ class DocumentIngestionWorkflow:
 
                 # Calculate final processing time
                 final_processing_time_ms = int((workflow.now() - start_time).total_seconds() * 1000)
+
+                # Best-effort: this run genuinely succeeded, so resolve any
+                # outstanding 'retrying' dead-letter rows for this document
+                # (#249). This is the ONLY point in the workflow where a run
+                # completes successfully -- the PostgreSQL/Weaviate failure
+                # branches above and the outer except block below are all
+                # terminal FAILURES that dead-letter (not resolve) the run,
+                # and there is no partial/degraded-success path in this
+                # workflow (both storage backends must succeed to reach here).
+                await self._resolve_dead_letter_best_effort(document_id=input.document_id)
 
                 # Tell the platform the document is ready (#88) — downstream
                 # consumers finalize their document records from this event.

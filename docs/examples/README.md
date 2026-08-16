@@ -901,6 +901,18 @@ exists but belongs to a different workspace — no cross-tenant existence leak, 
 Failed ingestion messages land in a dead-letter table for inspection and recovery. These
 endpoints live on the ingestion service (write/admin plane) and use `$INGEST_KEY`.
 
+**Status lifecycle:** `pending` (recorded, never retried) → `retrying` (a retry was triggered,
+`POST .../retry`) → `resolved` (the retried workflow run completed successfully and the document
+is processed again) or `pending` again (the retry attempt itself failed to even start — see
+below) or `abandoned` (an operator gave up on it via `POST .../abandon`). `resolved` is set
+automatically — there is no endpoint for it. It is written best-effort by the document-ingestion
+workflow's success path once the retried run genuinely finishes, keyed on the job's
+`document_id`: a successful ingestion of a document resolves every one of that document's
+dead-letter rows still in `retrying` (rows already `pending` or `abandoned` are left alone). Until
+that write lands, a row stays at `retrying` even if the retried document has already finished
+processing — poll `GET /dead-letter/{job_id}` if you need to confirm resolution rather than
+inferring it from the document's own status (#249).
+
 ### List dead-letter jobs
 
 `workspace_id` is **required** (#177 — it used to be an optional filter, which meant omitting it
@@ -974,7 +986,10 @@ curl -s -X POST "$INGEST_BASE/dead-letter/1/retry?workspace_id=$WORKSPACE_ID" \
 ```
 
 Returns **409** if the job is not in a retriable status, **404** if missing or not owned by
-`workspace_id`, **500** if the re-trigger fails.
+`workspace_id`, **500** if the re-trigger fails (and resets the job's status back to `pending` so
+it can be retried again). On success the job's status becomes `retrying`; it transitions on its
+own to `resolved` once the re-triggered workflow run completes successfully — see the status
+lifecycle note above.
 
 ### Abandon a job
 
