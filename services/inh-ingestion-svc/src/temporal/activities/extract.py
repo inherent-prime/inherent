@@ -459,6 +459,27 @@ def _extract_docx_text(content: bytes, filename: str = "") -> str:
     outcome, so failures raise a non-retryable ``ApplicationError``, the same
     reasoning as the XLSX/PPTX open/cap failures below (and the existing
     ``_resolve_extractor`` "no extractor"/"wiring bug" cases).
+
+    The try/except is scoped to ONLY the `Document()` construction call --
+    matching `_extract_pdf_text`'s `PdfReader()`-only wrap exactly (#215:
+    before this fix, the same `try` also wrapped the paragraph-iteration
+    list comprehension below, so a `MemoryError` raised while iterating
+    `doc.paragraphs` on a large/pathological document was swept into
+    `non_retryable=True` right alongside a genuine "wrong OOXML content
+    type" `ValueError` -- permanently dead-lettering a load-dependent
+    failure a retry could plausibly resolve, instead of the transient
+    failure it actually is). The paragraph-iteration comprehension below is
+    deliberately left UNWRAPPED, same accepted tradeoff `_extract_pdf_text`'s
+    page-iteration loop and `_extract_xlsx_text`'s row-iteration loop already
+    make for their own iteration.
+
+    Raises:
+        ApplicationError (non_retryable=True): python-docx is not installed
+            (deterministic per worker/image -- retrying the same build can
+            never install a package), or `Document()` can't open `content`
+            at all (corrupt/truncated bytes, password-protected file, or a
+            different OOXML format -- e.g. XLSX or PPTX -- reaching this
+            extractor despite its declared DOCX type).
     """
     try:
         from docx import Document
@@ -472,8 +493,13 @@ def _extract_docx_text(content: bytes, filename: str = "") -> str:
     label = f" ({filename})" if filename else ""
     try:
         doc = Document(io.BytesIO(content))
-        paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
-        return "\n\n".join(paragraphs)
+    except MemoryError:
+        # A load-dependent condition, not a property of the bytes -- must
+        # stay retryable (#215, same reasoning as `_extract_pdf_text`'s own
+        # carve-out above). python-docx's package-opening path can allocate
+        # heavily while unzipping/parsing a pathological OOXML package; this
+        # must never be reclassified as non_retryable.
+        raise
     except Exception as e:
         # python-docx's own "wrong OOXML content type" ValueError embeds a
         # raw `<_io.BytesIO object at 0x...>` repr -- a heap address -- in
@@ -500,6 +526,21 @@ def _extract_docx_text(content: bytes, filename: str = "") -> str:
             type="DocxOpenFailed",
             non_retryable=True,
         ) from e
+
+    # Scoped to ONLY `Document()` construction above (#215 review follow-up:
+    # a version of this fix that also wrapped the paragraph-iteration
+    # comprehension below would have turned a `MemoryError` from a large/
+    # pathological document into `non_retryable=True` -- permanently
+    # dead-lettering a load-dependent failure a retry, possibly on a
+    # less-contended worker, could plausibly resolve, instead of the
+    # transient failure it actually is). Mirrors `_extract_pdf_text`'s own
+    # page-iteration loop and `_extract_xlsx_text`'s row-iteration loop,
+    # neither of which is wrapped in a broad except either -- same accepted
+    # tradeoff: a corruption localized to one paragraph that python-docx only
+    # discovers lazily during iteration retries under the default policy
+    # rather than failing once.
+    paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
+    return "\n\n".join(paragraphs)
 
 
 # Cost guards for XLSX extraction (#118 issue requirement: "cap evaluated
@@ -689,6 +730,15 @@ def _extract_xlsx_text(content: bytes) -> str:
             guaranteed-repeat failure. Every message is clear and actionable
             -- never a bare zipfile/openpyxl exception surfacing to the
             caller, and never a silent partial result.
+
+            The try/except around `load_workbook()` re-raises `MemoryError`
+            BEFORE falling through to the broad `except Exception` (#215
+            pattern-sweep fix: this carve-out was missing here even though
+            `_extract_pdf_text`/`_extract_docx_text` already had it) -- a
+            load-dependent OOM opening a pathological workbook must stay
+            retryable, never reclassified as non-retryable. The row-
+            iteration loop below is separately, and correctly, left entirely
+            outside this try block already.
     """
     try:
         import openpyxl
@@ -702,6 +752,13 @@ def _extract_xlsx_text(content: bytes) -> str:
 
     try:
         workbook = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    except MemoryError:
+        # A load-dependent condition, not a property of the bytes -- must
+        # stay retryable (#215 pattern-sweep fix, same carve-out as
+        # `_extract_pdf_text`/`_extract_docx_text` above: opening a
+        # pathological workbook can allocate heavily; this must never be
+        # reclassified as non_retryable).
+        raise
     except Exception as e:
         # Covers corrupt/truncated zips (zipfile.BadZipFile), password-
         # protected files (OLE2/CFBF container -- not a zip at all), and any
@@ -885,6 +942,14 @@ def _extract_pptx_text(content: bytes) -> str:
             character count exceeds the text cap. Same "deterministic ->
             non-retryable, clear, actionable, never silent" contract as
             XLSX above.
+
+            The try/except around `Presentation()` re-raises `MemoryError`
+            BEFORE falling through to the broad `except Exception` (#215
+            pattern-sweep fix, same carve-out XLSX above now has) -- a
+            load-dependent OOM opening a pathological deck must stay
+            retryable, never reclassified as non-retryable. The slide-
+            iteration loop below is separately, and correctly, left entirely
+            outside this try block already.
     """
     try:
         from pptx import Presentation
@@ -897,6 +962,13 @@ def _extract_pptx_text(content: bytes) -> str:
 
     try:
         presentation = Presentation(io.BytesIO(content))
+    except MemoryError:
+        # A load-dependent condition, not a property of the bytes -- must
+        # stay retryable (#215 pattern-sweep fix, same carve-out as
+        # `_extract_pdf_text`/`_extract_docx_text` above: opening a
+        # pathological deck can allocate heavily; this must never be
+        # reclassified as non_retryable).
+        raise
     except Exception as e:
         # Covers corrupt/truncated zips, password-protected (OLE2/CFBF)
         # files, and any other "python-pptx couldn't open this" failure.

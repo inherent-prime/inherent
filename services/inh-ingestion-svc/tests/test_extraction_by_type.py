@@ -483,6 +483,25 @@ class TestXlsxFailurePaths:
 
         assert get_spec_for_mime("application/vnd.ms-excel") is None
 
+    def test_memory_error_during_construction_propagates_not_wrapped(self, monkeypatch):
+        """#215 pattern-sweep hit: `_extract_xlsx_text`'s `except Exception`
+        around `openpyxl.load_workbook()` construction had no `except
+        MemoryError: raise` carve-out (unlike `_extract_pdf_text` /
+        `_extract_docx_text`), so a MemoryError raised while OPENING a
+        pathological workbook was incorrectly reclassified as
+        `non_retryable=True` -- same defect class as #215, just at the
+        construction site rather than the (already-correctly-unwrapped) row
+        -iteration loop below it. Must propagate completely unconverted."""
+        import openpyxl
+
+        def _raise_memory_error(*args, **kwargs):
+            raise MemoryError("simulated: out of memory opening workbook")
+
+        monkeypatch.setattr(openpyxl, "load_workbook", _raise_memory_error)
+
+        with pytest.raises(MemoryError):
+            _extract_xlsx_text(b"irrelevant, load_workbook is mocked")
+
 
 class TestPptxFailurePaths:
     def test_corrupt_truncated_zip_raises_non_retryable(self):
@@ -616,6 +635,25 @@ class TestPptxFailurePaths:
         from inh_contracts.file_types import get_spec_for_mime
 
         assert get_spec_for_mime("application/vnd.ms-powerpoint") is None
+
+    def test_memory_error_during_construction_propagates_not_wrapped(self, monkeypatch):
+        """#215 pattern-sweep hit: `_extract_pptx_text`'s `except Exception`
+        around `Presentation()` construction had no `except MemoryError:
+        raise` carve-out (unlike `_extract_pdf_text` / `_extract_docx_text`),
+        so a MemoryError raised while OPENING a pathological deck was
+        incorrectly reclassified as `non_retryable=True` -- same defect
+        class as #215, just at the construction site rather than the
+        (already-correctly-unwrapped) slide-iteration loop below it. Must
+        propagate completely unconverted."""
+        import pptx
+
+        def _raise_memory_error(*args, **kwargs):
+            raise MemoryError("simulated: out of memory opening presentation")
+
+        monkeypatch.setattr(pptx, "Presentation", _raise_memory_error)
+
+        with pytest.raises(MemoryError):
+            _extract_pptx_text(b"irrelevant, Presentation is mocked")
 
 
 class TestPdfFailurePaths:
@@ -1100,6 +1138,94 @@ class TestSubtitleFailurePaths:
 
         with pytest.raises(MemoryError):
             _extract_subtitle_text(b"irrelevant, _decode_text is mocked", "sample.srt")
+
+
+class TestDocxFailurePaths:
+    """#215: `_extract_docx_text`'s broad `except Exception` wrapped BOTH the
+    `Document()` construction call AND the paragraph-iteration list
+    comprehension below it in the same `try` block -- a `MemoryError` raised
+    during paragraph iteration (not just construction) got reclassified as
+    `non_retryable=True`, permanently dead-lettering a load-dependent
+    failure that a retry (possibly on a less-contended worker) could
+    plausibly resolve. Mirrors `TestPdfFailurePaths` above exactly (#195's
+    construction-only-wrap precedent, which this fix now matches)."""
+
+    def test_memory_error_during_construction_propagates_not_wrapped(self, monkeypatch):
+        """MemoryError raised by `Document()` construction itself must
+        propagate completely unconverted -- not even as a differently
+        worded ApplicationError."""
+        import docx
+
+        def _raise_memory_error(*args, **kwargs):
+            raise MemoryError("simulated: out of memory parsing OOXML package")
+
+        monkeypatch.setattr(docx, "Document", _raise_memory_error)
+
+        with pytest.raises(MemoryError):
+            _extract_docx_text(b"irrelevant, Document is mocked", "sample.docx")
+
+    def test_exception_during_paragraph_iteration_propagates_not_wrapped(self, monkeypatch):
+        """A failure discovered lazily during paragraph iteration (the `for
+        p in doc.paragraphs if p.text.strip()` comprehension) -- e.g. a
+        MemoryError from a pathological/huge document -- must NOT be swept
+        into `non_retryable=True` by a broad except around the whole try
+        block. The try/except is scoped to ONLY `Document()` construction,
+        mirroring `_extract_pdf_text`'s construction-only wrap; the
+        paragraph-iteration comprehension itself is left unwrapped below the
+        try block."""
+        import docx
+
+        class _ExplodingDocument:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            @property
+            def paragraphs(self):
+                raise MemoryError("simulated: OOM iterating paragraphs")
+
+        monkeypatch.setattr(docx, "Document", _ExplodingDocument)
+
+        with pytest.raises(MemoryError):
+            _extract_docx_text(b"irrelevant, Document is mocked", "sample.docx")
+
+    def test_non_memory_exception_during_paragraph_iteration_propagates_not_wrapped(
+        self, monkeypatch
+    ):
+        """Same as above but for a non-MemoryError exception discovered
+        during paragraph iteration -- also must NOT become a non-retryable
+        ApplicationError, since the paragraph-iteration comprehension sits
+        entirely outside the try/except now (mirrors PDF's page-iteration
+        test: a per-paragraph failure a structurally-valid `Document()`
+        construction alone cannot detect stays retryable, not converted)."""
+        import docx
+
+        class _ExplodingDocument:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            @property
+            def paragraphs(self):
+                raise RuntimeError("simulated: corrupt paragraph run on p.12")
+
+        monkeypatch.setattr(docx, "Document", _ExplodingDocument)
+
+        with pytest.raises(RuntimeError, match="simulated: corrupt paragraph run"):
+            _extract_docx_text(b"irrelevant, Document is mocked", "sample.docx")
+
+    def test_value_error_on_construction_still_raises_non_retryable(self):
+        """The existing ValueError-on-construction path (wrong OOXML content
+        type, e.g. a genuine XLSX mislabeled as DOCX) must still become a
+        non-retryable ApplicationError -- this fix narrows what the try/
+        except covers, but must not accidentally widen the UNWRAPPED surface
+        to cover construction itself. Full coverage of this path (message
+        content, heap-address-repr scrubbing) lives in
+        `test_genuine_xlsx_fed_to_docx_extractor_fails_loudly_not_silently`
+        below; this pins just the non_retryable contract next to the two
+        propagates-unwrapped tests above for an at-a-glance contrast."""
+        xlsx_bytes = _read("sample.xlsx")
+        with pytest.raises(ApplicationError, match="DOCX extraction failed") as exc_info:
+            _extract_docx_text(xlsx_bytes, "report.docx")
+        assert exc_info.value.non_retryable
 
 
 def test_genuine_xlsx_fed_to_docx_extractor_fails_loudly_not_silently():

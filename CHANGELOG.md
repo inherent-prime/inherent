@@ -47,6 +47,22 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Fixed
 
+- **Ingestion: an out-of-memory failure while extracting DOCX/XLSX/PPTX is
+  retried instead of permanently dead-lettered (#215).** `_extract_docx_text`
+  wrapped both the `Document()` construction and the paragraph-iteration
+  comprehension in one broad `except Exception` that re-raised as
+  `ApplicationError(non_retryable=True)`, so a `MemoryError` from a document
+  with a very large number of paragraphs was classified as a permanent,
+  property-of-the-bytes failure — dead-lettering a load-dependent failure a
+  retry on a less-contended worker could plausibly resolve. The `try` is now
+  scoped to only the construction call, with an `except MemoryError: raise`
+  carve-out ahead of the broad handler and the iteration left unwrapped,
+  exactly mirroring `_extract_pdf_text` (whose own docstring already cited
+  this as the pattern to follow, from #195). The pattern sweep found the same
+  missing carve-out at `_extract_xlsx_text`'s `load_workbook()` and
+  `_extract_pptx_text`'s `Presentation()` construction sites; both are fixed
+  here too.
+
 - **CI: the CHANGELOG gate no longer deadlocks the automated eval-baseline
   ratchet.** `conventions.yml`'s CHANGELOG gate failed any PR touching
   `services/**` without a `CHANGELOG.md` entry, which included the PR that
