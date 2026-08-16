@@ -79,6 +79,21 @@ class DatabaseService:
     - Indexes on frequently queried columns
     """
 
+    # Dead-letter statuses that a later SUCCESSFUL ingestion of the same
+    # document supersedes (#249, widened by #287) -- equivalently, the
+    # statuses from which a retry is still permitted. Those two readings
+    # MUST stay the same set: `resolve_dead_letter_jobs_for_document`
+    # narrows rows out of it on success precisely so the retry route's 409
+    # guard (`api/app.py`) then refuses to replay a stale payload over the
+    # repaired document. Public because that route reads it too.
+    #
+    # Deliberately excludes:
+    #   'abandoned' -- an operator explicitly gave up on this failure;
+    #                  resolving it would erase that decision.
+    #   'resolved'  -- already terminal; re-writing it would churn
+    #                  ``resolved_at`` to the wrong (later) timestamp.
+    DEAD_LETTER_UNRESOLVED_STATUSES = ("pending", "retrying")
+
     def __init__(self, settings: Settings):
         """Initialize database service."""
         self.settings = settings
@@ -1728,7 +1743,7 @@ class DatabaseService:
             return bool(result.rowcount > 0)  # type: ignore[return-value]
 
     async def resolve_dead_letter_jobs_for_document(self, document_id: str) -> int:
-        """Mark a document's outstanding 'retrying' dead-letter rows resolved (#249).
+        """Mark a document's outstanding dead-letter rows resolved (#249, #287).
 
         Before this method existed, NOTHING ever wrote status='resolved':
         ``update_dead_letter_status`` had exactly two call sites (the retry
@@ -1738,25 +1753,45 @@ class DatabaseService:
         silently failed.
 
         Keyed on ``document_id`` (not the dead-letter job id): a successful
-        ingestion of document X genuinely resolves X's outstanding retried
+        ingestion of document X genuinely resolves X's outstanding
         dead-letter rows, and this avoids threading a job id through the
         re-published message payload (the retry route re-publishes the
         original upload-event message, which has no room for it).
 
-        Scoped to rows CURRENTLY in status='retrying' only -- a plain
-        "set every row for this document_id to resolved" would also flip
-        'pending' rows (never retried at all) and 'abandoned' rows
-        (explicitly given up on by an operator) to 'resolved', which is
-        wrong in both directions. The WHERE clause is the whole point of
-        this method existing as scoped SQL rather than a bare
-        ``update_dead_letter_status`` call.
+        Covers BOTH unresolved statuses (see
+        ``DEAD_LETTER_UNRESOLVED_STATUSES``):
+
+        * ``'retrying'`` -- the #249 case: a retry that has now succeeded.
+        * ``'pending'`` -- the #287 case: a failure nobody ever pressed Retry
+          on, superseded by a later successful run of the same document.
+          #249 scoped this out on the theory that a 'pending' row means
+          "never retried, so still outstanding", but that reasoning does not
+          survive the document actually reaching 'processed'. Two things
+          made the omission bite. First, ``GET /dead-letter`` defaults to
+          ``status='pending'``, so the rows the DEFAULT listing shows were
+          exactly the ones nothing ever resolved -- a document repaired by
+          re-upload still read as broken forever. Second, ``document_id`` is
+          STABLE across a corrective re-upload: ``document_intake`` reuses
+          the existing id on a (workspace, filename) match even when the
+          bytes changed (the #60 reindex-on-edit path), so the repaired run
+          lands on the same id as the failed one. Pressing Retry on the
+          stale row then re-published the OLD payload over the now-healthy
+          document; ``supersede_running=False`` does not help, because by
+          then nothing is in flight. Resolving the row makes the retry
+          route's own 409 guard (which admits only 'pending'/'retrying')
+          reject that replay.
+
+        A plain "set every row for this document_id to resolved" would go
+        too far in the other direction -- it would also flip 'abandoned'
+        rows. The WHERE clause is the whole point of this method existing as
+        scoped SQL rather than a bare ``update_dead_letter_status`` call.
 
         Args:
             document_id: The document identifier whose dead-letter rows to
                 resolve.
 
         Returns:
-            Number of dead-letter rows updated (0 if none were 'retrying').
+            Number of dead-letter rows updated (0 if none were outstanding).
         """
         if not self.engine:
             raise RuntimeError("Database not connected")
@@ -1767,7 +1802,7 @@ class DatabaseService:
                 self.dead_letter_jobs.update()
                 .where(
                     self.dead_letter_jobs.c.document_id == document_id,
-                    self.dead_letter_jobs.c.status == "retrying",
+                    self.dead_letter_jobs.c.status.in_(self.DEAD_LETTER_UNRESOLVED_STATUSES),
                 )
                 .values(status="resolved", resolved_at=now, updated_at=now)
             )

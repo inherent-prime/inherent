@@ -84,12 +84,16 @@ def _db_with_session(session) -> DatabaseService:
 
 
 class TestResolveDeadLetterJobsForDocument:
-    """DatabaseService.resolve_dead_letter_jobs_for_document (#249).
+    """DatabaseService.resolve_dead_letter_jobs_for_document (#249, #287).
 
     A successful ingestion of document X must resolve X's outstanding
-    'retrying' dead-letter rows -- and ONLY those rows: 'pending' (never
-    retried) and 'abandoned' (explicitly given up on) rows must be left
-    alone. These tests pin the WHERE/SET clause shape via a mocked SQLAlchemy
+    dead-letter rows -- both 'retrying' (a retry that has now succeeded,
+    #249) and 'pending' (a failure nobody ever pressed Retry on, which a
+    later successful ingestion of the same document_id has superseded,
+    #287). 'abandoned' rows (an operator explicitly gave up) and already
+    -'resolved' rows must be left alone.
+
+    These tests pin the WHERE/SET clause shape via a mocked SQLAlchemy
     session rather than a live database.
     """
 
@@ -97,7 +101,7 @@ class TestResolveDeadLetterJobsForDocument:
         assert hasattr(DatabaseService, "resolve_dead_letter_jobs_for_document")
 
     @pytest.mark.asyncio
-    async def test_scopes_update_to_document_and_retrying_status(self):
+    async def test_scopes_update_to_document_and_unresolved_statuses(self):
         session = MagicMock()
         result = MagicMock()
         result.rowcount = 1
@@ -109,8 +113,8 @@ class TestResolveDeadLetterJobsForDocument:
         assert count == 1
         assert session.execute.call_count == 1
         # Inspect the compiled UPDATE statement to confirm it is scoped to
-        # this document_id AND status='retrying' -- NOT a blanket update of
-        # every row for the document (which would wrongly flip 'pending' and
+        # this document_id AND the two UNRESOLVED statuses -- NOT a blanket
+        # update of every row for the document (which would wrongly flip
         # 'abandoned' rows to 'resolved' too).
         #
         # Asserting only that the substrings "'retrying'" and "'resolved'"
@@ -121,20 +125,50 @@ class TestResolveDeadLetterJobsForDocument:
         # SET values and WHERE clause instead, which a swap cannot satisfy.
         stmt = session.execute.call_args[0][0]
 
-        # SET: status must be set to 'resolved' (not 'retrying').
+        # SET: status must be set to 'resolved' (not 'retrying'/'pending').
         assert stmt._values["status"].value == "resolved"
 
-        # WHERE: must match rows currently status='retrying' for this
+        # WHERE: must match rows currently 'pending' OR 'retrying' for this
         # document_id -- compiling the where-clause in isolation (rather
         # than the whole statement) means the string cannot accidentally
         # contain 'resolved' by leaking in from the SET clause.
         where_compiled = str(stmt.whereclause.compile(compile_kwargs={"literal_binds": True}))
         assert "dead_letter_jobs.document_id = 'doc-249'" in where_compiled
-        assert "dead_letter_jobs.status = 'retrying'" in where_compiled
+        assert "'retrying'" in where_compiled
+        # #287: a 'pending' row for a document that has since ingested
+        # successfully is factually resolved. Before this fix the default
+        # `GET /dead-letter` listing (status='pending') kept showing the
+        # document as broken forever, and Retry on that row would re-publish
+        # the stale payload over the now-healthy document.
+        assert "'pending'" in where_compiled
+
+    @pytest.mark.asyncio
+    async def test_does_not_touch_abandoned_or_already_resolved_rows(self):
+        """The widening in #287 stops at 'pending' -- it must not become a
+        blanket "resolve everything for this document_id".
+
+        'abandoned' encodes an explicit operator decision to stop working a
+        failure; flipping it to 'resolved' would erase that decision and
+        silently re-admit the row to the retry route's 409 guard
+        (`app.py`, which permits a retry only for 'pending'/'retrying').
+        """
+        session = MagicMock()
+        result = MagicMock()
+        result.rowcount = 0
+        session.execute.return_value = result
+
+        db = _db_with_session(session)
+        await db.resolve_dead_letter_jobs_for_document("doc-287")
+
+        stmt = session.execute.call_args[0][0]
+        where_compiled = str(stmt.whereclause.compile(compile_kwargs={"literal_binds": True}))
+        assert "abandoned" not in where_compiled
+        # Also guards the SET/WHERE swap: 'resolved' is the value being
+        # written, so it must never appear in the predicate.
         assert "resolved" not in where_compiled
 
     @pytest.mark.asyncio
-    async def test_returns_zero_when_nothing_was_retrying(self):
+    async def test_returns_zero_when_nothing_was_unresolved(self):
         session = MagicMock()
         result = MagicMock()
         result.rowcount = 0
@@ -153,6 +187,97 @@ class TestResolveDeadLetterJobsForDocument:
 
         with pytest.raises(RuntimeError, match="not connected"):
             await db.resolve_dead_letter_jobs_for_document("doc-1")
+
+
+class TestRetryGuardMatchesResolveScope:
+    """The retry route's 409 guard and the resolve scope must stay one set (#287).
+
+    This is the invariant that actually closes #287's stale-replay hole. The
+    workflow resolves a document's outstanding rows on success *so that* the
+    retry route then refuses to replay them: a resolved row is no longer in
+    the retriable set, so `POST /dead-letter/{id}/retry` 409s instead of
+    re-publishing the superseded payload over a healthy document.
+
+    If the two lists were maintained independently, widening one without the
+    other would silently reopen the hole -- with every unit test still
+    green, because each side is individually self-consistent. Reading both
+    from `DEAD_LETTER_UNRESOLVED_STATUSES` is what makes that drift
+    impossible; this test pins that they are in fact the same source.
+    """
+
+    def test_unresolved_statuses_constant_is_exactly_pending_and_retrying(self):
+        assert set(DatabaseService.DEAD_LETTER_UNRESOLVED_STATUSES) == {"pending", "retrying"}
+
+    @pytest.mark.parametrize(
+        "status,expected",
+        [
+            ("pending", 200),
+            ("retrying", 200),
+            # The #287 hazard, stated as behaviour: once the row is resolved
+            # (because the document was repaired another way), replaying it
+            # would re-ingest the stale payload over the healthy document.
+            ("resolved", 409),
+            ("abandoned", 409),
+        ],
+    )
+    def test_retry_route_admits_exactly_the_unresolved_statuses(self, status, expected):
+        """Drive the real route rather than inspecting `app.py`'s source.
+
+        A source-text assertion would go quietly green the moment anyone
+        reformatted the guard; this fails if the ACTUAL admitted set ever
+        stops matching `DEAD_LETTER_UNRESOLVED_STATUSES`.
+        """
+        mock_settings = MagicMock()
+        mock_settings.ingestion_api_key = "secret"
+        mock_settings.api_host = "127.0.0.1"
+        mock_settings.api_port = 8000
+        mock_settings.temporal_host = "localhost:7233"
+        mock_settings.temporal_namespace = "default"
+        mock_settings.temporal_task_queue = "document-ingestion"
+        mock_settings.log_level = "INFO"
+
+        job = {"id": 7, "document_id": "doc-287", "workspace_id": "ws-1", "status": status}
+
+        mock_db = MagicMock()
+        mock_db.increment_dead_letter_retry = AsyncMock(return_value=True)
+        mock_db.update_dead_letter_status = AsyncMock(return_value=True)
+
+        with (
+            patch("src.api.app.TemporalWorkerManager") as mock_mgr,
+            patch("src.api.auth.get_settings", return_value=mock_settings),
+            patch("src.temporal.shared_services.get_db_service", return_value=mock_db),
+            patch("src.api.app.resolve_owned_dead_letter_job", AsyncMock(return_value=job)),
+        ):
+            instance = mock_mgr.return_value
+            instance.start = AsyncMock()
+            instance.stop = AsyncMock()
+            instance.get_client = AsyncMock()
+            instance.is_running = True
+
+            from fastapi.testclient import TestClient
+
+            from src.api.app import create_app
+
+            app = create_app(mock_settings)
+            with TestClient(app) as client:
+                # Stubbed INSIDE the context manager: the lifespan runs on
+                # __enter__ and installs its own real trigger, which would
+                # overwrite anything set beforehand. The retry route
+                # re-publishes through app.state.trigger, so an admitted
+                # retry needs this to reach 200 rather than a transport error.
+                app.state.trigger = MagicMock()
+                app.state.trigger.trigger_workflow_async = AsyncMock(return_value="wf-287")
+                resp = client.post(
+                    "/dead-letter/7/retry",
+                    params={"workspace_id": "ws-1"},
+                    headers={"X-API-Key": "secret"},
+                )
+
+        assert resp.status_code == expected, (
+            f"retry of a {status!r} dead-letter job returned {resp.status_code}, "
+            f"expected {expected} -- the admitted set must stay exactly "
+            f"DEAD_LETTER_UNRESOLVED_STATUSES (#287); response: {resp.text}"
+        )
 
 
 class TestDeadLetterAPIRoutes:

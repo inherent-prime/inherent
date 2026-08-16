@@ -29,6 +29,7 @@ from src.api.ownership import (
     resolve_owned_document,
 )
 from src.config.settings import Settings
+from src.services.database import DatabaseService
 from src.services.metrics import get_metrics
 from src.temporal.models import (
     ChunkEditInput,
@@ -928,7 +929,13 @@ def create_app(settings: Settings) -> FastAPI:
         db_svc = shared_services.get_db_service()
         job = await resolve_owned_dead_letter_job(db_svc, job_id, workspace_id)
 
-        if job.get("status") not in ("pending", "retrying"):
+        # "Retriable" and "not yet resolved" are the SAME set, so both read it
+        # from one constant (#287). They have to agree: the workflow's success
+        # path resolves a document's outstanding rows precisely so that this
+        # guard then rejects a replay of the stale payload. If the two lists
+        # were maintained separately, widening one without the other would
+        # quietly reopen that hole.
+        if job.get("status") not in DatabaseService.DEAD_LETTER_UNRESOLVED_STATUSES:
             raise HTTPException(
                 status_code=409,
                 detail=f"Job {job_id} has status '{job.get('status')}', cannot retry",

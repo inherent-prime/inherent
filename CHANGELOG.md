@@ -5,6 +5,25 @@ All notable changes to Inherent are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Dead-letter rows left at `pending` for a document that later succeeded no
+  longer read as broken, and can no longer replay a stale payload (#287).**
+  #249 made a successful ingestion resolve that document's dead-letter rows,
+  but scoped the write to `status='retrying'` — so it never reached rows
+  nobody had pressed Retry on. Since `GET /dead-letter` **defaults to
+  `status=pending`**, those were exactly the rows the default listing shows: a
+  document repaired by re-uploading corrected content (same filename reuses
+  the original `document_id`, the #60 reindex-on-edit path) went on being
+  reported as broken forever. Pressing Retry on such a row was also still
+  accepted, re-publishing the *original failed* payload over the now-healthy
+  document — `supersede_running=False` is no defence, since nothing is in
+  flight by then. The resolve now covers both unresolved statuses
+  (`pending` and `retrying`); `abandoned` is still left alone, since it
+  records an explicit operator decision. The retry route's `409` guard now
+  reads the same `DEAD_LETTER_UNRESOLVED_STATUSES` constant as the resolve, so
+  the two cannot drift apart and silently reopen the replay hole.
+
 ### Added
 
 - **Evals: `POST /v1/evals/runs` accepts optional replay scoping, and

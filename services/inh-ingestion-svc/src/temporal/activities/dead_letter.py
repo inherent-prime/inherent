@@ -65,7 +65,7 @@ async def record_dead_letter(input: RecordDeadLetterInput) -> bool:
 
 @activity.defn
 async def resolve_dead_letter_jobs(input: ResolveDeadLetterJobsInput) -> int:
-    """Mark a document's outstanding 'retrying' dead-letter rows resolved (#249).
+    """Mark a document's outstanding dead-letter rows resolved (#249, #287).
 
     Delegates to ``DatabaseService.resolve_dead_letter_jobs_for_document``
     using the shared, already-connected database pool. Called from the
@@ -75,15 +75,16 @@ async def resolve_dead_letter_jobs(input: ResolveDeadLetterJobsInput) -> int:
     this closes the #249 gap (dead-letter rows previously never left
     status='retrying' after a successful retry).
 
-    Only rows currently in status='retrying' are touched (rows still
-    'pending' or already 'abandoned' are left alone) -- see the DB method's
-    docstring for the full reasoning.
+    Rows in EITHER unresolved status are touched -- 'retrying' (#249) and
+    'pending' (#287, a failure never retried but superseded by this
+    successful run). Only 'abandoned' rows are left alone -- see the DB
+    method's docstring for the full reasoning.
 
     Args:
         input: the document_id whose dead-letter rows to resolve.
 
     Returns:
-        Number of dead-letter rows resolved (0 if none were 'retrying').
+        Number of dead-letter rows resolved (0 if none were outstanding).
     """
     from src.temporal.shared_services import get_db_service
 

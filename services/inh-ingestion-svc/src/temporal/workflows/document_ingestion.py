@@ -212,8 +212,8 @@ class DocumentIngestionWorkflow:
             workflow.logger.warning("Failed to record dead-letter job (non-fatal)")
 
     async def _resolve_dead_letter_best_effort(self, document_id: str) -> None:
-        """Mark this document's outstanding 'retrying' dead-letter rows
-        resolved (best-effort). Called only from the workflow's SUCCESS path.
+        """Mark this document's outstanding dead-letter rows resolved
+        (best-effort). Called only from the workflow's SUCCESS path.
 
         #249: before this existed, nothing ever wrote status='resolved' to
         dead_letter_jobs -- a job whose retry fully succeeded (new workflow
@@ -221,9 +221,18 @@ class DocumentIngestionWorkflow:
         status='retrying' forever, indistinguishable from a retry still in
         flight or one that silently failed. Keyed on document_id (not a
         dead-letter job id) per the design: a successful ingestion of
-        document X genuinely resolves X's outstanding retried dead-letter
-        rows, and this avoids threading a job id through the re-published
-        message payload -- see ResolveDeadLetterJobsInput's docstring.
+        document X genuinely resolves X's outstanding dead-letter rows, and
+        this avoids threading a job id through the re-published message
+        payload -- see ResolveDeadLetterJobsInput's docstring.
+
+        #287 widened what "outstanding" means from 'retrying' alone to
+        'pending' as well. document_id is stable across a corrective
+        re-upload (same workspace + filename reuses the id even when the
+        bytes changed), so a 'pending' row from the ORIGINAL failure
+        describes a document THIS run has just repaired -- leaving it
+        pending kept the default dead-letter listing reporting a healthy
+        document as broken, and left its Retry button armed with a stale
+        payload.
 
         Temporal determinism: a workflow cannot touch the database directly,
         so this write is routed through an activity exactly like
@@ -237,7 +246,7 @@ class DocumentIngestionWorkflow:
         row resolved must never fail an otherwise-successful ingestion. It
         does not leave persistent state that CONTRADICTS the response (the
         document itself is genuinely processed either way); at worst a
-        dead-letter row stays at 'retrying' a little longer, which is the
+        dead-letter row stays unresolved a little longer, which is the
         pre-#249 status quo, not a regression.
         """
         try:
