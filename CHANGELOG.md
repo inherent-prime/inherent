@@ -7,6 +7,24 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Added
 
+- **Evals: `POST /v1/evals/runs` accepts optional replay scoping, and
+  `DELETE /v1/evals/events` an opt-in case purge (#250).** Run-replay was
+  unscoped — `start_run` and `execute_run` each independently selected *every*
+  active case for the workspace — so any caller expecting a run to reflect
+  only what it just promoted was fragile to promotion order and to how many
+  prior sessions had run against the same workspace. The request body now
+  takes optional `case_ids` and `since` filters, which AND together and are
+  threaded through *both* selection paths. Omitting the body is unchanged
+  behavior (replay everything active, ADR 0003's accumulate-over-time
+  default), so pre-#250 clients keep working. A `case_ids` entry that is
+  unknown or belongs to another workspace rejects the whole request with
+  `404` rather than being silently dropped (which would quietly narrow the
+  run) or silently honored (which would leak existence across tenants).
+  Separately, labeled cases previously accumulated forever with no supported
+  reset; `DELETE /v1/evals/events?include_cases=true` now also purges
+  `eval_cases`. The default stays `false`, preserving the documented "raw
+  events ephemeral, labeled cases durable" contract.
+
 - **Retrieval-eval baseline published on the docs site (#153).** The per-mode
   floor table already rendered into `README.md` (#158) is now also written to
   `docs/_generated/retrieval-baseline.md` by the same

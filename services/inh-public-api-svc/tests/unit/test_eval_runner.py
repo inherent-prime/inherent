@@ -1,6 +1,13 @@
 """Mode-comparison eval runs (evals v1): replay cases across all three modes,
-score with the promoted ranking metrics, aggregate per mode, survive failures."""
+score with the promoted ranking metrics, aggregate per mode, survive failures.
 
+Also covers optional run scoping (#250): ``case_ids`` / ``since`` narrow the
+replay set on BOTH the initial ``start_run`` fetch (used for the 409/case_count
+decision) and the executing ``execute_run`` fetch (used for the actual
+replay) — the issue this closes is that only one path was scoped. Omitting
+both keeps the unscoped, accumulate-over-time default (ADR 0003)."""
+
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -41,6 +48,42 @@ async def test_start_run_returns_none_without_cases():
 
 
 @pytest.mark.asyncio
+async def test_start_run_unscoped_fetches_all_active_cases():
+    """Regression guard: omitting case_ids/since keeps the default -- every
+    active case for the workspace, no extra filters passed to the DB layer."""
+    db = AsyncMock()
+    db.get_active_eval_cases.return_value = CASES
+    await start_run(db, workspace_id="ws-1")
+    db.get_active_eval_cases.assert_awaited_once_with(
+        workspace_id="ws-1", case_ids=None, since=None
+    )
+
+
+@pytest.mark.asyncio
+async def test_start_run_scopes_by_case_ids():
+    db = AsyncMock()
+    db.get_active_eval_cases.return_value = [CASES[0]]
+    run_id = await start_run(db, workspace_id="ws-1", case_ids=["case_1"])
+    assert run_id is not None
+    db.get_active_eval_cases.assert_awaited_once_with(
+        workspace_id="ws-1", case_ids=["case_1"], since=None
+    )
+    # case_count on the run row reflects only the scoped set, not everything.
+    assert db.insert_eval_run.call_args.kwargs["case_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_start_run_scopes_by_since():
+    db = AsyncMock()
+    db.get_active_eval_cases.return_value = CASES
+    since = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    await start_run(db, workspace_id="ws-1", since=since)
+    db.get_active_eval_cases.assert_awaited_once_with(
+        workspace_id="ws-1", case_ids=None, since=since
+    )
+
+
+@pytest.mark.asyncio
 async def test_execute_run_scores_all_modes_and_completes():
     db = AsyncMock()
     db.get_active_eval_cases.return_value = CASES
@@ -74,3 +117,52 @@ async def test_execute_run_never_raises_even_if_finish_fails():
     db.get_active_eval_cases.return_value = CASES
     db.finish_eval_run.side_effect = RuntimeError("db down")
     await execute_run(db, _search_service(), run_id="run_1", workspace_id="ws-1", user_id="u1")
+
+
+@pytest.mark.asyncio
+async def test_execute_run_unscoped_fetches_all_active_cases():
+    """Regression guard mirroring start_run: the default (no scoping args)
+    still replays every active case for the workspace."""
+    db = AsyncMock()
+    db.get_active_eval_cases.return_value = CASES
+    await execute_run(db, _search_service(), run_id="run_1", workspace_id="ws-1", user_id="u1")
+    db.get_active_eval_cases.assert_awaited_once_with(
+        workspace_id="ws-1", case_ids=None, since=None
+    )
+
+
+@pytest.mark.asyncio
+async def test_execute_run_scopes_by_case_ids():
+    """The executing path must honor the SAME scope as start_run (#250) --
+    scoping applied to only one of the two independent get_active_eval_cases
+    calls is exactly the bug this closes."""
+    db = AsyncMock()
+    db.get_active_eval_cases.return_value = [CASES[0]]
+    await execute_run(
+        db,
+        _search_service(),
+        run_id="run_1",
+        workspace_id="ws-1",
+        user_id="u1",
+        case_ids=["case_1"],
+    )
+    db.get_active_eval_cases.assert_awaited_once_with(
+        workspace_id="ws-1", case_ids=["case_1"], since=None
+    )
+    rows = db.insert_eval_run_results.call_args.kwargs["rows"]
+    # Only case_1's 3 mode rows -- case_2 must never have been replayed.
+    assert len(rows) == 3
+    assert all(r["case_id"] == "case_1" for r in rows)
+
+
+@pytest.mark.asyncio
+async def test_execute_run_scopes_by_since():
+    db = AsyncMock()
+    db.get_active_eval_cases.return_value = CASES
+    since = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    await execute_run(
+        db, _search_service(), run_id="run_1", workspace_id="ws-1", user_id="u1", since=since
+    )
+    db.get_active_eval_cases.assert_awaited_once_with(
+        workspace_id="ws-1", case_ids=None, since=since
+    )

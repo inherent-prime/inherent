@@ -4,7 +4,7 @@ event_id field (the feedback handle + external-eval join key)."""
 import pytest
 from pydantic import ValidationError
 
-from src.models.evals import FeedbackRequest, ModeMetrics, ScorecardResponse
+from src.models.evals import FeedbackRequest, ModeMetrics, ScorecardResponse, StartRunRequest
 from src.models.search import SearchResponse
 
 
@@ -40,3 +40,25 @@ def test_scorecard_minimal():
     )
     assert sc.low_confidence is True
     assert ModeMetrics(recall_at_k=1.0, mrr=1.0, ndcg_at_k=1.0).recall_at_k == 1.0
+
+
+def test_start_run_request_defaults_are_unscoped():
+    # Both fields optional and default to None -- backward compatible: a
+    # caller sending {} (or omitting the body) gets the original, unscoped
+    # replay-everything behavior (#250).
+    req = StartRunRequest()
+    assert req.case_ids is None
+    assert req.since is None
+
+
+def test_start_run_request_rejects_empty_case_ids_list():
+    # An explicit empty list is a malformed request, not "no scoping" --
+    # reject it rather than silently treating it the same as omitted/None.
+    with pytest.raises(ValidationError):
+        StartRunRequest(case_ids=[])
+
+
+def test_start_run_request_accepts_case_ids_and_since():
+    req = StartRunRequest(case_ids=["case_1", "case_2"], since="2026-08-01T00:00:00Z")
+    assert req.case_ids == ["case_1", "case_2"]
+    assert req.since is not None
