@@ -4,9 +4,8 @@ Guidance for working in this repository.
 - Consult the knowledge-graph `graphify-out/` when require context about the repo. If its not there, ask the user to build one.
 - Always thinks the end user as an AI agent, so always develop solutions that is performant and cost effective for the end user.
 - The Definition of Done is considered when all tests are passing and documentations is updated. 
-- Never mark any feature / bug complete unless unit tests are passing and documentation is updated
+- Never mark any feature / bug complete unless all tests are passing and documentation is updated
 - Always write internal developer documentation if needed in the `/project/dev/docs` folder and keep it updated
-- Read `.memory/index.md` at the start of a session — it carries current state, open threads and known sharp edges. See `.memory/README.md` for what belongs there and what must stay in `CHANGELOG.md` / `docs/adr/` / `docs/developer/learnings.md` instead.
 - If there is a major decision or change that has happened in the repository, add a dated one-line entry to `.memory/timeline/<YYYY-MM>.md`, refresh `.memory/index.md` if the current state changed, and update the `./docs` folder
 - Before commit always check if the code build, lint, tests and smoke tests are passing in local to save building time in Cloud
 - Whenever you commit some code, always make sure you write proper description of the change
@@ -17,7 +16,7 @@ Guidance for working in this repository.
 
 ## Mandatory Quality Gates (ALL agents must follow)
 
-Every agent — main or subagent — MUST complete these before marking work done or committing:
+Every agent — main or subagent — MUST complete these in local before marking work done or committing:
 
 1. **Unit Tests**: Write unit tests for every new feature or bug fix. No exceptions.
 2. **E2E Tests**: Check E2E whenver there is a major change with more than 5 files has changed or its a new feature altogether
@@ -25,30 +24,6 @@ Every agent — main or subagent — MUST complete these before marking work don
 4. **Sanity Check**: Run full test suite + type check to verify nothing is broken.
 5. **Smoke Test**: Always do smoke test in local before pushing to remote branch.
 6. **Root-cause CI flakes, don't theorize**: never ship a CI-flake fix on an unverified "prime suspect" — run the diagnostic before committing, and when the bug is a shared-helper timeout (e.g. a DB-clearing hook), grep every call site and fix them all, not just the one that failed
-
-## Branch Policy & Merge Gates
-
-`main` is the only protected branch (ruleset `main-protect`, id 16976743,
-`enforcement: active`, pattern `refs/heads/main`, `refs/heads/release*`). It
-blocks branch deletion and non-fast-forward pushes, requires linear history,
-runs `code_quality` and `copilot_code_review`, and gates merge on a
-`pull_request` rule: 0 required approvals (sole-maintainer repo — GitHub
-forbids self-approval, so the human gate is green checks + a human clicking
-merge), all review threads must be resolved, squash/rebase merge only. `dev`
-carries none of this — it is scratch space, not a PR target.
-
-Three lanes, by when they run and what they can block:
-
-| Lane | Runs on | Checks | Blocks |
-| --- | --- | --- | --- |
-| **PR-blocking** | every PR into `main` | `Required tests before merge` (`ci.yml`: lint, format, mypy, bandit, unit+contract tests, coverage floors — all three services); `E2E smoke` (`e2e-smoke.yml`: boots the Compose stack, runs `-m "smoke and compose"`, 6 tests, 40-min job timeout); `Conventions` (`conventions.yml`: requires a `CHANGELOG.md` entry when `services/**` changes and a `docs/` touch when API routers / the MCP tool registry / shared contracts change — skippable per-PR with the `no-changelog` / `no-docs-needed` labels) | merging the PR |
-| **Post-merge** | push to `main`, nightly cron, manual dispatch | `integration.yml`: full Compose suite, the retrieval-eval hard gate (tolerance derived from corpus resolution, #236 — see `docs/testing.md`), search + ingestion benchmarks, dead-letter recovery E2E, baseline ratchet and regression-alert jobs | nothing directly — it reports and files issues against code already on `main` |
-| **Release-only** | a final `vX.Y.Z` tag / manual dispatch | `publish.yml` (human-approved GHCR image publish) | cutting/publishing a release |
-
-The three PR-blocking checks above are the required-status-check *intent* for
-`main-protect`; their registration on the ruleset is a separate, later step
-— until then, treat a red `ci.yml` / `e2e-smoke.yml` / `conventions.yml` on a
-PR as blocking in practice even though GitHub isn't yet enforcing it for you.
 
 ## Ways of working
 
