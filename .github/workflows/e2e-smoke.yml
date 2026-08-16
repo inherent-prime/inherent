@@ -31,8 +31,53 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Docs-only / agent-notes-only PRs cannot break the ingest-to-search round
+  # trip this lane proves, so they should not pay its cost (a full Compose
+  # stack boot, up to the 40-minute budget below). "E2E smoke" (the job name
+  # below) is itself the registered required check, so this can't be a
+  # workflow-level `paths-ignore` -- that would leave the check unregistered
+  # and the PR stuck pending forever. Gating the job with `if:` instead keeps
+  # the workflow (and the check) always triggering; a job that evaluates its
+  # `if:` to false reports "skipped", which GitHub treats as a passing state
+  # for a required check.
+  changes:
+    name: Detect software-affecting changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      software: ${{ steps.filter.outputs.software }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed files
+        id: filter
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          git fetch origin "$BASE_REF"
+          git diff --name-only "origin/$BASE_REF...HEAD" > changed.txt
+          echo "Changed files:" && cat changed.txt
+
+          # Kept in sync with the identical filter in ci.yml's `changes` job:
+          # an allowlist of paths that cannot affect the running software
+          # system, not a denylist of what to run.
+          if grep -vqE '^(docs/|graphify-out/|\.memory/|\.superpowers/|\.remember/)|\.md$|^(LICENSE|CODEOWNERS|mkdocs\.yml|requirements-docs\.txt)$' changed.txt; then
+            echo "software=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "software=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::all changed files are docs/non-software paths -- skipping E2E smoke"
+          fi
+
   e2e-smoke:
     name: E2E smoke
+    needs: changes
+    # `!= 'false'` (not `== 'true'`) so a failed/skipped `changes` job fails
+    # open into running the smoke lane rather than silently skipping it.
+    if: needs.changes.outputs.software != 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:

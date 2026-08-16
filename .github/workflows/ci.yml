@@ -21,9 +21,64 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Docs-only / agent-notes-only PRs (README, docs/, AGENTS.md, .memory/, ...)
+  # cannot break the service matrix below, so they should not pay its cost
+  # (Postgres service container + lint/format/typecheck/security/test/coverage
+  # x3 services). A workflow-level `paths-ignore` would be the obvious fix, but
+  # `service-checks`/`root-tests` are not themselves the registered required
+  # check -- "Required tests before merge" is -- and skipping this workflow at
+  # the trigger level would leave THAT check unregistered and the PR stuck
+  # pending forever. Skipping at the job level instead keeps the workflow
+  # (and the required check it produces) always triggering; a job that
+  # evaluates its `if:` to false reports "skipped", which GitHub treats as a
+  # passing state for a required check. `required-tests` below tolerates
+  # "skipped" from both dependants for the same reason.
+  changes:
+    name: Detect software-affecting changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Push-to-main always runs the full suite -- see the concurrency comment
+    # above ("main's CI history is the merge-gate record for each commit").
+    # Skipping is a pull_request-only optimization.
+    if: github.event_name == 'pull_request'
+    outputs:
+      software: ${{ steps.filter.outputs.software }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed files
+        id: filter
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          git fetch origin "$BASE_REF"
+          git diff --name-only "origin/$BASE_REF...HEAD" > changed.txt
+          echo "Changed files:" && cat changed.txt
+
+          # An allowlist of paths that cannot affect the running software
+          # system (docs content, standalone repo docs, agent/tooling notes),
+          # not a denylist of what to run -- so a new top-level path defaults
+          # to running the full suite rather than silently skipping it.
+          # Kept in sync with the identical filter in e2e-smoke.yml.
+          if grep -vqE '^(docs/|graphify-out/|\.memory/|\.superpowers/|\.remember/)|\.md$|^(LICENSE|CODEOWNERS|mkdocs\.yml|requirements-docs\.txt)$' changed.txt; then
+            echo "software=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "software=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::all changed files are docs/non-software paths -- skipping service-checks and root-tests"
+          fi
+
   service-checks:
     name: ${{ matrix.service }} checks
     runs-on: ubuntu-latest
+    needs: changes
+    # `!= 'false'` (not `== 'true'`) so a skipped/failed `changes` job (e.g. a
+    # transient git-fetch error) fails open into running the full suite
+    # rather than silently skipping it.
+    if: needs.changes.outputs.software != 'false'
     # A hung Postgres service container or a wedged pytest must not hold a
     # required merge gate "pending" for the runner's 6h default.
     timeout-minutes: 30
@@ -214,6 +269,8 @@ jobs:
   root-tests:
     name: root tests/ (repo-level pins)
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.software != 'false'
     # These tests read repo files with stdlib pathlib and run in seconds; the
     # only plausible way to exceed this is a wedged `uvx` resolve.
     timeout-minutes: 10
@@ -261,16 +318,24 @@ jobs:
       - root-tests
     if: always()
     steps:
+      # "skipped" is an accepted outcome alongside "success": both dependants
+      # carry `if: needs.changes.outputs.software != 'false'`, so a docs-only
+      # PR skips them deliberately (see the `changes` job above) rather than
+      # failing.
       - name: Verify service checks passed
         run: |
-          if [ "${{ needs.service-checks.result }}" != "success" ]; then
+          if [ "${{ needs.service-checks.result }}" != "success" ] && [ "${{ needs.service-checks.result }}" != "skipped" ]; then
             echo "::error::One or more service checks failed. Do not merge until CI is green."
             exit 1
           fi
 
-          if [ "${{ needs.root-tests.result }}" != "success" ]; then
+          if [ "${{ needs.root-tests.result }}" != "success" ] && [ "${{ needs.root-tests.result }}" != "skipped" ]; then
             echo "::error::Root-level tests/ failed. Do not merge until CI is green."
             exit 1
           fi
 
-          echo "All service checks passed."
+          if [ "${{ needs.service-checks.result }}" = "skipped" ]; then
+            echo "Service checks skipped -- PR touches only docs/non-software paths."
+          else
+            echo "All service checks passed."
+          fi
