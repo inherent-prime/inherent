@@ -23,7 +23,10 @@ All notable changes to Inherent are documented here. The format follows
   Separately, labeled cases previously accumulated forever with no supported
   reset; `DELETE /v1/evals/events?include_cases=true` now also purges
   `eval_cases`. The default stays `false`, preserving the documented "raw
-  events ephemeral, labeled cases durable" contract.
+  events ephemeral, labeled cases durable" contract. Note the purge covers
+  captured events and labeled cases only — `eval_feedback`, `eval_runs` and
+  `eval_run_results` survive it, so a scorecard can still report a completed
+  last run against zero cases.
 
 - **Retrieval-eval baseline published on the docs site (#153).** The per-mode
   floor table already rendered into `README.md` (#158) is now also written to

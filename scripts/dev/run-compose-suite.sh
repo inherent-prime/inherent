@@ -46,16 +46,19 @@ trap 'rm -f "$REPORT"' EXIT
 ( cd "$SERVICE_DIR" && uv run pytest -m "$MARKER_EXPR" --junitxml="$REPORT" )
 pytest_exit=$?
 
-# Pull `tests="N"` / `skipped="N"` off the <testsuite> element. Regex over
-# the raw JUnit XML rather than an XML parser: this is a two-attribute read
-# on a single well-known tag, and the root suite (this script's caller,
-# `tests/`) deliberately carries no project/dependencies of its own to
-# import one for (see docs/testing.md and test_ci_schema_fidelity.py's
-# docstring for the same house convention).
-tests=$(grep -o '<testsuite [^>]*' "$REPORT" | grep -o 'tests="[0-9]*"' | head -1 | grep -o '[0-9]*')
-skipped=$(grep -o '<testsuite [^>]*' "$REPORT" | grep -o 'skipped="[0-9]*"' | head -1 | grep -o '[0-9]*')
-tests=${tests:-0}
-skipped=${skipped:-0}
+# Pull `tests="N"` / `skipped="N"` off EVERY <testsuite> element and SUM
+# them -- a JUnit report can carry more than one <testsuite> (e.g. a suite
+# split by xdist worker, or a future multi-service run), and reading only
+# the first one under-counts `tests` and `executed` for every suite after
+# it. Regex over the raw JUnit XML rather than an XML parser: this is a
+# two-attribute read on a single well-known tag, and the root suite (this
+# script's caller, `tests/`) deliberately carries no project/dependencies of
+# its own to import one for (see docs/testing.md and
+# test_ci_schema_fidelity.py's docstring for the same house convention).
+# `<testsuite ` (trailing space) deliberately does not match the outer
+# `<testsuites>` wrapper element.
+tests=$(grep -o '<testsuite [^>]*' "$REPORT" | awk -F'"' '{for (i = 1; i <= NF; i++) if ($i ~ /tests=$/) sum += $(i + 1)} END {print sum + 0}')
+skipped=$(grep -o '<testsuite [^>]*' "$REPORT" | awk -F'"' '{for (i = 1; i <= NF; i++) if ($i ~ /skipped=$/) sum += $(i + 1)} END {print sum + 0}')
 executed=$((tests - skipped))
 
 if [ "$executed" -le 0 ]; then

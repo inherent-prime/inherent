@@ -218,8 +218,11 @@ async def delete_events(
                 "Also purge the workspace's labeled eval_cases (#250). Default "
                 "False preserves the documented contract: raw captured events "
                 "are ephemeral, promoted eval cases are durable and survive "
-                "this purge. Pass true for an explicit, opt-in full reset of "
-                "the workspace's evals flywheel."
+                "this purge. Pass true to additionally purge captured events "
+                "and labeled cases -- run history (eval_runs, "
+                "eval_run_results) and eval_feedback are left intact, so a "
+                "scorecard can still report a completed run against zero "
+                "cases afterward."
             )
         ),
     ] = False,

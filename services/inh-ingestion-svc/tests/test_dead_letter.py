@@ -112,12 +112,26 @@ class TestResolveDeadLetterJobsForDocument:
         # this document_id AND status='retrying' -- NOT a blanket update of
         # every row for the document (which would wrongly flip 'pending' and
         # 'abandoned' rows to 'resolved' too).
+        #
+        # Asserting only that the substrings "'retrying'" and "'resolved'"
+        # both appear *somewhere* in the compiled statement is satisfied
+        # just as well by a SET/WHERE swap (SET status='retrying' ... WHERE
+        # status='resolved') as by the correct statement -- it does not pin
+        # which clause each value lives in. Assert on the statement's own
+        # SET values and WHERE clause instead, which a swap cannot satisfy.
         stmt = session.execute.call_args[0][0]
-        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
-        assert "dead_letter_jobs" in compiled
-        assert "'retrying'" in compiled
-        assert "'resolved'" in compiled
-        assert "'doc-249'" in compiled
+
+        # SET: status must be set to 'resolved' (not 'retrying').
+        assert stmt._values["status"].value == "resolved"
+
+        # WHERE: must match rows currently status='retrying' for this
+        # document_id -- compiling the where-clause in isolation (rather
+        # than the whole statement) means the string cannot accidentally
+        # contain 'resolved' by leaking in from the SET clause.
+        where_compiled = str(stmt.whereclause.compile(compile_kwargs={"literal_binds": True}))
+        assert "dead_letter_jobs.document_id = 'doc-249'" in where_compiled
+        assert "dead_letter_jobs.status = 'retrying'" in where_compiled
+        assert "resolved" not in where_compiled
 
     @pytest.mark.asyncio
     async def test_returns_zero_when_nothing_was_retrying(self):

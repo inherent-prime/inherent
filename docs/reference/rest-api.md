@@ -133,9 +133,13 @@ curl -X POST -H "X-API-Key: $KEY" -H "X-Workspace-Id: $WS" \
 endpoint only purges `eval_query_events` (raw, ephemeral search capture) —
 promoted `eval_cases` are durable by design and survive the purge, matching
 ADR 0003's "raw events ephemeral, labeled cases durable" contract. Passing
-`include_cases=true` additionally deletes the workspace's `eval_cases`; this
-is an explicit, opt-in full reset (there is no supported way to purge cases
-without also purging events). Response: `{"deleted": <events>, "cases_deleted": <cases, 0 unless include_cases=true>}`.
+`include_cases=true` additionally deletes the workspace's `eval_cases`
+(there is no supported way to purge cases without also purging events).
+This purges captured events and labeled cases only -- `eval_feedback`,
+`eval_runs`, and `eval_run_results` (run history) are left intact, so a
+scorecard can report `eval_case_count: 0` next to a completed prior run
+after the purge; it is not a full reset of the workspace's evals data.
+Response: `{"deleted": <events>, "cases_deleted": <cases, 0 unless include_cases=true>}`.
 
 ## Rate limiting
 

@@ -39,18 +39,35 @@ WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 # a glance in the rendered summary.
 SUCCESS_CLAIM_RE = re.compile(r"checks?\s+passed|:white_check_mark:|✅", re.IGNORECASE)
 
-# A step's `run:` body counts as "branching on failure" (i.e. it is capable of
-# emitting a truthful failure-path message) if it contains any of these. This
-# is intentionally broad: it must recognize both a single self-branching step
-# (an `if/else` inside one `run:` block, e.g. keyed off `${{ job.status }}`)
-# and a dedicated sibling step gated on `failure()`.
-FAILURE_BRANCH_RE = re.compile(
-    r"exit 1|::error::|\bfailure\b|\bfailed\b|:x:|❌", re.IGNORECASE
+# A step's `run:` body counts as "branching on failure" only if it contains a
+# REAL conditional token, not merely the word "failure"/"failed" appearing
+# anywhere (a plain-string echo or an adjacent comment can say "failed"
+# without the step doing anything conditional -- that is precisely the #205
+# bug shape, and a bare word match would let it slip past this guard, R3).
+# `job.status` / `steps.*.outcome` / `failure()` are the GitHub Actions
+# expressions that actually read the job's/a step's outcome; `exit 1` /
+# `::error::` / `:x:` / an if/else pair are shell-level evidence of an actual
+# branch. Recognizing both a single self-branching step (`if`/`else` inside
+# one `run:` block, e.g. keyed off `${{ job.status }}`) and a dedicated
+# sibling step gated on `failure()` is intentional.
+CONDITIONAL_TOKEN_RE = re.compile(
+    r"job\.status|steps\.[^\s{}]+\.outcome|failure\(\)|exit 1|::error::|:x:|❌",
+    re.IGNORECASE,
 )
+IF_ELSE_PAIR_RE = re.compile(r"\bif\b.*\belse\b", re.IGNORECASE | re.DOTALL)
 
 JOB_HEADER_RE = re.compile(r"^  ([a-zA-Z0-9_-]+):\s*$", re.MULTILINE)
 STEP_HEADER_RE = re.compile(r"^      - name: (.+)$", re.MULTILINE)
 IF_RE = re.compile(r"^\s*if: (.+)$", re.MULTILINE)
+
+# A step's block (see `_steps`) is sliced from its own `- name:` header to
+# the START of the next step's header, so a YAML comment sitting BETWEEN two
+# steps -- which describes the step that FOLLOWS it -- lexically lands at
+# the TAIL of the PRECEDING step's slice instead (R3). Such comments sit at
+# the same 6-space, step-list-item indent as `- name:` itself; genuine shell
+# comments inside a `run: |` script are indented to the script's own column
+# (8+ spaces), so stripping only this exact indent is safe.
+_STEP_LEVEL_COMMENT_RE = re.compile(r"^      #.*$")
 
 
 def _all_workflows() -> list[Path]:
@@ -72,13 +89,25 @@ class Step:
         header = block[:header_end]
         cond_match = IF_RE.search(header)
         self.condition = cond_match.group(1).strip() if cond_match else ""
-        self.run_body = block[header_end:]
+        self.run_body = self._strip_trailing_next_step_comment(block[header_end:])
+
+    @staticmethod
+    def _strip_trailing_next_step_comment(run_body: str) -> str:
+        """Drop step-list-level comment lines misattributed to this step's
+        tail (see `_STEP_LEVEL_COMMENT_RE` docstring above) -- they lexically
+        sit inside this slice but describe the NEXT step, not this one."""
+        lines = run_body.splitlines(keepends=True)
+        while lines and (lines[-1].strip() == "" or _STEP_LEVEL_COMMENT_RE.match(lines[-1])):
+            lines.pop()
+        return "".join(lines)
 
     def claims_success(self) -> bool:
         return bool(SUCCESS_CLAIM_RE.search(self.run_body))
 
     def branches_on_failure(self) -> bool:
-        return bool(FAILURE_BRANCH_RE.search(self.run_body))
+        if CONDITIONAL_TOKEN_RE.search(self.run_body):
+            return True
+        return bool(IF_ELSE_PAIR_RE.search(self.run_body))
 
 
 def _job_blocks(text: str) -> dict[str, str]:
