@@ -1,7 +1,9 @@
-"""E2E test configuration and fixtures.
+"""App-flow test configuration and fixtures.
 
-Provides a fully mocked FastAPI app with httpx.AsyncClient for end-to-end
-API testing without real database or search service connections.
+In-process app-flow tests with mocked dependencies. NOT end-to-end -- live
+E2E lives in tests/integration/test_compose_*.py. Provides a fully mocked
+FastAPI app with httpx.AsyncClient for exercising API request/response flow
+without real database or search service connections.
 """
 
 from datetime import datetime, timedelta, timezone

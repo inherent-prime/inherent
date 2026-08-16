@@ -6,29 +6,55 @@ on:
     branches:
       - main
 
+# Least privilege: every job here only reads the checked-out tree (the
+# per-job summaries go to $GITHUB_STEP_SUMMARY, not to the API), so the
+# workflow token never needs write access to contents, issues or checks.
+permissions:
+  contents: read
+
+# One in-flight CI run per PR (or per branch on push). Superseded PR runs are
+# cancelled so a rapid push sequence does not queue N redundant matrices;
+# push-to-main runs are NOT cancelled, because `main`'s CI history is the
+# merge-gate record for each commit.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   service-checks:
     name: ${{ matrix.service }} checks
     runs-on: ubuntu-latest
+    # A hung Postgres service container or a wedged pytest must not hold a
+    # required merge gate "pending" for the runner's 6h default.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         # cov_fail_under is the OVERALL per-service coverage floor enforced in
         # the Test step (each service's pyproject addopts already adds --cov).
-        # Values are intentionally conservative so CI stays green today; they
-        # should be ratcheted UP over time. Per-core-module floors are enforced
-        # in the "Enforce per-core-module coverage floors" step below and should
-        # also ratchet UP over time -- see that step for the modules and floors.
+        # Floors track actual coverage minus a 1-point buffer (floor(actual) -
+        # 1) so run-to-run jitter (e.g. conditional imports) doesn't flake the
+        # gate, and are raised whenever measured coverage improves -- they are
+        # NEVER lowered. Per-core-module floors are enforced in the "Enforce
+        # per-core-module coverage floors" step below and follow the same
+        # policy -- see that step for the modules and floors.
         include:
           - service: inh-ingestion-svc
             path: services/inh-ingestion-svc
             python-version: "3.11"
             lint: uv run ruff check src tests
             format: uv run black --check src tests
-            typecheck: ""
-            security: ""
+            # mypy/bandit previously ran for public-api ONLY, so the largest
+            # of the three services had no type or security signal at all.
+            # The bandit invocation is byte-identical across all three so the
+            # severity floor cannot differ between them. The findings that
+            # were baselined to land this green are tracked in #247.
+            typecheck: uv run mypy src
+            security: uv run bandit -c pyproject.toml -r src
             test: uv run pytest
-            cov_fail_under: 40
+            # Actual measured on CI run 31661196233 (main@bc6d56b): 83.35%.
+            # floor(83.35) - 1 = 82.
+            cov_fail_under: 82
           - service: inh-public-api-svc
             path: services/inh-public-api-svc
             python-version: "3.11"
@@ -37,7 +63,9 @@ jobs:
             typecheck: uv run mypy src
             security: uv run bandit -c pyproject.toml -r src
             test: uv run pytest
-            cov_fail_under: 45
+            # Actual measured on CI run 31661196233 (main@bc6d56b): 85.36%.
+            # floor(85.36) - 1 = 84.
+            cov_fail_under: 84
           # inh-contracts previously ran in NO automation (#132 item 4): a
           # change to a shared constant like DEFAULT_S3_REGION or the
           # Weaviate-naming derivation was caught by nothing, only a
@@ -47,10 +75,15 @@ jobs:
             python-version: "3.11"
             lint: uv run ruff check src tests
             format: uv run black --check src tests
-            typecheck: ""
-            security: ""
+            # Clean under both today, with no baselined findings -- this is
+            # the shared package every service imports, so it is the one
+            # place a type or security regression propagates everywhere.
+            typecheck: uv run mypy src
+            security: uv run bandit -c pyproject.toml -r src
             test: uv run pytest
-            cov_fail_under: 95
+            # Actual measured on CI run 31661196233 (main@bc6d56b): 99.53%.
+            # floor(99.53) - 1 = 98.
+            cov_fail_under: 98
 
     services:
       postgres:
@@ -88,6 +121,28 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen --extra dev --group dev
 
+      # inh-ingestion-svc's tests exercise real constraints (e.g.
+      # fk_workspace_tenant, added by migration 012) that only the raw SQL
+      # migrations create -- DatabaseService.ensure_schema()'s SQLAlchemy
+      # metadata.create_all() does not declare them. Without this step CI's
+      # Postgres schema structurally lacked constraints that dev/staging/prod
+      # all have (provisioned via docker-compose.yml's postgres-init service
+      # or the in-image `SERVICE_MODE=migrate` runner), so any test relying on
+      # a migration-only constraint passed in CI regardless of whether it
+      # actually held. Apply every migration in the same filename order those
+      # two mirror (scripts/migrations/NNN_*.sql, ascending), failing loudly
+      # (set -e + ON_ERROR_STOP=1) on the first error.
+      - name: Apply DB migrations (ingestion schema fidelity)
+        if: ${{ matrix.service == 'inh-ingestion-svc' }}
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          for migration in scripts/migrations/*.sql; do
+            echo "Applying $migration"
+            psql -h localhost -U postgres -d knowledge_base -v ON_ERROR_STOP=1 -f "$migration"
+          done
+
       - name: Lint
         run: ${{ matrix.lint }}
 
@@ -110,26 +165,28 @@ jobs:
 
       # Risk-based per-core-module coverage floors (#38). The Test step above
       # writes a .coverage file (pyproject addopts adds --cov); here we re-read
-      # it and enforce a floor for each high-risk core module. Floors are set
-      # at-or-BELOW currently measured coverage so CI stays green today -- they
-      # are a RATCHET: raise each --fail-under over time as the module gains
-      # tests. Per-module CI coverage is >= the values measured locally because
-      # CI provides Postgres (some tests skip locally without it).
+      # it and enforce a floor for each high-risk core module. POLICY: each
+      # floor tracks floor(actual) - 1 (a 1-point buffer absorbs run-to-run
+      # jitter, e.g. conditional imports) and is raised whenever measured
+      # coverage improves -- floors are NEVER lowered. Per-module CI coverage
+      # is >= the values measured locally because CI provides Postgres (some
+      # tests skip locally without it); the values below are sourced from CI
+      # run 31661196233 (main@bc6d56b, 2026-08-13).
       - name: Enforce per-core-module coverage floors (public-api)
         if: ${{ matrix.service == 'inh-public-api-svc' }}
         run: |
-          uv run coverage report --include='src/services/auth.py' --fail-under=85
-          uv run coverage report --include='src/services/search.py' --fail-under=60
-          uv run coverage report --include='src/services/verify.py' --fail-under=95
-          uv run coverage report --include='src/services/quality_gate.py' --fail-under=95
+          uv run coverage report --include='src/services/auth.py' --fail-under=92
+          uv run coverage report --include='src/services/search.py' --fail-under=87
+          uv run coverage report --include='src/services/verify.py' --fail-under=99
+          uv run coverage report --include='src/services/quality_gate.py' --fail-under=99
 
       - name: Enforce per-core-module coverage floors (ingestion)
         if: ${{ matrix.service == 'inh-ingestion-svc' }}
         run: |
-          uv run coverage report --include='src/services/quality.py' --fail-under=95
-          uv run coverage report --include='src/temporal/activities/extract.py' --fail-under=70
-          uv run coverage report --include='src/temporal/activities/store.py' --fail-under=35
-          uv run coverage report --include='src/temporal/activities/chunk.py' --fail-under=90
+          uv run coverage report --include='src/services/quality.py' --fail-under=99
+          uv run coverage report --include='src/temporal/activities/extract.py' --fail-under=91
+          uv run coverage report --include='src/temporal/activities/store.py' --fail-under=71
+          uv run coverage report --include='src/temporal/activities/chunk.py' --fail-under=91
 
       - name: Report check summary
         if: always()
@@ -145,6 +202,9 @@ jobs:
   root-tests:
     name: root tests/ (repo-level pins)
     runs-on: ubuntu-latest
+    # These tests read repo files with stdlib pathlib and run in seconds; the
+    # only plausible way to exceed this is a wedged `uvx` resolve.
+    timeout-minutes: 10
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -174,6 +234,9 @@ jobs:
   required-tests:
     name: Required tests before merge
     runs-on: ubuntu-latest
+    # This job is the required status check, so it must always reach a
+    # terminal state rather than sitting pending behind a stuck dependency.
+    timeout-minutes: 30
     needs:
       - service-checks
       - root-tests

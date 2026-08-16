@@ -132,3 +132,82 @@ dependency.**
   scheduled runs and alerting; a CLI/CI gate (thin client over the REST API);
   Phoenix dataset export and OTel/OpenInference instrumentation; synthetic
   question generation. These are additive and do not change the boundary above.
+
+## Amendment (2026-08-12): gate tolerance derived from corpus resolution (#236)
+
+The v2 CLI/CI gate this ADR deferred (implemented in #139, see
+`docs/adr/0004-per-document-diversification.md`'s 2026-08-12 amendment for
+the incident that surfaced this) compared each per-mode metric to the
+committed baseline with a single fixed `EVAL_GATE_TOLERANCE` (`0.02`). That
+fixed value did not account for the golden corpus's size: with `n` gated
+queries, the smallest possible move a *single* query's rank change can
+produce in a pooled metric is a function of `n`, not a constant, and at the
+corpus's size that step already exceeds `0.02`.
+
+**What happened (#236, first hit as #237).** With `n = 13` gated queries, one
+golden query's judged-relevant document slipping from rank 1 to rank 2 in
+keyword mode moved pooled `keyword.mrr` by exactly `0.5 / 13 ≈ 0.0385` —
+already above the `0.02` tolerance. The gate hard-failed a run where eight of
+nine other gated metrics were flat or improved, on the ninth being *below its
+own measurement resolution*, not because retrieval regressed. This repeated
+on ~5 of the last 7 nightly runs and once blocked `main` for three days
+before a manual baseline re-seed unblocked it (see
+`corpus/retrieval_baseline.json`'s `_comment`).
+
+**The fix.** `EVAL_GATE_TOLERANCE` is now a *floor*, not the tolerance
+itself. The effective, per-metric tolerance the gate enforces is:
+
+```
+effective_tolerance(metric, n) = max(EVAL_GATE_TOLERANCE, min_detectable_delta(metric, n))
+```
+
+where `min_detectable_delta` is the smallest single-query step for that
+metric family (`0.5/n` for MRR — a rank-1-to-2 move; `1/n` for recall@k — one
+relevant document gained or lost; `(1 - 1/log2(3))/n` for nDCG@k — a top-2
+swap), averaged over `n`, the number of gated golden queries (every query
+except `category == "abstention"`, matching the exclusion the pooled
+averages already apply). Implemented in `tests/evals/eval_gate.py`
+(`min_detectable_delta`, `effective_tolerance`), wired into
+`test_compose_retrieval_regression.py`'s gate assertion and the `check` CLI
+subcommand (`--num-queries`/`--qrels`); see `docs/testing.md`'s "Tolerance is
+derived from corpus resolution" section for the full derivation and the
+CLI/CI precedence rule.
+
+### What this amendment does and does not change
+
+- Changes: the gate's tolerance is now per-metric and derived from `n`
+  instead of one fixed constant; `EVAL_GATE_TOLERANCE`'s role narrows to a
+  floor under that derivation (its default value, `0.02`, and its meaning as
+  a lower bound, are unchanged).
+- Does not change: the ratchet policy (`max(current, baseline)`, never
+  down), the absolute `RETRIEVAL_MIN_RECALL5` backstop, or the golden
+  corpus/qrels themselves.
+- Does not retroactively excuse a real regression: a metric still fails the
+  gate the moment it drops by more than what a single query's rank change
+  could plausibly explain at the corpus's current size. Growing the corpus
+  (more gated queries) tightens the derived tolerance over time — the fix
+  is a floor on precision the corpus can support today, not a permanent
+  loosening.
+
+### The honest cost: a wider silent-pass window today
+
+Deriving the tolerance from resolution also widens what the gate lets
+through without complaint. At the corpus's current size (`n = 13`),
+`recall@5`'s derived tolerance is `1 / 13 ≈ 0.0769` — **a real recall
+regression of up to ~7.7 percentage points on a single query can now pass
+the gate silently**, more than 3.5x the old fixed `0.02` (2 points). That is
+not a new failure mode this amendment invents: it is the same
+one-query-of-resolution noise the `mrr`/`0.0385` case above already
+demonstrated, sized for `recall@5`'s coarser step (binary hit/miss per
+query, not a rank-weighted score). Making it explicit here rather than only
+in `docs/testing.md` is deliberate — accepting a wider pass window is the
+actual shape of the trade this amendment makes, not a side effect to
+discover later.
+
+`min_detectable_delta(metric, n)` is `O(1/n)`, so this is a shrinking cost,
+not a fixed one: doubling the gated golden-query count from 13 to 26 halves
+every metric's derived tolerance, including `recall@5`'s back down to
+`~0.0385`. Growing `corpus/qrels.jsonl` is therefore not just "nice to have"
+for eval coverage generally — it is the direct, quantified lever that
+tightens this gate's precision, and should be read as a standing incentive
+this amendment creates rather than a one-time trade to forget about.

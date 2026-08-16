@@ -261,6 +261,61 @@ class TestIngestTrigger:
         assert resp.status_code == 500
         assert "Workflow cancelled" in resp.json()["detail"]
 
+    def test_wait_true_document_ingestion_failed_returns_200_success_false(
+        self, client: TestClient
+    ):
+        """#230: terminal document failure raises ApplicationError so Temporal
+        status is Failed; wait=true still returns structured success=False."""
+        from temporalio.client import WorkflowFailureError
+        from temporalio.exceptions import ApplicationError
+
+        from src.temporal.document_failure import DOCUMENT_INGESTION_FAILED_TYPE
+
+        client._mock_handle.result = AsyncMock(
+            side_effect=WorkflowFailureError(
+                cause=ApplicationError(
+                    "Weaviate storage failed: activity StartToClose timeout",
+                    type=DOCUMENT_INGESTION_FAILED_TYPE,
+                    non_retryable=True,
+                )
+            )
+        )
+
+        resp = client.post(
+            "/ingest?wait=true",
+            json=_INGEST_PAYLOAD,
+            headers={"X-API-Key": VALID_API_KEY},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["success"] is False
+        assert "Weaviate storage failed" in data["error"]
+        assert data["document_id"] == "doc_001"
+
+    def test_wait_true_other_application_error_returns_500(self, client: TestClient):
+        """Only DocumentIngestionFailed maps to 200 success=False; other
+        ApplicationError types remain unexpected failures (#230)."""
+        from temporalio.client import WorkflowFailureError
+        from temporalio.exceptions import ApplicationError
+
+        client._mock_handle.result = AsyncMock(
+            side_effect=WorkflowFailureError(
+                cause=ApplicationError(
+                    "something else failed",
+                    type="SomeOtherFailure",
+                    non_retryable=True,
+                )
+            )
+        )
+
+        resp = client.post(
+            "/ingest?wait=true",
+            json=_INGEST_PAYLOAD,
+            headers={"X-API-Key": VALID_API_KEY},
+        )
+        assert resp.status_code == 500
+        assert "something else failed" in resp.json()["detail"]
+
     def test_rejects_invalid_payload(self, client: TestClient):
         resp = client.post(
             "/ingest",

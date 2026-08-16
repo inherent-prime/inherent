@@ -71,6 +71,14 @@ def _search(client: httpx.Client) -> dict:
     return resp.json()
 
 
+# The one test that must pass before any PR merges (.github/workflows/
+# e2e-smoke.yml, `-m "smoke and compose"`). It is the shortest path that still
+# proves the whole stack is wired: upload through the public API, the Temporal
+# worker extracts/chunks/embeds, and search returns the document from Weaviate.
+# The other roundtrip variants below stay full-lane -- they cover behavior on
+# top of this path, so they add runtime to the merge gate without adding
+# "is the stack alive" signal.
+@pytest.mark.smoke
 def test_ingestion_to_search_roundtrip(client: httpx.Client) -> None:
     assert SAMPLE_DOC.exists(), f"fixture missing: {SAMPLE_DOC}"
 

@@ -29,7 +29,7 @@ on:
     branches:
       - main
     # The ratchet job below (see "Ratchet baseline + append history + open
-    # PR") only ever touches these three files, then auto-merges its own PR --
+    # PR") only ever touches these files, then auto-merges its own PR --
     # a push to main. Without this exclusion, that merge re-triggers this
     # workflow, which appends a new history line (new timestamp, so the
     # commit is never a no-op) and opens+auto-merges another PR, forever:
@@ -37,14 +37,18 @@ on:
     # Compose job below (#146 cross-review finding).
     #
     # README.md is on this list because the ratchet job also regenerates the
-    # published baseline table in it (#158). Excluding it costs nothing else:
-    # a README-only edit has no bearing on a Compose e2e run, and a README
-    # edit bundled with a service change still triggers the workflow (paths-
-    # ignore skips a run only when EVERY changed file matches).
+    # published baseline table in it (#158). The docs snippet is here for the
+    # same reason (#153): it is a pure function of the baseline, so a ratchet
+    # that moves a metric rewrites it in the same commit. Excluding either
+    # costs nothing else: a README-only or snippet-only edit has no bearing
+    # on a Compose e2e run, and an edit bundled with a service change still
+    # triggers the workflow (paths-ignore skips a run only when EVERY
+    # changed file matches).
     paths-ignore:
       - "services/inh-public-api-svc/tests/evals/corpus/retrieval_baseline.json"
       - "services/inh-public-api-svc/tests/evals/corpus/retrieval_history.jsonl"
       - "README.md"
+      - "docs/_generated/retrieval-baseline.md"
   schedule:
     - cron: "0 4 * * *"
   workflow_dispatch:
@@ -399,15 +403,17 @@ jobs:
           jq -c --arg sha "$GITHUB_SHA" --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             '{sha: $sha, date: $date, metrics: .}' "$report" >> "$history"
 
-          # Republish the baseline table in README.md from the just-ratcheted
-          # baseline (#158), so the advertised numbers can never drift from the
-          # enforced floor. Rendering is a pure function of $baseline, so this
-          # is a no-op whenever the ratchet didn't move a metric -- README.md
-          # then stays out of the commit below via `git diff --cached --quiet`,
-          # and README-only churn never reaches main. Not `|| true`: a failure
-          # here (missing markers, unreadable README) means the published
-          # numbers would silently freeze while CI stayed green, which is the
-          # same class of inert-gate bug this job exists to prevent.
+          # Republish the baseline table in README.md (#158) and the docs
+          # snippet (#153) from the just-ratcheted baseline, so the advertised
+          # numbers (GitHub README and the MkDocs site) can never drift from
+          # the enforced floor. Rendering is a pure function of $baseline, so
+          # this is a no-op whenever the ratchet didn't move a metric --
+          # README.md and the snippet then stay out of the commit below via
+          # `git diff --cached --quiet`, and table-only churn never reaches
+          # main. Not `|| true`: a failure here (missing markers, unreadable
+          # README, unwritable snippet) means the published numbers would
+          # silently freeze while CI stayed green, which is the same class of
+          # inert-gate bug this job exists to prevent.
           #
           # Run as `python -m` from inside $api, not as a bare script path from
           # the repo root: the renderer imports load_metrics from eval_gate (to
@@ -418,9 +424,10 @@ jobs:
           # ModuleNotFoundError: No module named 'tests'.
           ( cd "$api" && uv run --no-project python -m tests.evals.render_baseline_table \
               --baseline tests/evals/corpus/retrieval_baseline.json \
-              --readme "$GITHUB_WORKSPACE/README.md" )
+              --readme "$GITHUB_WORKSPACE/README.md" \
+              --docs-snippet "$GITHUB_WORKSPACE/docs/_generated/retrieval-baseline.md" )
 
-          git add "$baseline" "$history" README.md
+          git add "$baseline" "$history" README.md docs/_generated/retrieval-baseline.md
           if git diff --cached --quiet; then
             echo "no baseline/history change"; exit 0
           fi

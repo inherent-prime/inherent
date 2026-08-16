@@ -187,8 +187,8 @@ activity with its own timeout and retry policy:
 | Fetch from storage | `fetch_document` | 2 min | 3 (2–30s) | Propagates |
 | Extract text | `extract_text` | 5 min | 3 (2–30s), **unless non-retryable** | Propagates (or fails on attempt 1 for deterministic errors, §7) |
 | Chunk text | `chunk_text` | 2 min | 2 (1–10s) | Propagates |
-| Store PostgreSQL | `store_in_postgresql` | 60s | 5 (2–30s) | Propagates → workflow marks the document `failed` + dead-letters (§7) |
-| Store Weaviate (parallel with PG) | `store_in_weaviate` | 60s | 5 (2–30s) | Propagates → same failure path, even if PG already succeeded (§3) |
+| Store PostgreSQL | `store_in_postgresql` | 60s | 5 (2–30s) | Propagates → workflow marks the document `failed` + dead-letters, then raises so Temporal close status is Failed (#230) |
+| Store Weaviate (parallel with PG) | `store_in_weaviate` | scales with chunk count for **serial** batch worst-case (one-batch min ≈130s covers per-batch retries; cap 15m; `weaviate_store_budget.py` + `embedding_defaults`, #228) | 5 (5–60s, #229) | Same failure path as PG; activity embeds under bounded parallel batch concurrency (`EMBEDDING_MAX_CONCURRENCY` default 2, #231 phase 1) but the timeout always budgets serial completion so lowering concurrency cannot under-budget. **Residual (#229):** activity-level Temporal retries still re-embed the whole document — no durable checkpoint yet. |
 | Update workspace stats | `update_workspace_stats` | 15s | 3 (1–5s) | Propagates |
 | Publish completion | `publish_completion` | 15s | 3 (1–10s) | Best-effort — logged, never flips a complete ingestion to failed |
 | Record dead-letter (on failure) | `record_dead_letter` | 15s | 2 (1–5s) | Best-effort — must never mask the original error |
@@ -199,16 +199,18 @@ activity with its own timeout and retry policy:
 lines 296-654.)
 
 **What "processed" guarantees.** `store_in_postgresql` and `store_in_weaviate`
-run **in parallel** (`asyncio.gather`, `document_ingestion.py:485`) — chunk
-rows and vectors are written concurrently, not sequentially. If PostgreSQL
-storage fails, the workflow fails immediately (`:490-516`) — PostgreSQL is
-the relational truth, so a failure here is unconditional. If Weaviate storage
-fails *after* PostgreSQL succeeded (`:518-554`), the workflow **still marks
-the whole document `failed`**, deliberately: "a doc with no vectors in
-Weaviate is invisible to the search API — the customer sees `status=ready`
-and gets zero results... PG-only 'ghost' docs are worse than a clear
-failure" (`:518-527`, verbatim comment). A document is never left half-
-indexed and reported healthy.
+run **in parallel** (`asyncio.gather`) — chunk rows and vectors are written
+concurrently, not sequentially. If PostgreSQL storage fails, the workflow
+marks the document `failed`, dead-letters, publishes `document.failed`, then
+**raises** so Temporal close status is `Failed` (#230) — PostgreSQL is the
+relational truth, so a failure here is unconditional. If Weaviate storage
+fails *after* PostgreSQL succeeded, the same path runs, deliberately: "a doc
+with no vectors in Weaviate is invisible to the search API — the customer
+sees `status=ready` and gets zero results... PG-only 'ghost' docs are worse
+than a clear failure". A document is never left half-indexed and reported
+healthy. Returning `WorkflowResult(success=False)` without raising used to
+leave Temporal status `Completed` for every failure (#230 incident: 70
+losses, zero Failed workflows).
 
 ```mermaid
 sequenceDiagram
@@ -514,6 +516,20 @@ above; its self-reported *after* numbers (601/601 chunks self-describing at
 current behavior. Treat `chunking_hint`-driven chunking as **planned, not
 shipped** — the mechanism described in §6.1–6.2 is what a document uploaded
 to `main` actually goes through today.
+
+> **Status update (2026-08-12): §6.2 and §6.3 above are stale.** #129 has since
+> merged to `main` (`7d99cea` + the review-blocker follow-up `9cc2d29`), so
+> `chunk_text` *does* read `chunking_hint` and `.xlsx` now dispatches to
+> `_chunk_by_rows` rather than `_chunk_by_sentences`. The giant-chunk mechanism
+> traced in §6.2 is still exactly right about the `sentences` splitter — a
+> 500-row spreadsheet fixture measured against it produces a 28,344-character
+> chunk — it just is no longer the path a spreadsheet takes. Live on the compose
+> stack, `docs/examples/sample-documents/e2e-tabular.xlsx` ingests to 51 chunks
+> with a 786-character maximum, pinned by
+> `services/inh-public-api-svc/tests/integration/test_compose_lifecycle.py::test_xlsx_chunks_stay_within_bounds`.
+> The same missing sub-sentence fallback survives on the *prose* path and is
+> tracked as #227. §6.1–6.3 are left as written rather than rewritten in place,
+> since they are the record of why the fix was needed.
 
 ## 7. Durability and failure
 

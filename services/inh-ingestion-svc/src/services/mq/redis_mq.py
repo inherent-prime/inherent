@@ -294,6 +294,7 @@ class RedisMQService(BaseMQService):
 
     async def _delivery_count(self, stream: str, group: str, message_id: str) -> int:
         """Return how many times ``message_id`` has been delivered (>=1)."""
+        assert self._redis is not None  # only reached from a connected consumer
         try:
             pending = await self._redis.xpending_range(
                 stream, group, min=message_id, max=message_id, count=1
@@ -301,6 +302,9 @@ class RedisMQService(BaseMQService):
             if pending:
                 return int(pending[0]["times_delivered"])
         except Exception:
+            # nosec B110 -- deliberate: the delivery count is advisory (it only
+            # decides when to drop a poison message), so a Redis hiccup here
+            # must fall back to 1 rather than abort the consumer loop.
             pass
         return 1
 

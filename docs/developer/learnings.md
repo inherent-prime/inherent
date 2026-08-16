@@ -66,6 +66,45 @@ free to narrate both polarities of a decision it later amended.
 tracks the three structural fixes (derived tolerance, `reseed --reason`
 subcommand, path-filtered required check on ranking-affecting PRs).
 
+## #228 / #229 / #230 — Bulk-upload embed path: budget, retry amplification, silent Temporal Completed (2026-08-10)
+
+**What happened.** An 83-PDF bulk upload lost 70 documents. Every failure was
+`store_in_weaviate` blowing a flat 60s `StartToClose` under TEI queue
+saturation. Temporal reported **all** `DocumentIngestionWorkflow` runs as
+`Completed`. Operators looking at Temporal saw a healthy pipeline.
+
+**Why.** Three stacked defects:
+
+1. **#228** — one activity embeds the whole document; budget was constant,
+   work is O(batches).
+2. **#229** — each of 5 retries re-embeds from scratch with short lockstep
+   backoff, feeding the same TEI queue that caused the timeout (~5× discard
+   work; 24-minute congestion collapse).
+3. **#230** — the workflow marked Mongo/DLQ/MQ correctly then
+   `return WorkflowResult(success=False)`. Temporal close status stays
+   `Completed`; default workflow-failure monitoring never fires.
+
+**Learnings.**
+
+- A workflow that "handles" failure by returning a structured result is
+  `Completed` to Temporal. If ops alert on Failed/TimedOut, that path is
+  invisible. Raise after cleanup (or set a registered search attribute) when
+  the document outcome is failed.
+- Activity timeouts must scale with the work inside them, or the work must
+  be split into activities whose budgets are bounded.
+- Retries that repeat all prior work under a saturated shared dependency are
+  a load amplifier, not recovery. Prefer per-batch HTTP retry+jitter and
+  longer activity backoff before (or while) building durable checkpoints.
+- Pattern sweep: any other workflow that returns success=False without
+  raising has the same monitoring blind spot (`ChunkEditWorkflow` still
+  does — track separately if needed).
+
+**Mandatory pattern.** Terminal document failure in
+`DocumentIngestionWorkflow`: side-effects (status, DLQ, completion event)
+then `raise ApplicationError(..., type="DocumentIngestionFailed",
+non_retryable=True)` after `finally` cleanup. Map that type at wait=true
+API / sync trigger call sites to structured `success=False`, not HTTP 500.
+
 ## #225 — A green test suite says nothing about the image when the two resolve dependencies differently (2026-08-09)
 
 **What happened.** The integration workflow went red on `main` with no code

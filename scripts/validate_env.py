@@ -118,6 +118,19 @@ def _load_dotenv_fallback(path: Path) -> None:
             os.environ[key] = value
 
 
+def _purge_src_modules() -> dict[str, Any]:
+    """Pop and return every cached ``src`` / ``src.*`` module.
+
+    Both services own a top-level ``src`` package, so whichever one is
+    imported first would otherwise poison the second's absolute imports
+    through ``sys.modules``.
+    """
+    stale = {k: v for k, v in sys.modules.items() if k == "src" or k.startswith("src.")}
+    for key in stale:
+        del sys.modules[key]
+    return stale
+
+
 def _import_settings_module(name: str, path: Path) -> Any:
     """Import the service settings module with cwd pinned to REPO_ROOT.
 
@@ -127,18 +140,33 @@ def _import_settings_module(name: str, path: Path) -> Any:
     at that moment. Pinning cwd to REPO_ROOT ensures any module-level
     Settings() call reads the same .env we already loaded, instead of a
     stray .env in the caller's cwd.
+
+    The service root also goes on `sys.path` for the duration of the import.
+    Loading by file location does not make the module's own package
+    importable, so a settings module doing an absolute `from src.config...`
+    import (public-api has since #202, which single-sourced the config
+    defaults) fails with ModuleNotFoundError under this validator's project
+    venv. `src` is purged from `sys.modules` around each load so the two
+    services' identically-named packages cannot shadow each other.
     """
     spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load spec for {path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
+    service_root = path.parents[2]  # <service>/src/config/settings.py -> <service>
     saved_cwd = os.getcwd()
+    saved_path = list(sys.path)
+    outer_src = _purge_src_modules()
     try:
+        sys.path.insert(0, str(service_root))
         os.chdir(REPO_ROOT)
         spec.loader.exec_module(module)
     finally:
         os.chdir(saved_cwd)
+        sys.path[:] = saved_path
+        _purge_src_modules()
+        sys.modules.update(outer_src)
     return module
 
 
