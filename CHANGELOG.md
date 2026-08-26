@@ -65,6 +65,22 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Added
 
+- **Chunk CRUD on public-API REST + MCP (#133).** Agents can append, edit, and
+  hard-delete individual chunks on both surfaces: `POST` /
+  `PATCH` / `DELETE /v1/chunks/{document_id}/index/{chunk_index}` and MCP
+  `create_chunk` / `edit_chunk` / `delete_chunk` (write permission). Ordering
+  is Option A — append at `max(chunk_index)+1`, delete leaves gaps
+  (`chunk_index` is a stable id). Write routes use `/index/{chunk_index}` so
+  they cannot collide with `GET` by BIGSERIAL `id`. Writes run synchronously
+  in public-api (PG + Weaviate with `embed_passage` / TEI `truncate`); empty
+  content is rejected on both surfaces. Vector failure compensates (Create
+  rolls back PG; Update restores prior content only if this request's hash is
+  still on the row; Delete aborts before PG). Create scans `content_risk`
+  rather than writing `"none"`. PG delete is workspace-scoped and aborts (no
+  `chunk_count` decrement) when `DELETE` rowcount ≠ 1 under concurrent races.
+  Failure parity pinned in `test_failure_parity.py`. MCP surface is stdio 17
+  / HTTP 13.
+
 - **Evals: `POST /v1/evals/runs` accepts optional replay scoping, and
   `DELETE /v1/evals/events` an opt-in case purge (#250).** Run-replay was
   unscoped — `start_run` and `execute_run` each independently selected *every*
