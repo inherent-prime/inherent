@@ -767,6 +767,352 @@ class DatabaseService:
                 metadata=_merge_chunk_provenance(row),
             )
 
+    async def get_document_chunk_by_index(
+        self, document_id: str, workspace_id: str, chunk_index: int
+    ) -> DocumentChunk | None:
+        """Get a single chunk by stable ``chunk_index`` (#133), workspace-scoped.
+
+        Same tenancy shape as ``get_document_chunk`` but keys on ``chunk_index``
+        (Option A identity) instead of the BIGSERIAL ``id``. Returns None when
+        absent or in another workspace.
+        """
+        async with self.session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT dc.id, dc.document_id, dc.content, dc.chunk_index, dc.token_count,
+                           dc.metadata, dc.content_hash, dc.source_uri, dc.ingested_at
+                    FROM document_chunks dc
+                    JOIN processed_documents pd ON pd.document_id = dc.document_id
+                    WHERE dc.document_id = :document_id
+                      AND dc.chunk_index = :chunk_index
+                      AND pd.workspace_id = :workspace_id
+                """
+                ),
+                {
+                    "document_id": document_id,
+                    "chunk_index": chunk_index,
+                    "workspace_id": workspace_id,
+                },
+            )
+            row = result.fetchone()
+            if not row:
+                return None
+            return DocumentChunk(
+                id=str(row.id),
+                document_id=str(row.document_id),
+                content=row.content,
+                chunk_index=row.chunk_index,
+                token_count=row.token_count or 0,
+                metadata=_merge_chunk_provenance(row),
+            )
+
+    async def append_document_chunk(
+        self,
+        document_id: str,
+        workspace_id: str,
+        content: str,
+        *,
+        metadata: dict | None = None,
+        source_uri: str | None = None,
+    ) -> DocumentChunk | None:
+        """Append one chunk at ``max(chunk_index)+1`` (#133 Option A).
+
+        Workspace-scoped: foreign ``document_id`` → None (not-found). Locks the
+        parent ``processed_documents`` row (``FOR UPDATE``) so concurrent
+        appends cannot collide on ``uq_document_chunks_doc_idx``. Computes
+        ``content_hash`` / ``token_count`` via ``chunk_math`` (ingestion parity).
+        Bumps ``processed_documents.chunk_count`` and ``workspace_metadata.chunk_count``.
+        Gaps from prior deletes are left alone — next index is still max+1.
+        """
+        from src.services.chunk_math import compute_chunk_content_hash, estimate_tokens
+
+        content_hash = compute_chunk_content_hash(content)
+        token_count = estimate_tokens(content)
+        now = datetime.now(timezone.utc)
+
+        async with self.session() as session:
+            parent_result = await session.execute(
+                text(
+                    """
+                    SELECT id, tenant_id, storage_path, storage_url
+                    FROM processed_documents
+                    WHERE document_id = :document_id AND workspace_id = :workspace_id
+                    FOR UPDATE
+                """
+                ),
+                {"document_id": document_id, "workspace_id": workspace_id},
+            )
+            parent = parent_result.fetchone()
+            if not parent:
+                return None
+
+            max_result = await session.execute(
+                text(
+                    """
+                    SELECT COALESCE(MAX(chunk_index), -1) AS max_idx
+                    FROM document_chunks
+                    WHERE processed_document_id = :processed_document_id
+                """
+                ),
+                {"processed_document_id": parent.id},
+            )
+            max_row = max_result.fetchone()
+            next_index = int(max_row.max_idx) + 1
+
+            # Prefer explicit source_uri; else mirror ingestion (path then URL).
+            resolved_source = source_uri
+            if resolved_source is None:
+                resolved_source = parent.storage_path or parent.storage_url
+
+            insert_result = await session.execute(
+                text(
+                    """
+                    INSERT INTO document_chunks (
+                        processed_document_id, document_id, workspace_id, tenant_id,
+                        chunk_index, content, token_count, metadata,
+                        content_hash, source_uri, ingested_at, created_at
+                    ) VALUES (
+                        :processed_document_id, :document_id, :workspace_id, :tenant_id,
+                        :chunk_index, :content, :token_count, CAST(:metadata AS JSONB),
+                        :content_hash, :source_uri, :ingested_at, :created_at
+                    )
+                    RETURNING id, document_id, content, chunk_index, token_count, metadata,
+                              content_hash, source_uri, ingested_at
+                """
+                ),
+                {
+                    "processed_document_id": parent.id,
+                    "document_id": document_id,
+                    "workspace_id": workspace_id,
+                    "tenant_id": parent.tenant_id,
+                    "chunk_index": next_index,
+                    "content": content,
+                    "token_count": token_count,
+                    "metadata": json.dumps(metadata) if metadata is not None else None,
+                    "content_hash": content_hash,
+                    "source_uri": resolved_source,
+                    "ingested_at": now,
+                    "created_at": now,
+                },
+            )
+            row = insert_result.fetchone()
+            if not row:
+                # Should not happen after a successful INSERT … RETURNING; abort
+                # without committing so counters stay consistent.
+                await session.rollback()
+                return None
+
+            await session.execute(
+                text(
+                    """
+                    UPDATE processed_documents
+                    SET chunk_count = chunk_count + 1
+                    WHERE id = :processed_document_id
+                """
+                ),
+                {"processed_document_id": parent.id},
+            )
+            await session.execute(
+                text(
+                    """
+                    UPDATE workspace_metadata
+                    SET chunk_count = chunk_count + 1,
+                        updated_at = NOW()
+                    WHERE workspace_id = :workspace_id
+                """
+                ),
+                {"workspace_id": workspace_id},
+            )
+            await session.commit()
+
+            logger.info(
+                "Chunk appended",
+                document_id=document_id,
+                workspace_id=workspace_id,
+                chunk_index=next_index,
+            )
+            return DocumentChunk(
+                id=str(row.id),
+                document_id=str(row.document_id),
+                content=row.content,
+                chunk_index=row.chunk_index,
+                token_count=row.token_count or 0,
+                metadata=_merge_chunk_provenance(row),
+            )
+
+    async def update_document_chunk(
+        self,
+        document_id: str,
+        workspace_id: str,
+        chunk_index: int,
+        content: str,
+        *,
+        only_if_content_hash: str | None = None,
+    ) -> DocumentChunk | None:
+        """Update one chunk's content by ``chunk_index`` (#133).
+
+        Recomputes ``token_count`` / ``content_hash`` and bumps ``ingested_at``
+        (ingestion ChunkEdit parity). Workspace-scoped via join; returns None
+        when the chunk is absent, in another workspace, or (when
+        ``only_if_content_hash`` is set) no longer holds that hash — a
+        concurrent edit won, so restore compensation must not clobber it.
+        """
+        from src.services.chunk_math import compute_chunk_content_hash, estimate_tokens
+
+        content_hash = compute_chunk_content_hash(content)
+        token_count = estimate_tokens(content)
+        now = datetime.now(timezone.utc)
+
+        async with self.session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    UPDATE document_chunks dc
+                    SET content = :content,
+                        token_count = :token_count,
+                        content_hash = :content_hash,
+                        ingested_at = :ingested_at
+                    FROM processed_documents pd
+                    WHERE dc.document_id = pd.document_id
+                      AND dc.document_id = :document_id
+                      AND dc.chunk_index = :chunk_index
+                      AND pd.workspace_id = :workspace_id
+                      AND (
+                          CAST(:only_if_content_hash AS TEXT) IS NULL
+                          OR dc.content_hash = :only_if_content_hash
+                      )
+                    RETURNING dc.id, dc.document_id, dc.content, dc.chunk_index,
+                              dc.token_count, dc.metadata, dc.content_hash,
+                              dc.source_uri, dc.ingested_at
+                """
+                ),
+                {
+                    "content": content,
+                    "token_count": token_count,
+                    "content_hash": content_hash,
+                    "ingested_at": now,
+                    "document_id": document_id,
+                    "chunk_index": chunk_index,
+                    "workspace_id": workspace_id,
+                    "only_if_content_hash": only_if_content_hash,
+                },
+            )
+            row = result.fetchone()
+            if not row:
+                return None
+            await session.commit()
+
+            logger.info(
+                "Chunk updated in database",
+                document_id=document_id,
+                workspace_id=workspace_id,
+                chunk_index=chunk_index,
+            )
+            return DocumentChunk(
+                id=str(row.id),
+                document_id=str(row.document_id),
+                content=row.content,
+                chunk_index=row.chunk_index,
+                token_count=row.token_count or 0,
+                metadata=_merge_chunk_provenance(row),
+            )
+
+    async def delete_document_chunk(
+        self, document_id: str, workspace_id: str, chunk_index: int
+    ) -> DocumentChunk | None:
+        """Hard-delete one chunk by ``chunk_index`` (#133 Option A).
+
+        Leaves gaps (no sibling re-index). Workspace-scoped via join /
+        ``USING processed_documents``. Returns the deleted chunk for callers /
+        compensation, or None when absent. After DELETE, requires
+        ``rowcount == 1`` before decrementing document/workspace
+        ``chunk_count`` (clamped at zero) — a concurrent lost race rolls
+        back and returns None so counters cannot drift.
+        """
+        async with self.session() as session:
+            select_result = await session.execute(
+                text(
+                    """
+                    SELECT dc.id, dc.document_id, dc.content, dc.chunk_index, dc.token_count,
+                           dc.metadata, dc.content_hash, dc.source_uri, dc.ingested_at
+                    FROM document_chunks dc
+                    JOIN processed_documents pd ON pd.document_id = dc.document_id
+                    WHERE dc.document_id = :document_id
+                      AND dc.chunk_index = :chunk_index
+                      AND pd.workspace_id = :workspace_id
+                """
+                ),
+                {
+                    "document_id": document_id,
+                    "chunk_index": chunk_index,
+                    "workspace_id": workspace_id,
+                },
+            )
+            row = select_result.fetchone()
+            if not row:
+                return None
+
+            deleted = DocumentChunk(
+                id=str(row.id),
+                document_id=str(row.document_id),
+                content=row.content,
+                chunk_index=row.chunk_index,
+                token_count=row.token_count or 0,
+                metadata=_merge_chunk_provenance(row),
+            )
+
+            delete_result = await session.execute(
+                text(
+                    """
+                    DELETE FROM document_chunks dc
+                    USING processed_documents pd
+                    WHERE dc.document_id = :document_id
+                      AND dc.chunk_index = :chunk_index
+                      AND pd.document_id = dc.document_id
+                      AND pd.workspace_id = :workspace_id
+                """
+                ),
+                {
+                    "document_id": document_id,
+                    "chunk_index": chunk_index,
+                    "workspace_id": workspace_id,
+                },
+            )
+            if delete_result.rowcount != 1:
+                await session.rollback()
+                return None
+            await session.execute(
+                text(
+                    """
+                    UPDATE processed_documents
+                    SET chunk_count = GREATEST(chunk_count - 1, 0)
+                    WHERE document_id = :document_id AND workspace_id = :workspace_id
+                """
+                ),
+                {"document_id": document_id, "workspace_id": workspace_id},
+            )
+            await session.execute(
+                text(
+                    """
+                    UPDATE workspace_metadata
+                    SET chunk_count = GREATEST(chunk_count - 1, 0),
+                        updated_at = NOW()
+                    WHERE workspace_id = :workspace_id
+                """
+                ),
+                {"workspace_id": workspace_id},
+            )
+            await session.commit()
+
+            logger.info(
+                "Chunk deleted",
+                document_id=document_id,
+                workspace_id=workspace_id,
+                chunk_index=chunk_index,
+            )
+            return deleted
+
     # User workspace queries
     async def get_user_workspace_ids(self, user_id: str) -> list[str]:
         """Get all workspace IDs the user has access to.

@@ -3,6 +3,7 @@
 import asyncio
 import json
 import time
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -95,6 +96,16 @@ def _get_user_tenant_name(user_id: str) -> str:
     kept under its existing private name so callers and golden tests still work.
     """
     return get_user_tenant_name(user_id)
+
+
+def chunk_vector_uuid(workspace_id: str, user_id: str, document_id: str, chunk_index: int) -> str:
+    """Deterministic Weaviate object UUID for one chunk (matches ingestion)."""
+    return str(
+        uuid.uuid5(
+            uuid.NAMESPACE_DNS,
+            f"{workspace_id}:{user_id}:{document_id}:{chunk_index}",
+        )
+    )
 
 
 class SearchService:
@@ -279,6 +290,146 @@ class SearchService:
             deleted=deleted,
         )
         return deleted
+
+    async def upsert_chunk_vector(
+        self,
+        *,
+        workspace_id: str,
+        user_id: str,
+        document_id: str,
+        chunk_index: int,
+        content: str,
+        content_hash: str,
+        original_filename: str | None = None,
+        content_type: str | None = None,
+        source_uri: str | None = None,
+        create: bool = False,
+    ) -> None:
+        """Embed ``content`` and write one chunk object to Weaviate (#133).
+
+        Uses the same deterministic UUID as ingestion. Collections have no
+        server-side vectorizer — the vector MUST be supplied or search stays
+        stale after an edit. ``create=True`` POSTs a new object (append);
+        ``create=False`` PATCHes properties + vector (update).
+        """
+        from src.services.content_risk import compute_content_risk
+        from src.services.embedder import embed_passage
+
+        collection_name = _get_workspace_collection_name(workspace_id)
+        tenant_name = _get_user_tenant_name(user_id)
+        _require_safe_name(collection_name, "collection")
+        _require_safe_name(tenant_name, "tenant")
+        object_id = chunk_vector_uuid(workspace_id, user_id, document_id, chunk_index)
+
+        # Blocking TEI HTTP — offload so the event loop stays responsive (#19).
+        # embed_passage (not embed_query): truncate=True + no query LRU cache.
+        vector = list(await asyncio.to_thread(embed_passage, content))
+        ingested_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        risk_level, risk_reasons = compute_content_risk(content)
+
+        client = await self._get_client()
+        if create:
+            # Omit start_char/end_char: an appended chunk has no source span.
+            # Writing 0,0 looks like a real highlight at the start of the file.
+            properties = {
+                "document_id": document_id,
+                "workspace_id": workspace_id,
+                "user_id": user_id,
+                "content": content,
+                "chunk_index": chunk_index,
+                "original_filename": original_filename or "",
+                "content_type": content_type or "",
+                "created_at": ingested_at,
+                "content_hash": content_hash,
+                "source_uri": source_uri,
+                "ingested_at": ingested_at,
+                "content_risk": risk_level,
+                "content_risk_reasons": risk_reasons,
+                "chunking_strategy": "manual_append",
+            }
+            response = await client.request(
+                "POST",
+                "/v1/objects",
+                json={
+                    "class": collection_name,
+                    "id": object_id,
+                    "properties": properties,
+                    "vector": vector,
+                    "tenant": tenant_name,
+                },
+            )
+        else:
+            response = await client.request(
+                "PATCH",
+                f"/v1/objects/{collection_name}/{object_id}",
+                params={"tenant": tenant_name},
+                json={
+                    "properties": {
+                        "content": content,
+                        "content_hash": content_hash,
+                        "ingested_at": ingested_at,
+                        "content_risk": risk_level,
+                        "content_risk_reasons": risk_reasons,
+                    },
+                    "vector": vector,
+                },
+            )
+
+        if response.status_code not in (200, 201):
+            raise RuntimeError(
+                f"Weaviate chunk upsert failed ({response.status_code}): " f"{response.text[:500]}"
+            )
+        logger.info(
+            "Upserted chunk vector in Weaviate",
+            document_id=document_id,
+            chunk_index=chunk_index,
+            workspace_id=workspace_id,
+            create=create,
+        )
+
+    async def delete_chunk_vector(
+        self,
+        workspace_id: str,
+        user_id: str,
+        document_id: str,
+        chunk_index: int,
+    ) -> None:
+        """Delete one chunk object by deterministic UUID (#133).
+
+        404 (object or class missing) is treated as already clean so Delete is
+        idempotent. Any other Weaviate failure raises so the caller aborts
+        BEFORE deleting the PostgreSQL row.
+        """
+        collection_name = _get_workspace_collection_name(workspace_id)
+        tenant_name = _get_user_tenant_name(user_id)
+        _require_safe_name(collection_name, "collection")
+        _require_safe_name(tenant_name, "tenant")
+        object_id = chunk_vector_uuid(workspace_id, user_id, document_id, chunk_index)
+
+        client = await self._get_client()
+        response = await client.request(
+            "DELETE",
+            f"/v1/objects/{collection_name}/{object_id}",
+            params={"tenant": tenant_name},
+        )
+
+        if response.status_code in (200, 204, 404):
+            logger.info(
+                "Deleted chunk vector from Weaviate",
+                document_id=document_id,
+                chunk_index=chunk_index,
+                workspace_id=workspace_id,
+                status_code=response.status_code,
+            )
+            return
+
+        # Missing class (never ingested) — same "already clean" posture as
+        # delete_document_vectors.
+        body = response.text
+        if collection_name in body and "could not find class" in body.lower():
+            return
+
+        raise RuntimeError(f"Weaviate chunk delete failed ({response.status_code}): {body[:500]}")
 
     @staticmethod
     def _parse_ingested_at(value: object) -> datetime | None:
