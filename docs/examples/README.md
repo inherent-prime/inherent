@@ -901,6 +901,27 @@ exists but belongs to a different workspace — no cross-tenant existence leak, 
 Failed ingestion messages land in a dead-letter table for inspection and recovery. These
 endpoints live on the ingestion service (write/admin plane) and use `$INGEST_KEY`.
 
+**Status lifecycle:** `pending` (recorded, never retried) → `retrying` (a retry was triggered,
+`POST .../retry`) → `resolved` (a workflow run for this document completed successfully and the
+document is processed again) or `pending` again (the retry attempt itself failed to even start —
+see below) or `abandoned` (an operator gave up on it via `POST .../abandon`). `resolved` is set
+automatically — there is no endpoint for it. It is written best-effort by the document-ingestion
+workflow's success path, keyed on the job's `document_id`: a successful ingestion resolves every
+one of that document's rows in either unresolved status — `retrying` (#249) **and** `pending`
+(#287). Only `abandoned` rows are left alone, since those record an explicit decision to stop.
+
+`pending` rows resolve too because you do not have to press Retry to fix a document. Re-uploading
+corrected content under the same filename reuses the original `document_id` (filename dedup, #60),
+so the repaired run lands on the same id as the failed one and clears its dead-letter row. Before
+#287 that row stayed `pending` forever — and since `GET /dead-letter` **defaults to
+`status=pending`**, the default listing kept reporting a healthy, searchable document as broken.
+Worse, Retry on that stale row was still accepted and re-ingested the *original failed payload*
+over the corrected document; now it is `resolved`, so retry returns `409`.
+
+Until the best-effort write lands, a row stays unresolved even if the document has already
+finished processing — poll `GET /dead-letter/{job_id}` if you need to confirm resolution rather
+than inferring it from the document's own status.
+
 ### List dead-letter jobs
 
 `workspace_id` is **required** (#177 — it used to be an optional filter, which meant omitting it
@@ -973,8 +994,13 @@ curl -s -X POST "$INGEST_BASE/dead-letter/1/retry?workspace_id=$WORKSPACE_ID" \
 }
 ```
 
-Returns **409** if the job is not in a retriable status, **404** if missing or not owned by
-`workspace_id`, **500** if the re-trigger fails.
+Returns **409** if the job is not in a retriable status — which now includes a row that
+auto-resolved because the document was repaired another way (#287), so a stale payload cannot be
+replayed over a healthy document. Returns **404** if missing or not owned by `workspace_id`,
+**500** if the re-trigger fails (and resets the job's status back to `pending` so
+it can be retried again). On success the job's status becomes `retrying`; it transitions on its
+own to `resolved` once the re-triggered workflow run completes successfully — see the status
+lifecycle note above.
 
 ### Abandon a job
 

@@ -18,6 +18,7 @@ from src.models.evals import (
     FeedbackRequest,
     FeedbackResponse,
     ScorecardResponse,
+    StartRunRequest,
 )
 from src.services.auth import ResolvedAuth, resolve_workspace_search, resolve_workspace_write
 from src.services.database import DatabaseService, get_database
@@ -131,14 +132,43 @@ async def start_eval_run(
     database: Annotated[DatabaseService, Depends(get_database)],
     search_service: Annotated[SearchService, Depends(get_search_service)],
     background_tasks: BackgroundTasks,
+    request: StartRunRequest | None = None,
 ) -> dict:
     """Start a mode-comparison eval run over the workspace's active cases.
+
+    Optional scoping (#250, request body): ``case_ids`` and/or ``since``
+    narrow the replay set to specific promoted cases / cases created at-or-
+    after an instant, for reproducible "replay only what I just labeled"
+    runs. Omitting the body (or both fields) keeps the default: replay every
+    active case for the workspace, per ADR 0003's accumulate-over-time
+    semantics -- unchanged for every caller written before #250.
+
+    A ``case_ids`` entry that does not belong to the caller's workspace
+    (unknown id, or another workspace's case) is rejected with 404 rather
+    than silently dropped or silently widening the replay set, matching this
+    API's existing cross-tenant-id convention (e.g. chunk/document 404s).
 
     Replay executes as a background task; poll GET /v1/evals/runs/{run_id} for
     the report. Requires an API key with 'write' permission.
     """
     workspace_id = _require_workspace(auth)
-    run_id = await start_run(database, workspace_id=workspace_id)
+    case_ids = request.case_ids if request else None
+    since = request.since if request else None
+
+    if case_ids:
+        found = await database.get_eval_case_ids(workspace_id=workspace_id, case_ids=case_ids)
+        missing = sorted(set(case_ids) - found)
+        if missing:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Unknown eval case id(s) for this workspace: {', '.join(missing)}. "
+                    "Each case_id must belong to the caller's workspace; unknown or "
+                    "foreign ids are rejected rather than dropped."
+                ),
+            )
+
+    run_id = await start_run(database, workspace_id=workspace_id, case_ids=case_ids, since=since)
     if run_id is None:
         raise HTTPException(
             status_code=409,
@@ -154,6 +184,8 @@ async def start_eval_run(
         run_id=run_id,
         workspace_id=workspace_id,
         user_id=auth.key_info.user_id,
+        case_ids=case_ids,
+        since=since,
     )
     return {"run_id": run_id, "status": "running"}
 
@@ -179,11 +211,28 @@ async def get_run(
 async def delete_events(
     auth: Annotated[ResolvedAuth, Depends(resolve_workspace_write)],
     database: Annotated[DatabaseService, Depends(get_database)],
+    include_cases: Annotated[
+        bool,
+        Query(
+            description=(
+                "Also purge the workspace's labeled eval_cases (#250). Default "
+                "False preserves the documented contract: raw captured events "
+                "are ephemeral, promoted eval cases are durable and survive "
+                "this purge. Pass true to additionally purge captured events "
+                "and labeled cases -- run history (eval_runs, "
+                "eval_run_results) and eval_feedback are left intact, so a "
+                "scorecard can still report a completed run against zero "
+                "cases afterward."
+            )
+        ),
+    ] = False,
 ) -> dict:
-    """Purge all captured search events for the workspace.
+    """Purge the workspace's captured search events (and, opt-in, its cases).
 
     Requires an API key with 'write' permission.
     """
     workspace_id = _require_workspace(auth)
-    deleted = await database.delete_eval_events(workspace_id=workspace_id)
-    return {"deleted": deleted}
+    result = await database.delete_eval_events(
+        workspace_id=workspace_id, include_cases=include_cases
+    )
+    return {"deleted": result["events_deleted"], "cases_deleted": result["cases_deleted"]}

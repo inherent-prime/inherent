@@ -167,34 +167,43 @@ def test_mcp_tools_doc_exists():
 def test_mcp_tools_doc_does_not_claim_a_flat_default():
     """Regression pin for the coordinator's #193 blocker finding: the doc
     must never again lead with a flat 'content_type defaults to
-    text/markdown' claim. The real behavior is extension-derived
-    (`_default_upload_content_type` in server.py) -- text/markdown is only
-    the fallback for an unrecognized/absent extension, not "the" default.
-    The specific misleading phrasing this pins against is the literal old
-    table-cell text this doc carried before the fix."""
+    text/markdown' (or text/plain) claim. The real behavior is
+    extension-derived (`_default_upload_content_type` in server.py) --
+    text/plain is only the fallback for an unrecognized/absent extension
+    (#208; was text/markdown pre-#208), not "the" default. The specific
+    misleading phrasing this pins against is the literal old table-cell
+    text this doc carried before the #193 fix."""
     text = MCP_TOOLS_DOC_PATH.read_text()
     assert "`text/markdown` default" not in text, (
         f"{MCP_TOOLS_DOC_PATH} must not claim content_type has a flat "
         "'text/markdown default' -- the real default is derived from the "
         "filename's extension (#197); state that instead."
     )
+    assert "`text/plain` default" not in text, (
+        f"{MCP_TOOLS_DOC_PATH} must not claim content_type has a flat "
+        "'text/plain default' either -- the real default is derived from "
+        "the filename's extension (#197); text/plain is only the "
+        "unrecognized/absent-extension fallback (#208)."
+    )
 
 
 def test_mcp_tools_doc_explains_extension_derived_default():
     """Positive counterpart to the pin above: the doc must still correctly
     explain that an omitted content_type is DERIVED from the filename's
-    extension, falling back to text/markdown only when the extension is
-    unrecognized or absent -- and must link to file-types.md (the single,
-    generated, test-verified source of truth for the exhaustive type list)
-    rather than re-enumerating it by hand."""
+    extension, falling back to text/plain only when the extension is
+    unrecognized or absent (#208: changed from text/markdown, which
+    mislabelled Dockerfile/Makefile/README/.gitignore/archive.tar.gz as
+    markdown) -- and must link to file-types.md (the single, generated,
+    test-verified source of truth for the exhaustive type list) rather than
+    re-enumerating it by hand."""
     text = MCP_TOOLS_DOC_PATH.read_text()
     assert "derived from" in text and "extension" in text, (
         f"{MCP_TOOLS_DOC_PATH} must explain that an omitted content_type is "
         "derived from the filename's extension (#197)"
     )
-    assert "text/markdown" in text, (
-        f"{MCP_TOOLS_DOC_PATH} must still document text/markdown as the "
-        "fallback for an unrecognized/absent extension"
+    assert "falling back to `text/plain`" in text, (
+        f"{MCP_TOOLS_DOC_PATH} must document text/plain as the fallback for "
+        "an unrecognized/absent extension (#208)"
     )
     assert "(file-types.md)" in text, (
         f"{MCP_TOOLS_DOC_PATH} must link to file-types.md as the exhaustive, "

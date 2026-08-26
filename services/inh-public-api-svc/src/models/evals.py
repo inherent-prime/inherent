@@ -37,6 +37,35 @@ class FeedbackResponse(BaseModel):
     case_id: str | None = None
 
 
+class StartRunRequest(BaseModel):
+    """Optional scoping body for POST /v1/evals/runs (#250).
+
+    Omit the body entirely (or send `{}` / both fields null) to keep the
+    default: replay every active case for the workspace, per ADR 0003's
+    accumulate-over-time semantics. No caller is required to send this body,
+    so every pre-#250 client keeps working unchanged.
+
+    Supplying `case_ids` and/or `since` narrows the replay set for a
+    reproducible, order-independent run (e.g. "only the cases I just
+    promoted"). When both are given they AND together with each other and
+    with the base workspace+active filter.
+    """
+
+    case_ids: list[str] | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Replay only these case ids. Every id must belong to the caller's "
+            "workspace; any unknown or foreign id rejects the whole request "
+            "with 404 rather than silently dropping or leaking it."
+        ),
+    )
+    since: datetime | None = Field(
+        default=None,
+        description="Replay only cases created at/after this instant (inclusive).",
+    )
+
+
 class EvalCase(BaseModel):
     """A labeled eval case (query + expected evidence) promoted from feedback."""
 

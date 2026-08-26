@@ -58,20 +58,27 @@ references as of this writing:
     - ``POST /dead-letter/{job_id}/abandon?workspace_id=...`` (app.py:938)
       -- not used by this test.
 
-  NOTE (discovered while reading the retry path, worth flagging): nothing
-  in the codebase ever calls ``update_dead_letter_status(job_id,
-  "resolved")`` -- grepped every call site of that method
-  (src/api/app.py:935 sets it back to "pending" on a retry *failure*;
-  app.py:960 sets "abandoned"). A successfully-retried job's row is left
-  permanently in ``status="retrying"`` even after the new workflow run
-  completes and the document is fully processed and searchable again. This
-  test does not depend on that field (it polls document status + search
-  instead, per the brief), but it is a real product gap: the dead-letter
-  list can never be used to see "which of these are actually resolved" --
-  everything that was ever retried, however long ago and however
-  successfully, looks identical to one that is currently mid-retry. Filed
-  as https://github.com/inherent-prime/inherent/issues/249 rather than
-  blocking on it here (see task-7-report.md for the full writeup).
+  FIXED by #249 (was previously an open gap, discovered while writing this
+  test -- see git history for the original NOTE if you need the pre-fix
+  writeup): a successful ingestion of ``document_id`` now resolves that
+  document's outstanding ``status='retrying'`` dead-letter rows. The write
+  happens from ``DocumentIngestionWorkflow``'s single success path via the
+  ``resolve_dead_letter_jobs`` activity ->
+  ``DatabaseService.resolve_dead_letter_jobs_for_document`` (best-effort,
+  keyed on ``document_id`` rather than the dead-letter job id -- see that
+  method's docstring). Step 7 below now asserts the row reaches
+  ``status="resolved"`` after the retried run completes and the document is
+  searchable again.
+
+  WIDENED by #287: the resolve now also covers rows still at
+  ``status='pending'`` -- a failure nobody ever pressed Retry on, but which
+  a later successful run of the same ``document_id`` has superseded. This
+  module has TWO tests covering the two halves of that lifecycle:
+  ``test_dependency_outage_dead_letters_then_recovers`` drives the Retry
+  path ('pending' -> 'retrying' -> 'resolved'), and
+  ``test_pending_dead_letter_row_resolves_when_document_is_repaired_by_reupload``
+  drives the never-retried path (corrective re-upload -> 'resolved'), then
+  asserts Retry on the resolved row is refused with a 409.
 
 * Temporal retry policy that determines pacing -- the Weaviate storage step
   (services/inh-ingestion-svc/src/temporal/workflows/document_ingestion.py,
@@ -393,36 +400,42 @@ def test_dependency_outage_dead_letters_then_recovers() -> None:
         assert body["status"] == "processed"
         _wait_searchable(client, document_id, outage_marker, timeout=TIMEOUT)
 
-        # --- 7. The dead-letter job row must still be readable after a
-        # successful retry (the retry endpoint must not have deleted or
-        # corrupted it). We deliberately do NOT assert status == "resolved"
-        # here -- #249 (filed while writing this test) found that no code
-        # path ever transitions a dead-letter job to "resolved" after a
-        # successful retry, so the row is stuck at "retrying" forever even
-        # though the document above is fully processed and searchable. This
-        # pins that DEFECT-CONSISTENT state on purpose: if #249 is fixed,
-        # this assertion should be tightened to status == "resolved" (or
-        # whatever the fix lands on), and its failure here is the signal to
-        # do that.
-        job_after_retry_resp = client.get(
-            f"{INGESTION_API_URL}/dead-letter/{job_id}",
-            headers=INGESTION_HEADERS,
-            params={"workspace_id": WORKSPACE_ID},
-        )
-        assert job_after_retry_resp.status_code == 200, (
-            f"dead-letter job {job_id} not readable after retry: "
-            f"{job_after_retry_resp.status_code} {job_after_retry_resp.text}"
-        )
-        job_after_retry = job_after_retry_resp.json()
-        assert job_after_retry["id"] == job_id
-        assert job_after_retry["document_id"] == document_id
-        # Defect-consistent per #249: still "retrying", never advanced to
-        # "resolved" despite the document being processed+searchable above.
-        assert job_after_retry.get("status") == "retrying", (
-            f"dead-letter job {job_id} status changed from the #249 defect "
-            f"baseline ('retrying') to {job_after_retry.get('status')!r} -- "
-            f"if #249 was fixed, tighten this assertion to the new resolved "
-            f"state instead of loosening it"
+        # --- 7. #249: the dead-letter job row must reach status="resolved"
+        # once the retried workflow run genuinely completes -- the document
+        # above is processed AND searchable, so its dead-letter row must not
+        # still read "retrying" (indistinguishable from a retry still in
+        # flight or one that silently failed). The resolve write is
+        # best-effort and keyed on document_id (see
+        # DatabaseService.resolve_dead_letter_jobs_for_document), so this
+        # polls briefly rather than asserting on the very first read --
+        # it runs as one of the last activities in the workflow's success
+        # path, after the document is already visibly processed+searchable,
+        # so in practice it should already be set by the time we get here,
+        # but poll for a short window to absorb ordinary scheduling lag.
+        deadline = time.monotonic() + 30
+        job_after_retry: dict = {}
+        while time.monotonic() < deadline:
+            job_after_retry_resp = client.get(
+                f"{INGESTION_API_URL}/dead-letter/{job_id}",
+                headers=INGESTION_HEADERS,
+                params={"workspace_id": WORKSPACE_ID},
+            )
+            assert job_after_retry_resp.status_code == 200, (
+                f"dead-letter job {job_id} not readable after retry: "
+                f"{job_after_retry_resp.status_code} {job_after_retry_resp.text}"
+            )
+            job_after_retry = job_after_retry_resp.json()
+            if job_after_retry.get("status") == "resolved":
+                break
+            time.sleep(POLL_INTERVAL)
+
+        assert job_after_retry.get("id") == job_id
+        assert job_after_retry.get("document_id") == document_id
+        assert job_after_retry.get("status") == "resolved", (
+            f"dead-letter job {job_id} did not reach status='resolved' "
+            f"within 30s of the retried document becoming processed+"
+            f"searchable (#249) -- last observed status="
+            f"{job_after_retry.get('status')!r}"
         )
     finally:
         # Unconditional: never leave the shared stack with Weaviate down --
@@ -431,6 +444,150 @@ def test_dependency_outage_dead_letters_then_recovers() -> None:
         # CalledProcessError) must still hit the loud "fix manually" path
         # instead of propagating past it silently, and the client must
         # always be closed even if the health-wait itself raises.
+        try:
+            try:
+                restore = _docker_compose("start", "weaviate")
+                if restore.returncode != 0:
+                    pytest.fail(
+                        f"CLEANUP FAILED: 'docker compose start weaviate' returned "
+                        f"{restore.returncode}: {restore.stderr}. Stack may be left "
+                        f"with weaviate down -- fix manually before running further "
+                        f"tests."
+                    )
+            except (subprocess.TimeoutExpired, OSError, subprocess.CalledProcessError) as exc:
+                pytest.fail(
+                    f"CLEANUP FAILED: 'docker compose start weaviate' raised "
+                    f"{exc!r}. Stack may be left with weaviate down -- fix manually "
+                    f"before running further tests: docker compose start weaviate"
+                )
+            _wait_weaviate_healthy()
+        finally:
+            client.close()
+
+
+def test_pending_dead_letter_row_resolves_when_document_is_repaired_by_reupload() -> None:
+    """#287: a NEVER-RETRIED dead-letter row must resolve once the same
+    document ingests successfully -- and must then refuse to replay.
+
+    This is the sibling of the test above, covering the other half of the
+    dead-letter lifecycle. That one drives 'pending' -> Retry -> 'retrying'
+    -> 'resolved' (#249). This one never touches the Retry button: the user
+    fixes the problem the way users actually do, by re-uploading corrected
+    content, and the row must resolve off the back of that success alone.
+
+    Why the row lands on the SAME dead-letter record: ``document_id`` is
+    stable across a corrective re-upload. ``document_intake`` looks up
+    (workspace, content_hash) first and (workspace, filename) second, so
+    re-uploading CHANGED bytes under the SAME filename reuses the original
+    id (the #60 reindex-on-edit path). Step 4 asserts that explicitly --
+    it is the premise the whole fix rests on, so it is pinned rather than
+    assumed.
+
+    Before #287 the resolve was scoped to status='retrying' only, so this
+    row stayed 'pending' forever: ``GET /dead-letter`` (which DEFAULTS to
+    status='pending') kept reporting a healthy, searchable document as
+    broken, and step 7's Retry would have been accepted -- re-publishing
+    the ORIGINAL failed payload over the document the user had just
+    repaired. Step 7 is the one that pins the hazard closed.
+    """
+    client = _require_stack()
+    try:
+        # --- 1. Take Weaviate down so the first upload is guaranteed to fail.
+        stop = _docker_compose("stop", "weaviate")
+        assert stop.returncode == 0, f"docker compose stop weaviate failed: {stop.stderr}"
+
+        # --- 2. Upload the "broken" document. Keep the filename: step 4
+        # re-uploads under exactly this name to trigger filename dedup.
+        filename = f"dead-letter-reupload-{uuid.uuid4().hex}.md"
+        broken_marker = f"BROKEN-{uuid.uuid4().hex}"
+        document_id = _upload_bytes(
+            client,
+            f"# Dead-letter re-upload probe\nSentinel token {broken_marker}.".encode(),
+            filename,
+        )
+
+        # --- 3. Wait for it to dead-letter. Status must be 'pending': this
+        # test deliberately never calls the retry endpoint, so the row stays
+        # in the status the default listing shows.
+        job = _wait_dead_lettered(client, document_id, timeout=TIMEOUT)
+        job_id = job["id"]
+        assert job.get("status") == "pending"
+
+        # Bring Weaviate back so the corrective re-upload can actually succeed.
+        start = _docker_compose("start", "weaviate")
+        assert start.returncode == 0, f"docker compose start weaviate failed: {start.stderr}"
+        _wait_weaviate_healthy()
+
+        # --- 4. Re-upload CORRECTED content under the SAME filename. Different
+        # bytes -> different content_hash -> the content-hash dedup branch
+        # misses and the identical-content short-circuit does not apply, so
+        # this falls through to the filename branch and genuinely re-indexes.
+        fixed_marker = f"FIXED-{uuid.uuid4().hex}"
+        reuploaded_id = _upload_bytes(
+            client,
+            f"# Dead-letter re-upload probe (corrected)\nSentinel token {fixed_marker}.".encode(),
+            filename,
+        )
+        assert reuploaded_id == document_id, (
+            "re-uploading changed content under the same filename must reuse the "
+            "original document_id (filename dedup, #60) -- #287's whole premise is "
+            f"that these collide; got {reuploaded_id!r} vs {document_id!r}"
+        )
+
+        # --- 5. The repaired document must genuinely process and be findable
+        # by its NEW sentinel -- proof this is a real re-index, not a flag flip.
+        body = _wait_document_processed(client, document_id, timeout=TIMEOUT)
+        assert body["status"] == "processed"
+        _wait_searchable(client, document_id, fixed_marker, timeout=TIMEOUT)
+
+        # --- 6. The pending row must now read 'resolved'. Best-effort write on
+        # the workflow's success path, so poll briefly for scheduling lag --
+        # same rationale as step 7 of the test above.
+        deadline = time.monotonic() + 30
+        job_after: dict = {}
+        while time.monotonic() < deadline:
+            resp = client.get(
+                f"{INGESTION_API_URL}/dead-letter/{job_id}",
+                headers=INGESTION_HEADERS,
+                params={"workspace_id": WORKSPACE_ID},
+            )
+            assert (
+                resp.status_code == 200
+            ), f"dead-letter job {job_id} not readable: {resp.status_code} {resp.text}"
+            job_after = resp.json()
+            if job_after.get("status") == "resolved":
+                break
+            time.sleep(POLL_INTERVAL)
+
+        assert job_after.get("id") == job_id
+        assert job_after.get("status") == "resolved", (
+            f"dead-letter job {job_id} was still {job_after.get('status')!r} 30s after "
+            f"the document was repaired by re-upload and became processed+searchable "
+            f"(#287) -- a never-retried row for a now-healthy document must resolve"
+        )
+
+        # --- 7. The hazard itself: Retry must now be refused. Before #287 this
+        # returned 200 and re-published the ORIGINAL failed payload over the
+        # corrected document. supersede_running=False is no defence here --
+        # nothing is in flight by this point.
+        replay = client.post(
+            f"{INGESTION_API_URL}/dead-letter/{job_id}/retry",
+            headers=INGESTION_HEADERS,
+            params={"workspace_id": WORKSPACE_ID},
+        )
+        assert replay.status_code == 409, (
+            f"retry of RESOLVED dead-letter job {job_id} must 409, not "
+            f"{replay.status_code} -- accepting it re-ingests the stale payload "
+            f"over the repaired document (#287)"
+        )
+
+        # --- 8. And the document must be untouched by that rejected replay:
+        # still processed, still findable by the CORRECTED sentinel.
+        assert _document_status(client, document_id)["status"] == "processed"
+        _wait_searchable(client, document_id, fixed_marker, timeout=TIMEOUT)
+    finally:
+        # Same airtight cleanup contract as the test above: never leave the
+        # shared stack with Weaviate down, and always close the client.
         try:
             try:
                 restore = _docker_compose("start", "weaviate")

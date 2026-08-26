@@ -5,7 +5,214 @@ All notable changes to Inherent are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Retrieval-eval golden corpus grown from 13 to 50 gated queries, closing
+  the eval gate's ~7.7pp blind spot (#265).** #236 correctly derived the
+  gate's per-metric tolerance as `max(EVAL_GATE_TOLERANCE,
+  min_detectable_delta(metric, n))`, but at `n = 13` the `1/n` term dominated
+  every metric — a real `recall@5` regression up to ~7.7 percentage points
+  could pass the gate silently. `corpus/qrels.jsonl` now carries 50 gated
+  queries over 20 fixtures instead of 13 over 9 — the prior 13 plus 37 new
+  gated ones among q15–q53, a range spanning 39 ids of which q25/q26 are
+  `abstention` and so do not count toward `n` — which brings the
+  tabular (`.xlsx`, `.csv`), binary-document (`.pdf`, `.docx`), subtitle
+  (`.srt`, `.vtt`) and config (`.yaml`, `.toml`) extraction paths under the
+  gate for the first time. All three tolerances now sit at the `0.02` floor
+  (`recall@5` `0.0769 → 0.0200`, `mrr` `0.0385 → 0.0200`, `ndcg@5` `0.0284 →
+  0.0200`), so the silent-pass window is **~2 percentage points** and `1/n`
+  is no longer the binding term for any metric. `n = 50` is the deliberate
+  stopping point: it is exactly where `recall@5`'s `1/n` step meets the
+  floor, so further growth buys no gate sensitivity until the floor itself is
+  lowered (a `0.01` floor would need `n > 100`). q3's judgment was also
+  completed — it graded only `sample.txt`, marking a defensible top-1 result
+  wrong and pinning the query at 0.0 in every mode; `sample.html` now grades
+  `1` alongside, so `ndcg@5` (~0.13) still reports the real ranking weakness
+  the query found. `retrieval_baseline.json` is re-seeded accordingly: pooled
+  means over a larger query set are **not comparable** to the `n = 13`
+  numbers, and two of nine metrics moved down on composition alone
+  (`keyword.recall@5`, `semantic.recall@5`; the other seven rose), which the
+  ratchet cannot do by construction. `_content_type()` in the compose
+  eval now resolves MIME types from `inh_contracts.file_types` rather than a
+  local 7-extension table, so the corpus can reference any format the product
+  accepts without the test drifting behind the registry. Each
+  `retrieval_history.jsonl` line now also records `n`, the gated query count
+  that produced it: a history line is a pooled mean over the corpus, so two
+  lines are only comparable when `n` matches, and without it this growth would
+  read as a quality trend rather than the corpus change it is. Lines written
+  before the field have no `n` and are not assumed to be any particular size —
+  the corpus also grew during #139, so backfilling one value would invent
+  precision the log never had.
+
 ### Fixed
+
+- **Dead-letter rows left at `pending` for a document that later succeeded no
+  longer read as broken, and can no longer replay a stale payload (#287).**
+  #249 made a successful ingestion resolve that document's dead-letter rows,
+  but scoped the write to `status='retrying'` — so it never reached rows
+  nobody had pressed Retry on. Since `GET /dead-letter` **defaults to
+  `status=pending`**, those were exactly the rows the default listing shows: a
+  document repaired by re-uploading corrected content (same filename reuses
+  the original `document_id`, the #60 reindex-on-edit path) went on being
+  reported as broken forever. Pressing Retry on such a row was also still
+  accepted, re-publishing the *original failed* payload over the now-healthy
+  document — `supersede_running=False` is no defence, since nothing is in
+  flight by then. The resolve now covers both unresolved statuses
+  (`pending` and `retrying`); `abandoned` is still left alone, since it
+  records an explicit operator decision. The retry route's `409` guard now
+  reads the same `DEAD_LETTER_UNRESOLVED_STATUSES` constant as the resolve, so
+  the two cannot drift apart and silently reopen the replay hole.
+
+### Added
+
+- **Evals: `POST /v1/evals/runs` accepts optional replay scoping, and
+  `DELETE /v1/evals/events` an opt-in case purge (#250).** Run-replay was
+  unscoped — `start_run` and `execute_run` each independently selected *every*
+  active case for the workspace — so any caller expecting a run to reflect
+  only what it just promoted was fragile to promotion order and to how many
+  prior sessions had run against the same workspace. The request body now
+  takes optional `case_ids` and `since` filters, which AND together and are
+  threaded through *both* selection paths. Omitting the body is unchanged
+  behavior (replay everything active, ADR 0003's accumulate-over-time
+  default), so pre-#250 clients keep working. A `case_ids` entry that is
+  unknown or belongs to another workspace rejects the whole request with
+  `404` rather than being silently dropped (which would quietly narrow the
+  run) or silently honored (which would leak existence across tenants).
+  Separately, labeled cases previously accumulated forever with no supported
+  reset; `DELETE /v1/evals/events?include_cases=true` now also purges
+  `eval_cases`. The default stays `false`, preserving the documented "raw
+  events ephemeral, labeled cases durable" contract. Note the purge covers
+  captured events and labeled cases only — `eval_feedback`, `eval_runs` and
+  `eval_run_results` survive it, so a scorecard can still report a completed
+  last run against zero cases.
+
+- **Retrieval-eval baseline published on the docs site (#153).** The per-mode
+  floor table already rendered into `README.md` (#158) is now also written to
+  `docs/_generated/retrieval-baseline.md` by the same
+  `render_baseline_table.py` / `eval-baseline-ratchet` path, and included in
+  `docs/testing.md` via `pymdownx.snippets`. The docs site therefore shows the
+  live gated numbers without hand-copying, and a ratchet PR updates README and
+  docs together.
+
+### Removed
+
+- **Hetzner real-VM e2e lane removed; e2e now lives entirely in GitHub
+  Actions.** `.github/workflows/hetzner-e2e.yml` is deleted. The lane had not
+  produced a genuine pass since 2026-07-13, and — more seriously — its skip
+  path reported **success**: the final-tag filter lived inside the first step
+  while every other step carried `if: steps.meta.outputs.skip != 'true'`, so a
+  skipped run completed with zero work done and a green check identical to a
+  full-stack pass. `v0.6.0-rc1` produced exactly that, and since
+  `docs/maintainers/releasing.md` pointed maintainers at the signal, **v0.6.0
+  shipped believing it had e2e coverage it never had**. A gate that can be
+  silently absent is worse than no gate. `integration.yml` (full Compose stack
+  on the runner, gating every merge to `main`) is now the sole e2e lane.
+  `hetzner-e2e-recover.yml` is retained as a manual cleanup tool, and
+  `infra/` Terraform is untouched — production deploys and the laptop VM path
+  still use it.
+
+  When the lane first really ran (on the v0.6.0 publish) it found two genuine
+  harness gaps, recorded in `docs/testing.md` for whoever reinstates it: the
+  **stdio** MCP test needs direct datastore access that
+  `docker-compose.release.yml` deliberately does not publish, and
+  `scripts/dev/bootstrap.sh` seeds the second tenancy principal only under
+  `SEED_PRINCIPAL_B=1`, so the cross-workspace isolation tests were 401ing
+  rather than verifying isolation.
+
+  **Now untested in CI:** the published GHCR images,
+  `docker-compose.release.yml` itself, and real-VM behaviour. The
+  published-image smoke check in `releasing.md` is upgraded to required on
+  every release to partly cover this.
+
+### Fixed
+
+- **MCP: extensionless and unregistered-extension uploads are labelled
+  `text/plain`, not `text/markdown` (#208).** Omitting `content_type` on
+  `upload_document` with a filename the registry doesn't recognize stored
+  `text/markdown` — so `Dockerfile`, `Makefile`, `README`, `.gitignore` and
+  `archive.tar.gz` were all recorded as markdown, which none of them are.
+  `content_type` is an indexed Postgres column and a Weaviate chunk property
+  callers filter on, so a caller narrowing to `text/markdown` to find their
+  documentation got Dockerfiles and tarball names back, with nothing
+  signalling the label was a guess. Both fallback branches now return
+  `text/plain`, the honest generic for "a text file whose format we did not
+  recognize". Note this is a labelling fix only: contrary to the issue's
+  framing, extraction and chunking are unchanged, because the `txt` and
+  `markdown` registry specs both declare `extractor="text_passthrough"` and
+  `chunking_hint="prose"` — affected documents chunk byte-for-byte
+  identically. Documents already stored under the old fallback keep their
+  stale `text/markdown` label; no backfill ships here.
+
+- **Compose-dependent test targets no longer exit 0 having run nothing
+  (#209).** `make test-integration` — documented as the release e2e gate —
+  reported success with everything skipped when no stack was up, as did the
+  `pytest -m benchmark` / `-m retrieval_eval` commands in `docs/testing.md`.
+  A command-line `-m` *replaces* each service's `addopts` default of
+  `-m 'not compose'` rather than intersecting with it, so those markers
+  selected precisely the compose tests the default excluded; each then
+  skipped at fixture setup, and pytest exits 0 for an all-skipped run. A
+  gate that cannot fail is worse than no gate — the same silent-success
+  failure that let v0.6.0 ship believing it had e2e coverage it never had.
+  Two layers now: `scripts/dev/require-stack.sh` pre-flights the stack
+  (wired as a `require-stack` prerequisite on every compose target) and
+  fails with an actionable "run `make dev` first"; `scripts/dev/run-compose-suite.sh`
+  then asserts from pytest's own JUnit report that a non-zero number of
+  tests actually *executed*, catching every other way a suite can run
+  nothing while exiting 0. New `test-benchmark` and `test-retrieval-eval`
+  targets pass the correct `"compose and <marker>"` expressions.
+
+- **Dead-letter jobs now reach `status=resolved` after a successful retry
+  (#249).** Nothing in the codebase ever wrote `"resolved"`:
+  `update_dead_letter_status` had exactly two call sites — reset to
+  `"pending"` when the retry re-trigger itself fails, and `"abandoned"` on
+  the abandon route. A job whose retry fully succeeded (new workflow ran,
+  document reached `processed`, searchable again) therefore sat at
+  `"retrying"` forever, indistinguishable from a retry still in flight or one
+  that silently failed downstream — so `GET /dead-letter` could never answer
+  "what is actually still broken". `DocumentIngestionWorkflow`'s success path
+  now best-effort resolves the document's outstanding `retrying` rows via the
+  new `resolve_dead_letter_jobs` activity and
+  `DatabaseService.resolve_dead_letter_jobs_for_document`. Keyed on
+  `document_id` rather than a dead-letter job id, so no id has to be threaded
+  through the re-published message; scoped to `status='retrying'` only, so
+  `pending` (never retried) and `abandoned` (explicitly given up on) rows are
+  untouched. No migration: `status` is an unconstrained `VARCHAR(20)`.
+
+- **Ingestion: an out-of-memory failure while extracting DOCX/XLSX/PPTX is
+  retried instead of permanently dead-lettered (#215).** `_extract_docx_text`
+  wrapped both the `Document()` construction and the paragraph-iteration
+  comprehension in one broad `except Exception` that re-raised as
+  `ApplicationError(non_retryable=True)`, so a `MemoryError` from a document
+  with a very large number of paragraphs was classified as a permanent,
+  property-of-the-bytes failure — dead-lettering a load-dependent failure a
+  retry on a less-contended worker could plausibly resolve. The `try` is now
+  scoped to only the construction call, with an `except MemoryError: raise`
+  carve-out ahead of the broad handler and the iteration left unwrapped,
+  exactly mirroring `_extract_pdf_text` (whose own docstring already cited
+  this as the pattern to follow, from #195). The pattern sweep found the same
+  missing carve-out at `_extract_xlsx_text`'s `load_workbook()` and
+  `_extract_pptx_text`'s `Presentation()` construction sites; both are fixed
+  here too.
+
+- **CI: the CHANGELOG gate no longer deadlocks the automated eval-baseline
+  ratchet.** `conventions.yml`'s CHANGELOG gate failed any PR touching
+  `services/**` without a `CHANGELOG.md` entry, which included the PR that
+  `integration.yml`'s `eval-baseline-ratchet` job opens on every green `main`
+  run — its diff is only the two machine-generated corpus files
+  (`retrieval_baseline.json`, `retrieval_history.jsonl`) plus the README
+  table rendered from them. That PR is opened with auto-merge enabled and
+  never merged, because a required check it can never satisfy sat red on it
+  (observed on PR #269). The committed retrieval-eval baseline therefore
+  froze at its last merged value and the enforced quality floor silently
+  stopped rising — the same inert-gate failure the ratchet job was built to
+  prevent, reintroduced one gate upstream. The gate now excludes those two
+  generated paths specifically; service source changed alongside them still
+  requires an entry, and a human test-only change to a service is
+  deliberately still in scope. Pinned by four new cases in
+  `tests/test_conventions_workflow_guards.py`, which now extract each gate's
+  `run:` block and execute it against synthetic file lists rather than
+  regex-matching the workflow YAML — text pins proved a `grep` was spelled a
+  certain way, not that it classified a real diff correctly.
 
 - **Ingestion bulk-upload path: store_in_weaviate budget, retry load, Temporal visibility (#228, #229, #230).**
   `store_in_weaviate` StartToClose now scales with chunk count and embed

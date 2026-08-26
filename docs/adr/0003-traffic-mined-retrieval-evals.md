@@ -211,3 +211,51 @@ every metric's derived tolerance, including `recall@5`'s back down to
 for eval coverage generally — it is the direct, quantified lever that
 tightens this gate's precision, and should be read as a standing incentive
 this amendment creates rather than a one-time trade to forget about.
+
+## Amendment (2026-08-19): golden corpus grown to n = 50, closing the blind spot (#265)
+
+The 2026-08-12 amendment above accepted a wider silent-pass window as the
+cost of matching the gate's tolerance to the corpus's resolution, and named
+growing `corpus/qrels.jsonl` as the standing lever that pays that cost back.
+This amendment records that the lever has been pulled to its useful limit.
+
+**What changed.** The golden corpus grew from **13 to 50 gated queries** —
+the prior 13 (q1–q12, q14) plus 37 new gated ones among `qrels.jsonl`
+q15–q53, a range spanning 39 ids of which q25/q26 are `abstention` and so do
+not count toward `n` — and the document set it exercises grew from 9 to 20
+fixtures. Composition at `n = 50`: `general` 30, `exact_id` 8, `paraphrase`
+6, `stale_version` 3, `multi_doc_crowding` 3, plus 3 ungated `abstention`
+queries. One pre-existing judgment was also completed: q3 ("what is a
+workspace") graded only `sample.txt` as relevant, which marked a defensible
+top-1 result wrong and pinned the query at 0.0 in every mode; `sample.html`
+is now graded `1` alongside `sample.txt`'s `3`. Graded relevance is the right
+instrument here — `recall@5` and `mrr` recover to 0.5/1.0 while `ndcg@5`
+stays at ~0.13, so the query still reports the real ranking weakness it
+found instead of being either a dead zero or a free pass.
+
+**The result.** Every metric's derived tolerance now sits at the `0.02`
+`EVAL_GATE_TOLERANCE` floor rather than at `1/n`: `recall@5` `0.0769 →
+0.0200`, `mrr` `0.0385 → 0.0200`, `ndcg@5` `0.0284 → 0.0200`. The
+silent-pass window the amendment above called out at **~7.7 percentage
+points is now ~2 percentage points**, and `min_detectable_delta` is no
+longer the binding term for any gated metric.
+
+**Where this stops.** `n = 50` is the point of diminishing return, not an
+arbitrary milestone: because `recall@5`'s step is `1/n`, `n = 50` is exactly
+where `1/n` meets the `0.02` floor. A 51st query costs labeling effort and
+buys no additional gate sensitivity. The next lever is lowering
+`EVAL_GATE_TOLERANCE` itself, and that is only honest once the corpus can
+resolve the finer value — a `0.01` floor would require `n > 100`. Corpus
+growth beyond 50 should therefore be justified by *coverage* (an untested
+query archetype, format, or failure mode), not by gate precision.
+
+**Cost this amendment records.** Pooled metrics are means over the query
+set, so the `n = 50` baseline is not comparable to the `n = 13` numbers it
+replaces; two of nine metrics moved *down* on composition alone
+(`keyword.recall@5` `0.8846 → 0.8600` and `semantic.recall@5` `0.8846 →
+0.8800`), while the other seven rose — `hybrid.recall@5` among them, `0.8846
+→ 0.9100`. The automated ratchet cannot make a downward move by construction,
+so this landed as a reviewed baseline edit, and the reasoning is recorded in
+`corpus/retrieval_baseline.json`'s `_comment` for whoever reads the history
+next. Any cross-`n` comparison of these numbers is meaningless and should
+not be read as a quality trend.

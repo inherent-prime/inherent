@@ -28,6 +28,7 @@ from src.temporal.activities import (
     publish_completion,
     record_chunk_edit_weaviate_failure,
     record_dead_letter,
+    resolve_dead_letter_jobs,
     set_document_status,
     store_in_postgresql,
     store_in_weaviate,
@@ -64,6 +65,7 @@ _ALL_ACTIVITIES: list[Callable[..., Any]] = [
     update_chunk_weaviate,
     record_chunk_edit_weaviate_failure,
     record_dead_letter,
+    resolve_dead_letter_jobs,
     publish_completion,
 ]
 

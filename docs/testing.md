@@ -61,6 +61,20 @@ Both services default to **excluding Compose-backed tests** via `addopts`
 (`-m 'not compose'`), so a bare `uv run pytest` is safe to run on a laptop with
 no Docker stack up. Coverage (`--cov`) is on by default in both services.
 
+**Footgun (#209): a command-line `-m` REPLACES `addopts`, it does not
+intersect with it.** `pytest -m benchmark` or `pytest -m retrieval_eval` does
+**not** mean "the offline default, narrowed to benchmark/retrieval_eval
+tests" — it means "ignore the `-m 'not compose'` default entirely and select
+only tests carrying that marker", which for both `benchmark` and
+`retrieval_eval` are *exactly* the Compose-marked tests the default exists to
+exclude. Each of those then skips itself individually at fixture setup when
+it can't reach the stack, and an all-skipped pytest run still exits **0** —
+so running either command on a laptop with no stack up reports success
+having run nothing. Always include `compose` explicitly when you mean to run
+against a live stack: `pytest -m 'compose and benchmark'` / `pytest -m
+'compose and retrieval_eval'` — or use the guarded Make targets below, which
+pass the correct expression for you and fail loudly if the stack isn't up.
+
 ## Test profiles
 
 Run these from the relevant service directory (`cd services/<svc>`).
@@ -115,11 +129,41 @@ real Postgres / Weaviate / Redis / S3 and are the release e2e gate:
 uv run pytest -m compose
 ```
 
-Repo-wide shortcut:
+**Failure mode if the stack is not up (#209):** a raw `uv run pytest -m
+compose` does **not** fail when the stack is down — every compose-marked
+test skips itself at fixture setup ("public API not reachable at
+http://localhost:18000: ..."), and an all-skipped pytest run exits **0**.
+Nothing distinguishes that from "the gate passed" unless you read the test
+names in the output. Use the guarded Make targets instead of raw `pytest -m`
+whenever you want a real pass/fail signal:
 
 ```bash
-make test-integration   # public-api compose suite (stack must be up)
+make test-integration     # public-api compose suite (stack must be up)
+make test-benchmark       # compose+benchmark tests, both services
+make test-retrieval-eval  # compose+retrieval_eval tests (public-api)
 ```
+
+Each of these:
+
+1. Runs `scripts/dev/require-stack.sh` first (a Makefile prerequisite),
+   which reuses `doctor.sh`'s own health probes against every service the
+   stack should expose. If anything is unreachable, the target **fails with
+   a non-zero exit and an actionable message** ("Run `make dev` first")
+   *before* pytest ever starts.
+2. Even once the stack passes that check, wraps the pytest invocation via
+   `scripts/dev/run-compose-suite.sh`, which reads pytest's own JUnit report
+   and fails the target if it executed **zero** tests — i.e. every selected
+   test skipped for some other reason (a partially-up stack, a marker
+   expression that matched nothing, a fixture skip unrelated to
+   reachability). This closes the all-skipped-exits-0 case even when the
+   stack looks healthy but the suite still verified nothing.
+
+A raw `cd services/<svc> && uv run pytest -m compose` still works and is
+still the command CI runs — the Make targets exist because the raw form
+gives no distinguishable signal locally when the stack isn't up; CI's
+`integration.yml` avoids the failure mode a different way (it boots the
+stack and waits for `/health` before running pytest at all, so `-m compose`
+never runs with nothing to talk to).
 
 **Local compose CI:** `.github/workflows/integration.yml` (or `make test-integration`
 against a laptop stack). Runs on push to `main`, nightly cron, and manual
@@ -152,26 +196,42 @@ is entirely post-merge, none of it in `smoke`.
 — Terraform apply from your machine with Object Storage remote state, smoke
 `/health`, optional bootstrap and `pytest -m compose`. Destroy when done.
 
-**Hetzner production-path e2e:** `.github/workflows/hetzner-e2e.yml` — Terraform
-apply on Hetzner (remote state key `inherent/ci/<run_id>/terraform.tfstate`),
-bootstrap, then public-api `pytest -m compose` against the VM. Not a PR gate.
+**Hetzner production-path e2e: REMOVED.** `.github/workflows/hetzner-e2e.yml`
+is gone; end-to-end coverage now lives entirely in GitHub Actions via
+`integration.yml` (above), which runs the full Compose stack on the runner.
 
-- **Triggers:** successful **Publish images** on a final `vX.Y.Z` tag
-  (`workflow_run`; RCs skipped), or manual **Run workflow** form.
-- **Form / inputs:** [infra/README.md § Manual run](https://github.com/inherent-prime/inherent/blob/main/infra/README.md#manual-run-github-form)
-  — `ref` (required; checkout + compose; needs `infra/`), optional
-  `inherent_version` (GHCR tag), `server_type` (default `cpx32`). “Use workflow
-  from” only selects the workflow YAML branch.
-- **Pin:** prefer aligned image tag + checkout when testing a release; use
-  `ref=main` + explicit `inherent_version` when the release tag lacks `infra/`.
-- **Secrets:** `HCLOUD_TOKEN`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`.
-- **Variables:** `HETZNER_S3_BUCKET`, `HETZNER_S3_ENDPOINT`, optional
-  `AWS_DEFAULT_REGION` (default `eu-central`).
-- **Recover orphans:** `.github/workflows/hetzner-e2e-recover.yml` (`run_id`
-  input) — same infra README section.
-- **Local `act`:** optional laptop simulation of the workflow; see infra README
-  § Local simulation and [audit/act-hetzner-e2e-weaviate-401.md](audit/act-hetzner-e2e-weaviate-401.md).
-  Smoke image parity before long runs ([releasing](maintainers/releasing.md#hetzner-act-e2e-image-parity)).
+Why it was removed rather than fixed: the lane had not produced a genuine pass
+since 2026-07-13, and its skip path reported **success** with every meaningful
+step skipped — so a green check meant either "fully verified" or "did nothing",
+indistinguishable without opening the run. v0.6.0 shipped believing it had e2e
+coverage it never had. A signal that can be silently absent is worse than no
+signal, because releasing.md pointed maintainers at it.
+
+Two real gaps it surfaced are worth remembering if the lane ever returns:
+
+- The **stdio** MCP test builds the server in-process on the runner and needs
+  direct datastore access (`localhost:15432` / `:27018` / `:18080`).
+  `docker-compose.release.yml` publishes no datastore ports and binds them to
+  `127.0.0.1` on the VM, so that test cannot work against release compose
+  without undoing that hardening. It is covered by `integration.yml`, which
+  runs dev compose on the runner itself.
+- `scripts/dev/bootstrap.sh` seeds the second tenancy principal only when
+  `SEED_PRINCIPAL_B=1` or `API_KEY` is the local dev default. Any lane using a
+  per-run key must set that flag or the cross-workspace isolation tests 401
+  instead of verifying anything.
+
+What GitHub Actions e2e does **not** cover, and is now untested in CI: the
+published GHCR images, `docker-compose.release.yml` itself (localhost-bound
+datastores, Weaviate API-key auth, required-secret guards), and any real-VM
+behaviour. Verify those manually before a release —
+[getting-started/local-vm-test.md](getting-started/local-vm-test.md) still
+provides a laptop Terraform path, and the published-image smoke check in
+[releasing](maintainers/releasing.md) still applies.
+
+- **Recover orphans:** `.github/workflows/hetzner-e2e-recover.yml` is retained
+  as a manual-dispatch cleanup tool for any leftover CI Terraform state.
+- **Local `act`:** see infra README § Local simulation and
+  [audit/act-hetzner-e2e-weaviate-401.md](audit/act-hetzner-e2e-weaviate-401.md).
 
 See [infra/README.md](https://github.com/inherent-prime/inherent/blob/main/infra/README.md#ci-e2e) and
 [releasing](maintainers/releasing.md#cutting-an-image-release).
@@ -204,17 +264,31 @@ cd services/inh-public-api-svc && uv run pytest -m security
 # REST/MCP contract regressions
 cd services/inh-public-api-svc && uv run pytest -m contract
 
-# Retrieval quality benchmarks
-cd services/inh-public-api-svc && uv run pytest -m retrieval_eval
-
 # Ingestion extraction/chunking evaluations
 cd services/inh-ingestion-svc && uv run pytest -m eval
 
 # Ingestion dependency-failure injection
 cd services/inh-ingestion-svc && uv run pytest -m failure_injection
+```
 
-# Benchmarks (either service)
-cd services/<svc> && uv run pytest -m benchmark
+`retrieval_eval` and `benchmark` are both **also** `compose`-marked (see the
+table above), so — unlike the offline markers above — a bare `-m
+retrieval_eval` / `-m benchmark` hits the #209 footgun described under
+[Default behavior](#default-behavior): it replaces the `-m 'not compose'`
+default rather than narrowing it, silently selecting only the Compose tests
+and all-skipping to a false pass with no stack up. Require the stack
+explicitly and prefer the guarded Make targets:
+
+```bash
+# Retrieval quality benchmarks -- requires a running stack
+make test-retrieval-eval
+# equivalent raw form:
+cd services/inh-public-api-svc && uv run pytest -m 'compose and retrieval_eval'
+
+# Latency/throughput benchmarks (both services) -- requires a running stack
+make test-benchmark
+# equivalent raw form:
+cd services/<svc> && uv run pytest -m 'compose and benchmark'
 ```
 
 ## Retrieval-eval gate, baseline ratchet, and trend history (#139)
@@ -225,6 +299,17 @@ that drops more than its **effective tolerance** below the committed
 `corpus/retrieval_baseline.json` fails the build, via
 `tests/evals/eval_gate.py`. An absolute-floor backstop
 (`RETRIEVAL_MIN_RECALL5`, default `0.15`) still applies underneath it.
+
+### Current baseline (#153)
+
+These are the enforced per-mode floors — the same numbers the compose gate
+compares against. They are generated from the committed
+`corpus/retrieval_baseline.json` by `tests/evals/render_baseline_table.py` and
+regenerated by `eval-baseline-ratchet` whenever a green run on `main` raises a
+metric. Do not edit them by hand. The baseline is a per-metric `max()` across
+runs, so a value may originate on a different commit than its neighbours.
+
+--8<-- "docs/_generated/retrieval-baseline.md"
 
 ### Tolerance is derived from corpus resolution (#236)
 
@@ -276,6 +361,46 @@ doubling `n` to 26 halves every metric's derived tolerance. This is a
 standing incentive to keep expanding `corpus/qrels.jsonl`, not a one-time
 trade to forget about.
 
+### Blind-spot size after the 2026-08-19 corpus growth (#265)
+
+The corpus grew from **13 to 50 gated queries** — the prior 13 (q1–q12,
+q14) plus 37 new gated ones among `qrels.jsonl` q15–q53 (that range spans 39
+ids, of which q25/q26 are `abstention` and so do not count toward `n`) —
+which closes the window described above:
+
+| | `n = 13` (2026-08-12) | `n = 50` (2026-08-19) |
+|---|---|---|
+| `recall@5` tolerance | `1/13 ≈ 0.0769` | **`0.0200`** (floor) |
+| `mrr` tolerance | `0.5/13 ≈ 0.0385` | **`0.0200`** (floor) |
+| `ndcg@5` tolerance | `(1-1/log2(3))/13 ≈ 0.0284` | **`0.0200`** (floor) |
+| binding term | `1/n` on all three | `EVAL_GATE_TOLERANCE` on all three |
+| silent-pass window | ~7.7 percentage points | **~2 percentage points** |
+
+**`n = 50` is where growth stops paying.** At 50 gated queries every metric's
+derived `min_detectable_delta` has dropped to or below the `0.02`
+`EVAL_GATE_TOLERANCE` floor, so the floor — not corpus resolution — is what
+sets the tolerance. Adding a 51st query still costs labeling effort but buys
+**zero** additional gate sensitivity; the next lever is lowering
+`EVAL_GATE_TOLERANCE` itself, which is only safe once the corpus is large
+enough to resolve the finer value (`recall@5` needs `n > 1/tolerance`, so a
+`0.01` floor would require `n > 100`).
+
+Because pooled metrics are means over the query set, the `n = 50` baseline
+numbers are **not comparable** to the `n = 13` ones they replace — they
+average a different, larger set of queries. The re-seed is documented in
+`corpus/retrieval_baseline.json`'s `_comment`; two of nine metrics moved
+down on composition alone (`keyword.recall@5` `0.8846 → 0.8600` and
+`semantic.recall@5` `0.8846 → 0.8800` — the other seven rose), which the
+automated ratchet cannot do by construction, so it landed as a reviewed
+baseline edit.
+
+Corpus composition at `n = 50` (abstention excluded from `n`): `general` 30,
+`exact_id` 8, `paraphrase` 6, `stale_version` 3, `multi_doc_crowding` 3,
+`abstention` 3 (ungated). The growth also widened the document set the corpus
+exercises from 9 to 20 fixtures, pulling in the tabular (`.xlsx`, `.csv`),
+binary-document (`.pdf`, `.docx`), subtitle (`.srt`, `.vtt`) and config
+(`.yaml`, `.toml`) extraction paths that the 13-query corpus never touched.
+
 `min_detectable_delta` and `effective_tolerance` live in `tests/evals/eval_gate.py`
 and are unit-tested (hand-computed values) in `tests/evals/test_eval_gate.py`.
 The compose test derives `n` from the same in-memory query/category mapping it
@@ -300,10 +425,14 @@ On a green gate on `main`, `.github/workflows/integration.yml`'s
 `eval-baseline-ratchet` job ratchets the baseline up to
 `max(current, baseline)` per mode/metric (never down), appends a line to
 `corpus/retrieval_history.jsonl` — a durable, checked-in trend log of every
-main-branch run's scores — regenerates the baseline table published in
-`README.md` (see [below](#publishing-the-baseline-to-readmemd)), and opens (or
-updates) a pull request carrying all three
-changes, rather than pushing to `main` directly: branch protection rejects
+main-branch run's scores, each line written as `{sha, date, n, metrics}`
+since #265 (lines appended before that carry no `n`; see
+[below](#n-on-a-history-line-and-why-two-lines-may-not-be-comparable-265)) —
+regenerates the baseline table published in
+`README.md` and `docs/_generated/retrieval-baseline.md` (see
+[below](#publishing-the-baseline)), and opens (or updates) a pull request
+carrying those changes, rather than pushing to `main` directly: branch
+protection rejects
 direct `github-actions[bot]` pushes, so a push-based ratchet silently fails
 every run (this is what left the baseline seeded at zeros for the entire time
 #139 was live — see the history log's first entry for the real numbers it was
@@ -344,40 +473,70 @@ construction. Permission/tenancy boundaries are deliberately not a category
 here — that's owned by the `security` marker suite, not this ranking-quality
 corpus.
 
-### Publishing the baseline to README.md
+### Publishing the baseline
 
 `tests/evals/render_baseline_table.py` renders `corpus/retrieval_baseline.json`
-into the marker-delimited block in `README.md`:
+into two surfaces from the same table: the marker-delimited block in
+`README.md` (#158), and `docs/_generated/retrieval-baseline.md`, which this
+page includes via `pymdownx.snippets` so the MkDocs site shows the live
+numbers (#153). `README.md` is excluded from the docs site (it would collide
+with `docs/index.md`), so the snippet is the site-visible copy.
 
 ```bash
 # from services/inh-public-api-svc
 uv run python -m tests.evals.render_baseline_table \
   --baseline tests/evals/corpus/retrieval_baseline.json \
-  --readme ../../README.md
+  --readme ../../README.md \
+  --docs-snippet ../../docs/_generated/retrieval-baseline.md
 ```
 
 Invoke it as `python -m` from the service directory, not as a bare script path
 from the repo root: it imports `load_metrics` from `eval_gate` rather than
 keeping a second copy of the doc-key-dropping parse, and only `-m` puts the
-`tests` package on `sys.path`.
+`tests` package on `sys.path`. At least one of `--readme` / `--docs-snippet`
+is required.
 
-It rewrites only the text between `<!-- retrieval-baseline:start -->` and
-`<!-- retrieval-baseline:end -->`, and fails (exit 1) if that marker pair is
-missing rather than silently leaving the README stale. Output is a pure
-function of the baseline, so re-running against an unchanged baseline is a
-no-op — the `eval-baseline-ratchet` job relies on that to keep `README.md` out
-of its commit unless the numbers actually moved.
+The README rewrite touches only the text between
+`<!-- retrieval-baseline:start -->` and `<!-- retrieval-baseline:end -->`, and
+fails (exit 1) if that marker pair is missing rather than silently leaving the
+README stale. Output is a pure function of the baseline, so re-running against
+an unchanged baseline is a no-op — the `eval-baseline-ratchet` job relies on
+that to keep `README.md` and the docs snippet out of its commit unless the
+numbers actually moved.
+
+### `n` on a history line, and why two lines may not be comparable (#265)
+
+Every history line carries `n`, the gated golden-query count that produced
+it, read from `qrels.jsonl` by the same `load_qrels_query_count` helper the
+gate derives its tolerance from — so the recorded `n` can never disagree with
+the one the gate actually used.
+
+It is there because **a history line is a pooled mean over the corpus, so two
+lines are only comparable when `n` matches.** The 2026-08-19 growth from 13 to
+50 gated queries moved every metric for reasons that have nothing to do with
+retrieval quality — a larger, differently-composed question set, not better or
+worse search. Without `n` on the line, that discontinuity is invisible and the
+log reads as one continuous trend spanning two different corpora, which is how
+a composition change gets misread as a quality regression (or a quality
+regression gets excused as a composition change).
+
+Lines written before the field existed have **no** `n` key. They are not
+assumed to be any particular size: the corpus also grew during #139, so
+backfilling a single value across the pre-#265 log would have invented
+precision the log never had. Treat a missing `n` as unknown, and do not
+compare such a line against one that has it.
 
 It renders the **baseline**, not `retrieval_history.jsonl`, deliberately: a
 history line is appended on every main-branch run (each with a fresh
 timestamp, so never a no-op), so rendering history would rewrite `README.md`
-on every run. The baseline moves only on a real improvement. The baseline is
-also a per-metric `max()` across runs, so the block reports it as a floor and
-carries no single commit SHA — stamping one would misattribute values that
-came from different commits.
+and the docs snippet on every run. The baseline moves only on a real
+improvement. The baseline is also a per-metric `max()` across runs, so the
+block reports it as a floor and carries no single commit SHA — stamping one
+would misattribute values that came from different commits.
 
-Because the ratchet job now commits `README.md`, `README.md` is in the
-workflow's `paths-ignore`; without that, merging a ratchet PR would re-trigger
+Because the ratchet job commits `README.md` and
+`docs/_generated/retrieval-baseline.md`, both are in the workflow's
+`paths-ignore`; without that, merging a ratchet PR would re-trigger
 `integration.yml` and recreate the unbounded ratchet loop that the
 `retrieval_baseline.json`/`retrieval_history.jsonl` exclusions already prevent.
 
