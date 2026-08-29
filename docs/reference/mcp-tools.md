@@ -118,7 +118,7 @@ parameters below.
 
 | Tool | HTTP | Parameters | Purpose | REST twin |
 | --- | --- | --- | --- | --- |
-| `list_workspaces` | ✅ | (none — uses authorized workspaces only) | List caller's authorized workspaces with metadata (`workspace_id`, `name`, `document_count`, `is_scoped_binding`). A workspace-scoped key sees exactly its bound workspace; a user-scoped key sees every workspace its owner owns | No direct REST twin; closest: `GET /v1/documents` |
+| `list_workspaces` | ✅ | (none — uses authorized workspaces only) | List caller's authorized workspaces with metadata. Response includes top-level `is_scoped_binding` flag (true for workspace-scoped keys, false for user-scoped) and array of workspaces, each with `workspace_id`, `name` (null if not set), and `document_count`. A workspace-scoped key sees exactly its bound workspace; a user-scoped key sees every workspace its owner owns | No direct REST twin; closest: `GET /v1/documents` |
 | `list_documents` | ✅ | `workspace_id`, `page` (1), `page_size` (20) | Paginated document listing | `GET /v1/documents` |
 | `get_document` | ✅ | `document_id` (required) | Single document's metadata | `GET /v1/documents/{id}` |
 | `list_chunks` | ✅ | `document_id` (required) | All chunks for a document | `GET /v1/chunks/{document_id}` |
@@ -169,10 +169,12 @@ reintroduced through the schema). Omit the field; do not pass
   authorized for — a workspace-scoped key sees exactly one, its bound workspace,
   while a user-scoped key sees every workspace its owner owns. Returns an
   empty list (not an error) if the caller is authorized for zero workspaces.
-  The `is_scoped_binding` flag in the response indicates whether the key is
-  workspace-scoped (always `true` for a scoped key; always `false` for a
-  user-scoped key). Use `list_workspaces` to discover valid `workspace_id`
-  values before calling workspace-targeted tools like `upload_document`.
+  Each workspace object includes `workspace_id`, `name` (null if not set in
+  metadata), and `document_count`. The response also carries a top-level
+  `is_scoped_binding` flag (always `true` for a workspace-scoped key; always
+  `false` for a user-scoped key) describing the caller's key type. Use
+  `list_workspaces` to discover valid `workspace_id` values before calling
+  workspace-targeted tools like `upload_document`.
 - Search tools do not take `include_context` / `context_window` — use
   `get_document_context` for surrounding text.
 - Permissions are exact membership, same as REST: `write` does not imply

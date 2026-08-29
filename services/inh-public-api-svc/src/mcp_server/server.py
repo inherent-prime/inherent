@@ -1175,8 +1175,10 @@ async def _handle_list_workspaces(key_info: APIKeyInfo, arguments: dict) -> list
     same authorization rule as every other tool (#138): a workspace-scoped key
     sees exactly its one bound workspace; a user-scoped key sees every workspace
     the user owns. Returns only ``workspace_id``, ``name`` (from metadata JSONB
-    if present), ``document_count``, and ``is_scoped_binding`` to match the
-    existing tool surface constraints (#297).
+    if present), and ``document_count`` to match the existing tool surface
+    constraints (#297). Top-level ``is_scoped_binding`` flag indicates whether
+    the key is workspace-scoped (always identical across all workspaces since it
+    describes the caller's key, not individual workspaces).
     """
     database = await get_database()
     authorized = await get_authorized_workspace_ids(key_info, database)
@@ -1185,44 +1187,56 @@ async def _handle_list_workspaces(key_info: APIKeyInfo, arguments: dict) -> list
         # No workspaces found — return empty list, not an error (#297)
         return _structured(
             "No workspaces found.",
-            {"workspaces": []},
+            {
+                "is_scoped_binding": bool(key_info.workspace_id),
+                "workspaces": [],
+            },
         )
 
-    # Fetch workspace metadata for all authorized workspaces
-    workspaces = []
+    # Fetch workspace metadata for all authorized workspaces in a single query
+    # (not N+1 per-workspace queries, #297).
     async with database.session() as session:
-        for workspace_id in authorized:
-            result = await session.execute(
-                text(
-                    """
-                    SELECT document_count, metadata
-                    FROM workspace_metadata
-                    WHERE workspace_id = :workspace_id
-                    """
-                ),
-                {"workspace_id": workspace_id},
-            )
-            row = result.fetchone()
+        result = await session.execute(
+            text(
+                """
+                SELECT workspace_id, document_count, metadata
+                FROM workspace_metadata
+                WHERE workspace_id = ANY(:workspace_ids)
+                """
+            ),
+            {"workspace_ids": authorized},
+        )
+        rows = result.fetchall()
 
-            # Extract name from metadata JSONB if it exists
-            name = None
-            document_count = 0
-            if row:
-                document_count = row.document_count or 0
-                metadata = row.metadata or {}
-                name = metadata.get("name") if isinstance(metadata, dict) else None
+    # Build a lookup map from query results
+    metadata_by_ws = {
+        row.workspace_id: {
+            "document_count": row.document_count or 0,
+            "name": (row.metadata.get("name") if isinstance(row.metadata, dict) else None),
+        }
+        for row in rows
+    }
 
-            # is_scoped_binding indicates if this is a workspace-scoped key
-            # (only true if key_info.workspace_id is truthy, matching
-            # get_authorized_workspace_ids's truthiness check for #138)
-            is_scoped_binding = bool(key_info.workspace_id)
-
+    # Build workspaces list, preserving order from authorized list and handling
+    # missing workspace_metadata rows (include them with count=0, name=null).
+    workspaces = []
+    for workspace_id in authorized:
+        if workspace_id in metadata_by_ws:
+            ws_meta = metadata_by_ws[workspace_id]
             workspaces.append(
                 {
                     "workspace_id": workspace_id,
-                    "name": name,
-                    "document_count": document_count,
-                    "is_scoped_binding": is_scoped_binding,
+                    "name": ws_meta["name"],
+                    "document_count": ws_meta["document_count"],
+                }
+            )
+        else:
+            # Workspace in authorized set but no metadata row yet (new workspace).
+            workspaces.append(
+                {
+                    "workspace_id": workspace_id,
+                    "name": None,
+                    "document_count": 0,
                 }
             )
 
@@ -1232,13 +1246,17 @@ async def _handle_list_workspaces(key_info: APIKeyInfo, arguments: dict) -> list
         summary_parts.append(f"- **{ws['workspace_id']}**")
         if ws["name"]:
             summary_parts.append(f" ({ws['name']})")
-        summary_parts.append(f" — {ws['document_count']} documents")
-        if ws["is_scoped_binding"]:
-            summary_parts.append(" (scoped binding)")
-        summary_parts.append("\n")
+        summary_parts.append(f" — {ws['document_count']} documents\n")
 
     summary = "".join(summary_parts).rstrip()
-    return _structured(summary, {"workspaces": workspaces})
+    is_scoped = bool(key_info.workspace_id)
+    return _structured(
+        summary,
+        {
+            "is_scoped_binding": is_scoped,
+            "workspaces": workspaces,
+        },
+    )
 
 
 # =============================================================================
