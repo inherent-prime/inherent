@@ -63,6 +63,29 @@ All notable changes to Inherent are documented here. The format follows
   reads the same `DEAD_LETTER_UNRESOLVED_STATUSES` constant as the resolve, so
   the two cannot drift apart and silently reopen the replay hole.
 
+- **MCP `search_documents` / `search_memory` now mint an eval capture
+  `event_id`, so `report_feedback` is usable over MCP (#241).**
+  `record_query_event` was called only from the REST search handler
+  (`src/api/v1/search.py`) — a single-workspace MCP search returned
+  `{query, results, workspaces_searched}` and nothing else, while
+  `report_feedback`'s schema told the agent to "pass the event_id from the
+  search response." No MCP tool ever produced one, so the evals flywheel was
+  dead on the surface the product tells customers to use
+  (`claude mcp add --transport http`). The mint-record-stamp sequence now
+  lives in one shared helper, `eval_capture.capture_search_event`, which both
+  REST and MCP call for a single-workspace search — not a second,
+  independently-written capture call on the MCP side, so a field added to
+  capture in the future cannot land on one transport and silently miss the
+  other. A single-workspace `search_documents` / `search_memory` result now
+  carries `event_id` in its structured payload (`null` when capture is
+  disabled or the write failed, exactly like REST's `SearchResponse.event_id`
+  today); a multi-workspace fan-out still carries none, matching REST's own
+  single-workspace-only capture scope. REST's request/response shape and
+  captured fields are unchanged. Captured events also record which transport
+  produced them (`eval_query_events.transport`, migration 018, backfilled
+  `'rest'` for pre-existing rows), so analytics can tell MCP traffic from
+  REST traffic.
+
 ### Added
 
 - **Evals: `POST /v1/evals/runs` accepts optional replay scoping, and

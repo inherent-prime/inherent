@@ -91,7 +91,7 @@ sequenceDiagram
 
     EP->>BG: schedule publish_audit_event<br/>(snippets, chunk_ids, risk counts, verdict, fallback)
     opt single-workspace scope and eval capture enabled for workspace
-        EP->>PG: await record_query_event (INSERT eval_query_events)
+        EP->>PG: await capture_search_event(transport="rest", …)<br/>— SAME shared helper MCP's search_documents / search_memory<br/>call for their own single-workspace search (#241)
         alt row is durable
             EP->>EP: response.event_id = event_id
         else capture failed
@@ -176,9 +176,10 @@ sequenceDiagram
 sequenceDiagram
     autonumber
     participant A as MCP client (agent)
-    participant T as _handle_search()<br/>mcp_server/server.py
+    participant T as _run_search() / _handle_search()<br/>mcp_server/server.py
     participant SS as SearchService
     participant PG as Postgres
+    participant CAP as eval_capture.capture_search_event()
 
     A->>T: call tool {query, workspace_id?, limit, min_score,<br/>search_mode, alpha, …} (api_key via transport)
     T->>T: _run_search(): empty query → "Error: Query is required"
@@ -192,9 +193,16 @@ sequenceDiagram
         T->>SS: search(workspace_id, user_id, request)
         Note over SS: identical internals — Diagram 2
         SS-->>T: results, tagged with workspace_id
+        opt exactly one workspace resolved and eval capture enabled
+            T->>CAP: capture_search_event(transport="mcp", workspace_id,<br/>user_id, request, response)
+            Note over CAP,PG: SAME shared helper REST calls (Diagram 1, #241) —<br/>mints event_id, awaits the INSERT, stamps response.event_id<br/>only when durable; never a dangling id (#240)
+            CAP->>PG: await record_query_event (INSERT eval_query_events,<br/>transport='mcp')
+            CAP->>PG: await purge_expired_events (retention) — awaited here,<br/>MCP has no BackgroundTasks queue to defer it onto
+        end
     end
     T->>T: sort by (-score, chunk_id, document_id), truncate to limit (#28)
-    T-->>A: markdown summary + structured JSON<br/>{workspace_id, chunk_id, document_id, document_name, content, score,<br/>score_source, is_stale, source_uri, content_hash}
+    T-->>A: markdown summary + structured JSON<br/>{workspace_id, chunk_id, document_id, document_name, content, score,<br/>score_source, is_stale, source_uri, content_hash} plus<br/>{query, results, workspaces_searched, event_id} at the top level
+    Note over T: event_id is null for a multi-workspace search,<br/>disabled capture, or a failed write — same contract as REST
 ```
 
 ## Behavioural invariants
@@ -214,10 +222,17 @@ sequenceDiagram
   workspace scope.
 - **MCP vs REST**: MCP searches workspaces sequentially (no semaphore/gather)
   and has no quality gate/fallback and no context-window expansion — those are
-  REST-endpoint features layered above `SearchService`.
-- **Eval capture is single-workspace only**: `event_id` / `record_query_event`
-  run only when the REST request resolved a single `workspace_id`. Multi-
-  workspace search never sets `event_id`.
+  REST-endpoint features layered above `SearchService`. Eval capture is the
+  exception: both transports share it (below).
+- **Eval capture is single-workspace only, and shared by both transports
+  (#241)**: `event_id` / `eval_capture.capture_search_event()` run only when
+  the request resolved a single `workspace_id` — REST's `search_documents`
+  route and MCP's `search_documents` / `search_memory` tools both call this
+  ONE helper rather than each minting the event independently, so a field
+  added to capture later cannot land on one transport and miss the other. A
+  multi-workspace search never sets `event_id` on either transport. The
+  captured row's `transport` column (`'rest'` | `'mcp'`) records which
+  surface produced it.
 - **Nothing after retrieval slows the response**: audit publishing, eval
   capture, and metrics are background/best-effort; a cold DB or down MQ never
   affects the serving path.

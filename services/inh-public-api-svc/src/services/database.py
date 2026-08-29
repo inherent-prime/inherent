@@ -1170,19 +1170,28 @@ class DatabaseService:
         top_score: float | None,
         quality_verdict: str | None,
         latency_ms: float,
+        transport: str = "rest",
     ) -> None:
-        """Record one captured search event (called from the capture background task)."""
+        """Record one captured search event (called from the capture background task).
+
+        ``transport`` (#241) records which surface produced the event --
+        ``"rest"`` or ``"mcp"`` -- so analytics can tell them apart. Defaults
+        to ``"rest"`` (migration 018's column default) purely so a caller that
+        predates #241 still compiles; every call site in this codebase passes
+        it explicitly (see ``src/services/eval_capture.py``).
+        """
         async with self.session() as session:
             await session.execute(
                 text(
                     """
                     INSERT INTO eval_query_events (
                         event_id, workspace_id, user_id, query_text, search_mode,
-                        result_doc_ids, result_chunk_ids, top_score, quality_verdict, latency_ms
+                        result_doc_ids, result_chunk_ids, top_score, quality_verdict,
+                        latency_ms, transport
                     ) VALUES (
                         :event_id, :workspace_id, :user_id, :query_text, :search_mode,
                         CAST(:result_doc_ids AS jsonb), CAST(:result_chunk_ids AS jsonb),
-                        :top_score, :quality_verdict, :latency_ms
+                        :top_score, :quality_verdict, :latency_ms, :transport
                     ) ON CONFLICT (event_id) DO NOTHING
                     """
                 ),
@@ -1197,6 +1206,7 @@ class DatabaseService:
                     "top_score": top_score,
                     "quality_verdict": quality_verdict,
                     "latency_ms": latency_ms,
+                    "transport": transport,
                 },
             )
             await session.commit()

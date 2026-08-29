@@ -497,32 +497,18 @@ async def test_stdio_surface_and_search(live_backend_settings: None, seeded_docu
 class MissingMcpEventIdError(Exception):
     """Raised at exactly ONE line: the ``event_id`` check below (#241).
 
-    Exists so the xfail on ``test_http_report_feedback_closes_loop`` can be
-    SCOPED to the known bug via ``raises=``. A bare ``xfail(strict=True)``
-    swallows every call-phase exception, so an MCP search regression (a
-    tool returning ``isError=True``), a transport-framing break, or a 500
-    from the feedback endpoint would all be reported as a green "xfailed" --
-    the known-broken test would silently absorb NEW breakage in the very
-    path it exercises. With ``raises`` set, only this one exception counts
-    as the expected failure; anything else is a real, loud FAILURE.
+    #241 previously left this test a strict ``xfail`` scoped to this
+    exception via ``raises=`` (a bare ``xfail(strict=True)`` would have
+    swallowed every call-phase exception -- an MCP search regression, a
+    transport-framing break, or a 500 from the feedback endpoint -- and
+    reported them all as a green "xfailed" instead of a loud failure). Now
+    that capture runs on the shared search path (#241 fixed), the xfail is
+    gone and this test asserts for real; the exception stays as the
+    precise, readable failure this one precondition raises if a future
+    regression drops ``event_id`` from the MCP search payload again.
     """
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=MissingMcpEventIdError,
-    reason=(
-        "#241 (filed, then auto-closed IN ERROR by the #240 fix commit 48cbe72 -- "
-        "PR #242's body said 'Closes #240' but the merge commit also closed #241): "
-        "no MCP search ever mints an event_id. ``record_query_event`` is called "
-        "only from src/api/v1/search.py, so _handle_search's structured payload "
-        "carries {query, results, workspaces_searched} and nothing else -- while "
-        "report_feedback's schema tells the agent to 'pass the event_id from the "
-        "search response'. An MCP-only agent cannot close the evals loop. Remove "
-        "this xfail (strict, so it fails loudly) when capture moves into the "
-        "shared search path."
-    ),
-)
 async def test_http_report_feedback_closes_loop(client: httpx.Client, seeded_document: str) -> None:
     """An event_id obtained over MCP must be durable enough for REST feedback.
 
