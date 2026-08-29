@@ -55,7 +55,7 @@ docs/
   getting-started/
     local.md                   local start, upload, ingest, and search guide
     local-vm-test.md           laptop Hetzner VM test (Object Storage TF state)
-    production.md              Hetzner Terraform deploy (VM + compose release stack)
+    deploy-hetzner.md          Hetzner Terraform deploy (VM + compose release stack)
   deploy/
     production.md              hardening checklist for the demo stack
   examples/
