@@ -23,6 +23,9 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "compose: mark test as requiring a Docker Compose stack"
     )
+    config.addinivalue_line(
+        "markers", "fastlane: surrogate non-compose marker used only by these meta-tests"
+    )
 
 def pytest_collection_modifyitems(config, items):
     markexpr = config.option.markexpr
@@ -59,7 +62,7 @@ import pytest
 
 pytestmark = [pytest.mark.compose]
 
-@pytest.mark.smoke
+@pytest.mark.fastlane
 def test_compose_smoke():
     pass
 """
@@ -91,13 +94,13 @@ def test_default_no_marker_excludes_compose(test_project):
 
 
 def test_marker_smoke_excludes_compose(test_project):
-    """pytest -m smoke should NOT collect compose tests even though test_compose_smoke is marked."""
-    result = test_project.runpytest("-m", "smoke", "--collect-only", "-q")
+    """pytest -m fastlane should NOT collect compose tests even though test_compose_smoke is marked."""
+    result = test_project.runpytest("-m", "fastlane", "--collect-only", "-q")
 
-    # The hook sees markexpr = "smoke" (no "compose" in it)
+    # The hook sees markexpr = "fastlane" (no "compose" in it)
     # So it deselects all compose-marked items
-    # test_compose_smoke.py has pytestmark = [pytest.mark.compose] but also @pytest.mark.smoke
-    # After marker filter: should select test_compose_smoke (matches smoke marker)
+    # test_compose_smoke.py has pytestmark = [pytest.mark.compose] but also @pytest.mark.fastlane
+    # After marker filter: should select test_compose_smoke (matches fastlane marker)
     # After hook: should deselect test_compose_smoke (has compose marker and markexpr doesn't mention compose)
     # Result: 0 collected
     # Exit code 5 means no tests were collected
@@ -105,12 +108,12 @@ def test_marker_smoke_excludes_compose(test_project):
 
 
 def test_marker_compose_and_smoke_includes_compose(test_project):
-    """pytest -m 'compose and smoke' should include the compose+smoke test."""
-    result = test_project.runpytest("-m", "compose and smoke", "--collect-only", "-q")
+    """pytest -m 'compose and fastlane' should include the compose+fastlane test."""
+    result = test_project.runpytest("-m", "compose and fastlane", "--collect-only", "-q")
 
-    # The hook sees markexpr = "compose and smoke" (has "compose" in it)
+    # The hook sees markexpr = "compose and fastlane" (has "compose" in it)
     # So it returns early (does nothing)
-    # Marker filter selects tests with both compose and smoke: test_compose_smoke
+    # Marker filter selects tests with both compose and fastlane: test_compose_smoke
     # Result: 1 collected (shown as "1/4 tests collected")
     assert "1/" in result.outlines[-1] and "collected" in result.outlines[-1]
 
