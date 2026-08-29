@@ -1,11 +1,23 @@
-"""embed_batch_with_retry (#311 item 5): transient-only retry, bounded wall clock."""
+"""embed_batch_with_retry (#311 item 5): transient-only retry, bounded sleep.
+
+PR #314 review finding 2: earlier versions of this module's docstring (and
+this test file's) called ``retry_budget_s`` a "wall-clock bound" -- it isn't.
+It bounds cumulative SLEEP between attempts only; each attempt can still
+independently burn a full per-request timeout before this loop ever sees it
+fail. See ``max_wall_clock_s`` (tested below) for the formula that actually
+describes one call's worst-case wall clock.
+"""
 
 from __future__ import annotations
 
 import httpx
 import pytest
 
-from inh_contracts.embedding.retry import embed_batch_with_retry, is_transient_embed_error
+from inh_contracts.embedding.retry import (
+    embed_batch_with_retry,
+    is_transient_embed_error,
+    max_wall_clock_s,
+)
 
 
 class _FakeProvider:
@@ -102,11 +114,14 @@ def test_exhausts_max_retries_then_raises_last_error() -> None:
 
 
 def test_total_sleep_never_exceeds_retry_budget() -> None:
-    """The wall-clock bound is enforced, not just documented (#311 item 5).
+    """The SLEEP bound is enforced, not just documented (#311 item 5).
 
     A huge max_retries with a tiny budget must still terminate with bounded
     total sleep time -- the loop stops retrying once the budget is spent,
-    even though attempts remain.
+    even though attempts remain. This is NOT a wall-clock bound (PR #314
+    review finding 2): the attempts themselves, not exercised by this fake
+    provider (which fails instantly), are unbounded by this mechanism -- see
+    ``test_max_wall_clock_s_*`` below for the formula that covers them too.
     """
     provider = _FakeProvider([_status_error(503)] * 1000)
     sleeps: list[float] = []
@@ -132,3 +147,38 @@ def test_retry_budget_of_zero_disables_retrying_entirely() -> None:
 
     assert provider.calls == 1
     assert sleeps == []
+
+
+# --- max_wall_clock_s (PR #314 review finding 2) -----------------------------------------------
+
+
+def test_max_wall_clock_s_matches_ingestion_batch_formula() -> None:
+    """Same shape weaviate_store_budget.py has used since #228: attempts *
+    timeout + sleep budget. With the batch/ingestion defaults this is the
+    100s/batch figure that formula's own module docstring cites."""
+    assert max_wall_clock_s(attempts=3, timeout_s=30.0, retry_budget_s=10.0) == 100.0
+
+
+def test_max_wall_clock_s_query_defaults_fit_under_the_15s_consumer_ceiling() -> None:
+    """#311's own incident cites a 15s consumer-side ceiling on interactive
+    chat search. The query-path defaults (see inh_contracts.embedding.
+    defaults) must produce a worst case comfortably under that -- this is
+    the number the PR body's retry claim now has to be honest about."""
+    from inh_contracts.embedding.defaults import (
+        DEFAULT_QUERY_MAX_RETRIES,
+        DEFAULT_QUERY_TIMEOUT_S,
+        QUERY_RETRY_SLEEP_BUDGET_S,
+    )
+
+    worst_case = max_wall_clock_s(
+        attempts=DEFAULT_QUERY_MAX_RETRIES,
+        timeout_s=DEFAULT_QUERY_TIMEOUT_S,
+        retry_budget_s=QUERY_RETRY_SLEEP_BUDGET_S,
+    )
+    assert worst_case == 12.0
+    assert worst_case < 15.0
+
+
+def test_max_wall_clock_s_treats_zero_attempts_as_one() -> None:
+    """A retry loop always makes at least one attempt -- max(1, attempts)."""
+    assert max_wall_clock_s(attempts=0, timeout_s=5.0, retry_budget_s=2.0) == 7.0

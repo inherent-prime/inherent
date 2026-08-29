@@ -11,6 +11,7 @@ from inh_contracts.defaults import DEFAULT_MONGODB_URI, DEFAULT_S3_BUCKET, DEFAU
 from inh_contracts.embedding import (
     DEFAULT_EMBEDDING_PROVIDER,
     EmbeddingIdentity,
+    EmbeddingIdentityAdoptionRequiredError,
     EmbeddingIdentityMismatchError,
     EmbeddingProvider,
     OpenAICompatibleProvider,
@@ -81,6 +82,7 @@ __all__ = [
     "EmbeddingProvider",
     "EmbeddingIdentity",
     "EmbeddingIdentityMismatchError",
+    "EmbeddingIdentityAdoptionRequiredError",
     "TEIProvider",
     "OpenAICompatibleProvider",
     "create_embedding_provider",

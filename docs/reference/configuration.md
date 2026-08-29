@@ -68,7 +68,9 @@ and binds all datastore ports to `127.0.0.1`.
 | `EMBEDDING_API_KEY` | unset | `Authorization: Bearer <key>` sent to the provider. TEI works with none set; never logged (**secret**) |
 | `EMBEDDING_MODEL_ID` | `BAAI/bge-small-en-v1.5` | Model identity — feeds the openai_compatible request body AND the model-identity guard. Must match what the provider actually serves |
 | `EMBEDDING_DIM` | `384` | Embedding vector dimension |
-| `EMBEDDING_TIMEOUT_S` | `30.0` | Per-request timeout (seconds) |
+| `EMBEDDING_TIMEOUT_S` | `5.0` | Per-request timeout (seconds) for the query embed. Deliberately smaller than inh-ingestion-svc's own default for the same var name (#311 PR #314 review finding 2) — see [Retry](#embedding-provider-model-identity-guard) below |
+| `EMBEDDING_BATCH_MAX_RETRIES` | `2` | Retry attempts for the query embed. Smaller than inh-ingestion-svc's default for the same reason |
+| `EMBEDDING_QUERY_RETRY_BUDGET_S` | `2.0` | Cumulative retry sleep budget (seconds) for the query embed |
 | `ENABLE_RERANKER` / `ENABLE_GRAPHRAG_INDEX` / `ENABLE_HIERARCHY_INDEX` | `false` | EXPERIMENTAL retrieval scaffolding — off by default, not implemented |
 | `ENABLE_DIVERSIFICATION` | `true` | Round-robin search results across `document_id` before truncating to page size, so one document can't crowd out every other result (#146). Set `false` to restore pre-2026-08-06 ranking. |
 | `DIVERSIFICATION_OVER_FETCH_MULTIPLIER` | `5` | When `ENABLE_DIVERSIFICATION` is on, fetch up to `min(100, limit * this)` candidates to diversify across; ignored when off |
@@ -149,7 +151,8 @@ and binds all datastore ports to `127.0.0.1`.
 | `EMBEDDING_MAX_TOKENS` | `512` | Hard token budget per chunk (bge-small context window) |
 | `EMBEDDING_BATCH_SIZE` / `EMBEDDING_TIMEOUT_S` | `32` / `30.0` | Texts per embedding call / per-request timeout |
 | `EMBEDDING_MAX_CONCURRENCY` | `2` | In-flight batch POSTs per `embed_texts` call (#231 phase 1). The product of this and `TEMPORAL_MAX_CONCURRENT_ACTIVITIES` is the provider in-flight cap under bulk upload — raise carefully |
-| `EMBEDDING_BATCH_MAX_RETRIES` | `3` | Per-batch HTTP retries with backoff+jitter before the activity fails (#229). Worst-case batch wall clock is included in `store_in_weaviate` StartToClose via `weaviate_store_budget.py`, bounded by the shared retry wall-clock cap (#311) |
+| `EMBEDDING_BATCH_MAX_RETRIES` | `3` | Per-batch HTTP retries with backoff+jitter before the activity fails (#229). Worst-case batch wall clock (`attempts * EMBEDDING_TIMEOUT_S + BATCH_RETRY_SLEEP_BUDGET_S` = 100s with these defaults) is included in `store_in_weaviate` StartToClose via `weaviate_store_budget.py` — see [Retry](#embedding-provider-model-identity-guard) below for why this is a DIFFERENT number from inh-public-api-svc's query path using the same var name |
+| `EMBEDDING_ADOPT_UNSTAMPED_COLLECTIONS` | `false` | Ingestion-svc only. A NON-empty collection with no persisted embedding identity (created before #311) is refused by default rather than silently adopted (#311 PR #314 review finding 3) — see [Model-identity guard](#embedding-provider-model-identity-guard) below |
 | `MAX_WORKERS` / `MAX_RETRIES` / `RETRY_DELAY_SECONDS` | `4` / `3` / `5` | Worker concurrency and retry policy |
 
 #### Format-aware chunking (#129)
@@ -247,10 +250,34 @@ supported (zero-config local dev).
 the public-api query path (`embed_query` — previously had **zero** retry,
 the exact divergence #311 closes) retry transient failures (timeouts,
 connection errors, 429, 5xx) with exponential backoff + jitter; 4xx other
-than 429 fails fast. The total time spent sleeping across every retry of one
-call is capped by `BATCH_RETRY_SLEEP_BUDGET_S` (10s, shared constant) — an
-enforced ceiling, not an estimate, so retries can never blow past the
-caller's own timeout budget regardless of `EMBEDDING_BATCH_MAX_RETRIES`.
+than 429 fails fast. The total time spent SLEEPING across every retry of one
+call is capped by a retry-budget constant (`BATCH_RETRY_SLEEP_BUDGET_S`,
+10s, on the ingestion batch path) — an enforced ceiling, not an estimate.
+
+**This bounds sleep, not wall clock (#311 PR #314 review finding 2).** Each
+*attempt* can still independently take up to `EMBEDDING_TIMEOUT_S` before
+the retry budget is even consulted — the sleep cap alone does NOT keep
+retries from blowing past a caller's real timeout. The honest worst case for
+one call is:
+
+```
+attempts * EMBEDDING_TIMEOUT_S + <retry sleep budget>
+```
+
+the same formula `inh-ingestion-svc/src/temporal/weaviate_store_budget.py`
+has used since #228 to size the `store_in_weaviate` Temporal StartToClose
+budget (100s with the batch path's defaults: 3 attempts × 30s + 10s). That
+formula is also why the query path does **not** share the batch path's
+numbers: `inh-public-api-svc`'s `embed_query` sits inside a synchronous,
+user-facing search request with a real caller-side deadline (the #311
+issue's own incident cites a 15s consumer timeout on interactive chat
+search), so it uses smaller, independently-configured defaults —
+`EMBEDDING_TIMEOUT_S=5` / `EMBEDDING_BATCH_MAX_RETRIES=2` /
+`EMBEDDING_QUERY_RETRY_BUDGET_S=2` — whose worst case (2×5+2 = 12s) actually
+fits under that ceiling, instead of the ~91.5s worst case the batch path's
+defaults produced when reused here pre-fix. `inh_contracts.embedding.retry
+.max_wall_clock_s` computes this formula and is what both paths' tests pin
+against.
 
 **Model-identity guard.** Weaviate collections are created with
 `Configure.Vectorizer.none()` and never declare a dimension — Weaviate just
@@ -265,26 +292,64 @@ collection's `description` and checked on every write (`inh-ingestion-svc`,
 - **Matching identity** — request proceeds normally.
 - **Mismatched identity** (model_id and/or dimension differ) — **hard
   error**, always, never a warning: `EmbeddingIdentityMismatchError` raises
-  and the write/search fails. Recovery is a deliberate migration (a
+  and the write/search fails. On the public-api query path this now
+  propagates all the way out to a failed request — including from a
+  multi-workspace fan-out, where a mismatch in even one workspace fails the
+  whole search instead of degrading to partial results for the others
+  (#311 PR #314 review finding 1). Recovery is a deliberate migration (a
   shadow-collection backfill + cutover, tracked as a #311 follow-up, not yet
   built) — not retrying the same request.
-- **Unstamped collection** (created before #311, or by a script that never
-  wrote a description) — **adopted**: the write path stamps it with the
-  active identity the first time it's touched and proceeds; this is what
-  keeps an existing deployment working with zero manual migration. The
-  query path never itself stamps (it has no business writing Weaviate
-  schema from a read path) — it treats an unstamped collection as "nothing
-  to assert against yet" and relies on the write path having already
-  stamped anything that actually has data to query.
+- **Unstamped collection, EMPTY** (created before #311, or by a script that
+  never wrote a description, and holding zero objects) — **adopted
+  silently**: the write path stamps it with the active identity the first
+  time it's touched and proceeds. There is nothing yet that could be
+  wrong, so this is what keeps a fresh deployment working with zero manual
+  migration.
+- **Unstamped collection, NOT empty** (#311 PR #314 review finding 3) —
+  **refused by default**. The vectors already in it were written by
+  *something*, and adopting them as the current provider's would silently
+  CERTIFY that as correct without ever checking — the exact scenario an
+  operator hits by upgrading through #311 and switching embedding providers
+  in the **same** deploy (this PR's own MiniLM/bge-small anecdote shows how
+  easily two same-dimension models go unnoticed). The write path raises
+  `EmbeddingIdentityAdoptionRequiredError` (a subclass of
+  `EmbeddingIdentityMismatchError`, so every existing
+  `except EmbeddingIdentityMismatchError: raise` guard already catches it)
+  naming the collection, unless `EMBEDDING_ADOPT_UNSTAMPED_COLLECTIONS=true`
+  is set — in which case it adopts anyway and logs a WARNING
+  (`embedding_identity_adopted_unstamped_nonempty_collection`) noting that
+  the existing vectors were never verified. **Operational rule:** when
+  upgrading through #311 on an existing deployment, deploy on the
+  **existing** embedding model first (so every collection gets stamped by a
+  normal write with nothing to verify) and change
+  `EMBEDDING_PROVIDER`/`EMBEDDING_MODEL_ID` in a **later**, separate deploy
+  — never both at once, and never with the opt-in on as a substitute for
+  that sequencing.
+- **Unstamped collection, query path** — the query path never adopts or
+  writes Weaviate schema (public-api has no business PATCHing schema from a
+  read path), and cannot cheaply prove a multi-tenant collection empty
+  across every tenant the way the write path can, so it does not apply the
+  write path's empty-collection rule either. It logs a WARNING
+  (`querying_unstamped_legacy_collection`) once per collection and then
+  proceeds — **visible, not silent** (PR #314 review finding 3), but not a
+  hard failure: query has no way to fix what it finds, and by the time a
+  collection is actually being queried, the write path will *usually*
+  already have stamped it — this covers the window, until the next write
+  touches that workspace, where a read-mostly legacy collection would
+  otherwise go unbounded time with no signal that it's unguarded.
 
-If you see `EmbeddingIdentityMismatchError` in logs: either
+If you see `EmbeddingIdentityMismatchError` (or its
+`EmbeddingIdentityAdoptionRequiredError` subclass) in logs: either
 `EMBEDDING_PROVIDER`/`EMBEDDING_MODEL_ID`/`EMBEDDING_DIM` changed without a
 deliberate migration (e.g. someone changed the TEI sidecar's `--model-id`,
 or repointed `EMBEDDING_SERVICE_URL` at a different model, without updating
 these vars to match), or two different embedding configs are pointed at the
 same Weaviate instance. Fix the config to match the vector space the target
 collection was actually built with, or plan a real re-embed migration if the
-model genuinely needs to change.
+model genuinely needs to change. For the adoption-required case
+specifically: confirm the collection's *existing* vectors actually match the
+active provider before setting `EMBEDDING_ADOPT_UNSTAMPED_COLLECTIONS=true`
+— the flag does not verify that for you, it only removes the guard.
 
 ## Not configurable via environment
 

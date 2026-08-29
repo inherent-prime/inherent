@@ -113,6 +113,52 @@ async def test_unstamped_legacy_collection_passes_without_raising() -> None:
     assert coll in svc._identity_checked
 
 
+@pytest.mark.asyncio
+async def test_unstamped_legacy_collection_logs_warning_not_silent(monkeypatch) -> None:
+    """PR #314 review finding 3: the query path must stop treating an
+    unstamped collection as silently fine -- at minimum it must be visible."""
+    from src.services import search as search_module
+
+    warnings: list[dict] = []
+    monkeypatch.setattr(
+        search_module.logger,
+        "warning",
+        lambda event, **kw: warnings.append({"event": event, **kw}),
+        raising=True,
+    )
+    coll = _get_workspace_collection_name("ws1")
+    svc, _calls = _service_with_schema(description=None)
+
+    await svc._ensure_identity_checked(coll)
+
+    assert len(warnings) == 1
+    assert warnings[0]["event"] == "querying_unstamped_legacy_collection"
+    assert warnings[0]["collection_name"] == coll
+
+
+@pytest.mark.asyncio
+async def test_unstamped_legacy_collection_warns_only_once_per_cache(monkeypatch) -> None:
+    """The warning is cached like the matched/mismatched cases -- a hot
+    collection must not log on every single request."""
+    from src.services import search as search_module
+
+    warnings: list[dict] = []
+    monkeypatch.setattr(
+        search_module.logger,
+        "warning",
+        lambda event, **kw: warnings.append({"event": event, **kw}),
+        raising=True,
+    )
+    coll = _get_workspace_collection_name("ws1")
+    svc, calls = _service_with_schema(description=None)
+
+    await svc._ensure_identity_checked(coll)
+    await svc._ensure_identity_checked(coll)
+
+    assert len(warnings) == 1
+    assert calls == [f"/v1/schema/{coll}"]  # only the first call hit the network
+
+
 # --- query-path-specific behavior ----------------------------------------------------------------
 
 

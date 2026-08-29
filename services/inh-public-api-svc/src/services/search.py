@@ -440,17 +440,29 @@ class SearchService:
         built by a different model, which returns plausible-looking noise
         with no other error anywhere.
 
-        Deliberate asymmetry vs. the write path: this method NEVER stamps an
-        unstamped ("legacy") collection, even though it silently treats one
-        as fine (nothing to assert against yet). By the time a collection has
-        data to query, ingestion's write path has already created it via
-        ``ensure_workspace_collection``, which stamps identity at creation --
-        so a queryable-but-unstamped collection only happens on a deployment
-        upgrading through #311 before its next write touches that workspace,
-        and the write path will stamp it as soon as that happens. Query
-        (public-api) has no legitimate reason to PATCH Weaviate schema on a
-        read path, so it adopts the "nothing to check yet" reading locally
-        (via the cache below) without writing anything back.
+        Deliberate asymmetry vs. the write path: this method NEVER adopts/
+        stamps an unstamped ("legacy") collection -- it has no business
+        PATCHing Weaviate schema from a read path, and (unlike the write
+        path, PR #314 review finding 3) has no cheap way to prove a
+        multi-tenant collection empty across every tenant, so it cannot
+        apply the write path's empty-collection adopt rule either. An
+        unstamped collection is therefore NEVER routed through
+        ``resolve_identity``'s adopt gate at all (see that function's
+        docstring) -- it is handled inline, directly below.
+
+        What changed (PR #314 review finding 3): an unstamped collection
+        used to be silently treated as fine, with no signal anywhere that
+        this query ran unguarded. By the time a collection has data to
+        query, ingestion's write path will USUALLY have already stamped it
+        via ``ensure_workspace_collection`` -- but "usually" is not
+        "always": a deployment upgrading through #311 has a window, until
+        the next write touches each workspace, where a read-mostly
+        collection stays unstamped indefinitely. That window is now
+        VISIBLE (a WARNING log every time it's hit) instead of silent. It
+        still does not fail the request: query has no way to fix what it
+        finds, and hard-failing every read against every not-yet-migrated
+        legacy workspace the moment this ships would be a worse regression
+        than the risk being flagged.
 
         A schema-endpoint outage or unexpected shape fails OPEN (returns
         without asserting) rather than raising -- the real connectivity
@@ -474,6 +486,18 @@ class SearchService:
             # missing-collection/tenant handling covers the empty-result case.
             return
         persisted = decode_identity(resp.json().get("description"))
+        if persisted is None:
+            # PR #314 review finding 3: visible, not silent -- see docstring.
+            # Cached like the matched/mismatched cases below so a hot
+            # collection doesn't log on every request.
+            logger.warning(
+                "querying_unstamped_legacy_collection",
+                collection_name=collection_name,
+                active_model_id=current.model_id,
+                active_dimension=current.dimension,
+            )
+            self._identity_checked.add(collection_name)
+            return
         # Raises EmbeddingIdentityMismatchError on a genuine mismatch --
         # intentionally NOT caught here, see docstring.
         resolve_identity(persisted=persisted, current=current, collection_name=collection_name)

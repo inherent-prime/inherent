@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header
+from inh_contracts.embedding.identity import EmbeddingIdentityMismatchError
 
 from src.config import settings
 from src.models.search import (
@@ -179,6 +180,13 @@ async def _search_workspaces_concurrently(
       results; the remaining workspaces still return. The request only fails if
       every workspace fails in a way that is surfaced here — single failures
       degrade to partial results rather than a 5xx.
+    - EXCEPT a model-identity mismatch (``EmbeddingIdentityMismatchError``,
+      #311 item 4): that is a server-side misconfiguration, not a
+      per-workspace hiccup — degrading it to "this workspace returned
+      nothing" would silently turn a hard-error guard into a 200 with
+      plausible-looking partial results, exactly the failure item 4 exists
+      to prevent (PR #314 review finding 1). It propagates out of this
+      function instead, failing the whole request loudly.
 
     Returns the merged (unsorted, unlimited) results and the parallel wall-clock
     time in milliseconds (measured around the gather, NOT a sum of per-workspace
@@ -200,6 +208,22 @@ async def _search_workspaces_concurrently(
                     query_vector=query_vector,
                 )
                 return resp.results
+            except EmbeddingIdentityMismatchError:
+                # #311 item 4 / PR #314 review finding 1: a model-identity
+                # mismatch means THIS workspace's results would be compared
+                # against a vector space built by a DIFFERENT embedding
+                # model — plausible-looking noise, not a genuine "nothing
+                # found". That is a server-side misconfiguration, not a
+                # transient per-workspace failure, so it must NOT be
+                # swallowed by the partial-result isolation below (which
+                # exists for real per-workspace hiccups — a Weaviate blip,
+                # a missing collection, etc.). Re-raise so asyncio.gather
+                # propagates it out of _search_workspaces_concurrently and
+                # the whole request fails loudly (a 500, logged at error
+                # level by the global error handler — not a bad request,
+                # and never a 200 with degraded results) instead of a
+                # confident-looking partial answer.
+                raise
             except Exception as exc:  # noqa: BLE001 — partial-result isolation
                 logger.warning(
                     "multi_workspace_search_partial_failure",

@@ -176,6 +176,70 @@ def test_embed_query_raises_after_exhausting_retries(monkeypatch):
         embed_query("x")
 
 
+# --- wall-clock budget is honest (PR #314 review finding 2) --------------------------------------
+
+
+def test_query_defaults_are_smaller_than_ingestion_batch_defaults():
+    """The pre-fix bug: this module copied the BATCH defaults (30s timeout,
+    3 retries) for "retry parity", producing a ~91.5s worst case against the
+    #311 issue's 15s interactive-search ceiling. The query path needs its
+    own, smaller numbers -- not the ingestion write path's."""
+    from inh_contracts.embedding.defaults import DEFAULT_BATCH_MAX_RETRIES, DEFAULT_TIMEOUT_S
+
+    from src.services import embedder
+
+    assert embedder._DEFAULT_TIMEOUT_S < DEFAULT_TIMEOUT_S
+    assert embedder._DEFAULT_BATCH_MAX_RETRIES <= DEFAULT_BATCH_MAX_RETRIES
+
+
+def test_query_worst_case_wall_clock_fits_under_15s_consumer_ceiling():
+    """attempts * timeout + sleep_budget, using this module's OWN resolved
+    defaults -- not just the shared inh_contracts constants directly -- so a
+    future accidental override in this file is caught too."""
+    from inh_contracts.embedding.retry import max_wall_clock_s
+
+    from src.services import embedder
+
+    worst_case = max_wall_clock_s(
+        attempts=embedder._batch_max_retries(),
+        timeout_s=embedder._timeout(),
+        retry_budget_s=embedder._retry_budget_s(),
+    )
+    assert worst_case < 15.0
+
+
+def test_retry_budget_s_overridable_via_env(monkeypatch):
+    from src.services import embedder
+
+    assert embedder._retry_budget_s() == embedder._DEFAULT_RETRY_BUDGET_S
+    monkeypatch.setenv("EMBEDDING_QUERY_RETRY_BUDGET_S", "0.5")
+    assert embedder._retry_budget_s() == 0.5
+
+
+def test_embed_query_retry_budget_env_is_actually_wired_through(monkeypatch):
+    """Not just readable -- embed_query must actually pass it to the shared
+    retry helper, otherwise the env var is a lie."""
+    from src.services.embedder import embed_query
+
+    monkeypatch.setenv("EMBEDDING_BATCH_MAX_RETRIES", "1000")
+    monkeypatch.setenv("EMBEDDING_QUERY_RETRY_BUDGET_S", "0")
+    fake = _install_fake(monkeypatch)
+    calls = {"n": 0}
+
+    def always_transient(texts):
+        calls["n"] += 1
+        raise httpx.ConnectError("tei down")
+
+    monkeypatch.setattr(fake, "embed_batch", always_transient)
+    with pytest.raises(httpx.ConnectError):
+        embed_query("x")
+    # A zero sleep budget must stop retrying after the first failure,
+    # regardless of the (huge) max_retries -- proves retry_budget_s reached
+    # embed_batch_with_retry rather than silently falling back to the
+    # shared package's own 10s default.
+    assert calls["n"] == 1
+
+
 # --- provider selection --------------------------------------------------------------------------
 
 

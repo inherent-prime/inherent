@@ -24,7 +24,27 @@ Config:
                             inh_contracts.embedding.identity).
     EMBEDDING_DIM         — vector dimension (default: 384, matches the
                             default model, BAAI/bge-small-en-v1.5)
-    EMBEDDING_TIMEOUT_S   — per-request timeout in seconds (default: 30)
+    EMBEDDING_TIMEOUT_S   — per-request timeout in seconds (default: 5 —
+                            see the wall-clock note below; NOT the same
+                            default as inh-ingestion-svc's batch path)
+    EMBEDDING_BATCH_MAX_RETRIES  — retry attempts for the query embed
+                            (default: 2)
+    EMBEDDING_QUERY_RETRY_BUDGET_S — cumulative retry SLEEP budget in
+                            seconds (default: 2) — see the wall-clock note
+
+Wall clock (PR #314 review finding 2): a query embed sits inside a
+synchronous, user-facing search request with a real caller-side ceiling
+(the #311 issue's own incident cites a 15s consumer timeout on interactive
+chat search) — unlike inh-ingestion-svc's batch write path, which embeds in
+a background Temporal activity with its own generously-sized StartToClose
+budget (`weaviate_store_budget.py`). The two paths therefore do NOT share
+one "the retry defaults" number: this module's defaults are deliberately
+SMALLER than the batch defaults in `inh_contracts.embedding.defaults`, so
+that `attempts * timeout + sleep_budget` (see that package's
+`max_wall_clock_s`) fits under the 15s ceiling with margin to spare —
+2 * 5 + 2 = 12s — rather than the ~91.5s worst case the pre-fix defaults
+(3 attempts * 30s timeout) produced. Set the env vars above explicitly if a
+deployment's actual consumer ceiling differs.
 """
 
 from __future__ import annotations
@@ -34,6 +54,9 @@ import threading
 from functools import lru_cache
 
 from inh_contracts.embedding import (
+    DEFAULT_QUERY_MAX_RETRIES,
+    DEFAULT_QUERY_TIMEOUT_S,
+    QUERY_RETRY_SLEEP_BUDGET_S,
     EmbeddingIdentity,
     EmbeddingProvider,
     create_embedding_provider,
@@ -53,12 +76,17 @@ _DEFAULT_URL = Settings.model_fields["embedding_service_url"].default
 _DEFAULT_DIM = Settings.model_fields["embedding_dim"].default
 _DEFAULT_PROVIDER = Settings.model_fields["embedding_provider"].default
 _DEFAULT_MODEL_ID = Settings.model_fields["embedding_model_id"].default
-_DEFAULT_TIMEOUT_S = 30.0
-# #311: query-path retry parity with the ingestion write path. embed_query
-# had ZERO retry before this — a single transient TEI hiccup failed a search
-# request outright. Matches inh-ingestion-svc's embedding_defaults.py values
-# (pinned equal by a shared contract test) so both paths behave identically.
-_DEFAULT_BATCH_MAX_RETRIES = 3
+# #311 PR #314 review finding 2: these were 30.0 / 3 -- copied from the
+# ingestion BATCH defaults for "retry parity" without noticing that parity
+# in RETRY BEHAVIOR (backoff + jitter on transient failures) does not mean
+# parity in the underlying NUMBERS is safe. attempts * timeout + sleep
+# blew past the #311 issue's own 15s interactive-search ceiling (~91.5s
+# worst case). Sourced from inh_contracts.embedding.defaults' query-path
+# constants (see that module's docstring for the full worst-case math) so
+# this module doesn't carry its own independently-typed copy.
+_DEFAULT_TIMEOUT_S = DEFAULT_QUERY_TIMEOUT_S
+_DEFAULT_BATCH_MAX_RETRIES = DEFAULT_QUERY_MAX_RETRIES
+_DEFAULT_RETRY_BUDGET_S = QUERY_RETRY_SLEEP_BUDGET_S
 
 _PROVIDER_LOCK = threading.Lock()
 _PROVIDER: EmbeddingProvider | None = None
@@ -96,6 +124,16 @@ def _timeout() -> float:
 def _batch_max_retries() -> int:
     raw = os.environ.get("EMBEDDING_BATCH_MAX_RETRIES", "").strip()
     return max(1, int(raw)) if raw else _DEFAULT_BATCH_MAX_RETRIES
+
+
+def _retry_budget_s() -> float:
+    """Cumulative retry SLEEP budget (PR #314 review finding 2) -- previously
+    unconfigurable here, silently defaulting to the batch path's 10s budget
+    via inh_contracts.embedding.batching's own default. Explicit now so the
+    query path's honest worst case (attempts * timeout + this) is a number
+    this module actually controls end to end."""
+    raw = os.environ.get("EMBEDDING_QUERY_RETRY_BUDGET_S", "").strip()
+    return float(raw) if raw else _DEFAULT_RETRY_BUDGET_S
 
 
 def _provider() -> EmbeddingProvider:
@@ -142,10 +180,15 @@ def embed_query(text: str) -> tuple[float, ...]:
     """Return a tuple of floats (hashable for LRU caching).
 
     Empty / whitespace-only input returns a zero vector without a network
-    call. Retries transient provider failures with the same bounded
-    exponential-backoff policy as the ingestion write path (#311 item 5) --
-    this used to have zero retry, so a single TEI queue blip failed a search
-    request outright.
+    call. Retries transient provider failures with the same backoff+jitter
+    MECHANISM as the ingestion write path (#311 item 5) -- this used to have
+    zero retry, so a single TEI queue blip failed a search request outright
+    -- but tuned to this path's own, much smaller wall-clock budget (PR #314
+    review finding 2; see the module docstring's "Wall clock" note): the
+    ingestion defaults alone would let retries here blow past the caller's
+    real timeout ceiling.
     """
-    vec = embed_single(_provider(), text, max_retries=_batch_max_retries())
+    vec = embed_single(
+        _provider(), text, max_retries=_batch_max_retries(), retry_budget_s=_retry_budget_s()
+    )
     return tuple(vec)

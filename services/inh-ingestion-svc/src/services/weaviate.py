@@ -153,31 +153,95 @@ class WeaviateService:
         except Exception as e:
             logger.warning("Failed to create legacy collection", error=str(e))
 
+    def _collection_is_empty(self, collection: Any) -> bool:
+        """Best-effort, CONSERVATIVE "does this collection hold any data" check.
+
+        Used only to gate the legacy-adopt policy (#311 PR #314 review
+        finding 3): adopting an unstamped collection is safe when there is
+        nothing yet that could be wrong -- an empty collection cannot hold
+        vectors written by a different model. Errs toward "NOT empty" (the
+        conservative branch, which routes through the
+        ``EMBEDDING_ADOPT_UNSTAMPED_COLLECTIONS`` opt-in instead of adopting
+        silently) on anything this cannot definitively prove empty:
+
+        - Non-multi-tenant collections (e.g. the legacy
+          ``DOCUMENT_CHUNKS_COLLECTION``): a plain aggregate object count.
+        - Multi-tenant collections (per-workspace, #12): Weaviate's aggregate
+          endpoint needs a tenant to scope to, and checking "does ANY of
+          potentially many tenants hold an object" is not one cheap call.
+          The proxy used instead is "does at least one tenant exist" --
+          every write requires a tenant to exist first, so zero tenants is a
+          safe, EXACT "empty". Any tenant existing is conservatively treated
+          as "not proven empty", even if that specific tenant holds nothing.
+        - Anything that raises while checking (schema/tenant-list call
+          failure) is treated as NOT proven empty -- fail closed, same
+          direction as the two cases above.
+        """
+        try:
+            config = collection.config.get()
+            mt_config = config.multi_tenancy_config
+            if mt_config is not None and mt_config.enabled:
+                tenants = collection.tenants.get()
+                return not tenants
+            result = collection.aggregate.over_all(total_count=True)
+            return (result.total_count or 0) == 0
+        except Exception as exc:  # noqa: BLE001 -- best-effort, see docstring
+            logger.warning("embedding_identity_emptiness_check_failed", error=str(exc))
+            return False
+
     def _check_or_stamp_collection_identity(self, collection: Any, collection_name: str) -> None:
         """Assert (or adopt) a collection's persisted embedding identity (#311 item 4).
 
         The active provider's (model_id, dimension) is persisted as the
         collection's Weaviate ``description`` (see
         ``inh_contracts.embedding.identity`` for the encode/decode format and
-        the full policy write-up). Three outcomes:
+        the full policy write-up). Outcomes:
 
-        - No persisted identity (legacy collection predating #311, or one
-          just created without it) -> ADOPT: stamp the collection with the
-          active identity now via ``config.update`` and return. This is what
-          keeps an existing deployment working with zero manual migration.
+        - No persisted identity, collection is EMPTY -> ADOPT silently: stamp
+          the collection with the active identity now via ``config.update``.
+          Nothing to be wrong about yet. This is what keeps a FRESH
+          deployment working with zero manual migration.
+        - No persisted identity, collection is NOT empty -> refuse by
+          default (PR #314 review finding 3: adopting here would silently
+          CERTIFY whatever model wrote the existing vectors as the current
+          one, e.g. an operator upgrading and switching providers in the
+          same deploy). Raises ``EmbeddingIdentityAdoptionRequiredError`` (a
+          subclass of ``EmbeddingIdentityMismatchError`` -- see its
+          docstring for why) UNLESS the operator opted in via
+          ``EMBEDDING_ADOPT_UNSTAMPED_COLLECTIONS=true``, in which case it
+          adopts anyway and logs loudly that it did.
         - Persisted identity matches -> return, nothing to do.
         - Persisted identity does NOT match -> raise
           ``EmbeddingIdentityMismatchError``. ALWAYS a hard error, never a
           warning -- callers must not swallow it (see the two call sites
           below, both of which are inside broad best-effort ``except``
-          blocks that explicitly re-raise this one exception type).
+          blocks that explicitly re-raise this one exception type -- the
+          adoption-required error above is caught by the same guards, being
+          a subclass).
         """
         from src.services.embedder import get_active_embedding_identity
 
         current = get_active_embedding_identity()
         persisted = decode_identity(collection.config.get().description)
+        is_empty: bool | None = None
+        allow_adopt = self.settings.embedding_adopt_unstamped_collections
+        if persisted is None:
+            is_empty = self._collection_is_empty(collection)
+            if not is_empty and allow_adopt:
+                logger.warning(
+                    "embedding_identity_adopted_unstamped_nonempty_collection",
+                    collection=collection_name,
+                    model_id=current.model_id,
+                    dimension=current.dimension,
+                    reason="EMBEDDING_ADOPT_UNSTAMPED_COLLECTIONS=true operator opt-in -- "
+                    "existing vectors were NOT verified to match the active provider",
+                )
         resolved = resolve_identity(
-            persisted=persisted, current=current, collection_name=collection_name
+            persisted=persisted,
+            current=current,
+            collection_name=collection_name,
+            is_empty=is_empty,
+            allow_adopt_unstamped=allow_adopt,
         )
         if persisted is None:
             collection.config.update(description=encode_identity(resolved))
@@ -186,6 +250,7 @@ class WeaviateService:
                 collection=collection_name,
                 model_id=resolved.model_id,
                 dimension=resolved.dimension,
+                was_empty=is_empty,
             )
 
     def _get_chunk_properties(self) -> list[Property]:

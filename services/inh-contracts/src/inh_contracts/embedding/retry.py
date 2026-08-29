@@ -21,6 +21,34 @@ from inh_contracts.embedding.provider import EmbeddingProvider, redact_url
 logger = logging.getLogger(__name__)
 
 
+def max_wall_clock_s(*, attempts: int, timeout_s: float, retry_budget_s: float) -> float:
+    """Worst-case wall clock for one ``embed_batch_with_retry`` call.
+
+    ``retry_budget_s`` alone (see that function's docstring) bounds only the
+    SLEEP time between attempts -- it says nothing about how long the
+    attempts themselves can take. Each of ``attempts`` tries can
+    independently burn up to ``timeout_s`` (the provider's own per-request
+    httpx timeout, set once at construction and invisible to this module)
+    before a failure is even seen here. The honest worst case is therefore
+    the same shape ``inh-ingestion-svc``'s ``weaviate_store_budget.py`` has
+    used since #228 to size its Temporal StartToClose budget::
+
+        attempts * timeout_s + retry_budget_s
+
+    This function exists so BOTH the batch/ingestion side (which already
+    computed this inline) and the query/public-api side (PR #314 review
+    finding 2, which did not -- its worst case is checked against this
+    formula in ``inh-public-api-svc/tests/unit/test_embedder.py``) share one
+    formula instead of two independently-typed copies of the same
+    arithmetic. It does not enforce anything by itself -- callers with a
+    real caller-side deadline must choose ``attempts``/``timeout_s`` (or a
+    provider timeout) so this number fits their ceiling; see
+    ``inh_contracts.embedding.defaults``' query-path constants for the
+    values that make ``embed_query`` fit the #311 issue's 15s ceiling.
+    """
+    return max(1, attempts) * timeout_s + retry_budget_s
+
+
 def is_transient_embed_error(exc: BaseException) -> bool:
     """True only for failures that may succeed on a short retry.
 
@@ -50,15 +78,28 @@ def embed_batch_with_retry(
     errors (see ``is_transient_embed_error``) raise on the first failure --
     4xx (except 429) never retries.
 
-    Wall-clock bound (#311 item 5): ``retry_budget_s`` is an ENFORCED ceiling
-    on the total time this call spends sleeping across every attempt, not
-    just an accounting estimate. Each planned delay is clamped to whatever
-    budget remains before sleeping; once the budget is exhausted the loop
-    stops retrying and raises the last error immediately, even if
-    ``max_retries`` attempts remain. This is what lets a caller's own request
-    timeout stay the real ceiling -- retries can add AT MOST
-    ``retry_budget_s`` seconds on top of the calls themselves, regardless of
-    how ``max_retries`` is configured.
+    Sleep bound, NOT wall clock (#311 item 5; corrected per PR #314 review
+    finding 2 -- this docstring previously called it a "wall-clock bound",
+    which overstated what it does): ``retry_budget_s`` is an ENFORCED
+    ceiling on the total time this call spends SLEEPING between attempts,
+    not just an accounting estimate. Each planned delay is clamped to
+    whatever budget remains before sleeping; once the budget is exhausted
+    the loop stops retrying and raises the last error immediately, even if
+    ``max_retries`` attempts remain.
+
+    What this does NOT bound: the attempts themselves. Each call to
+    ``provider.embed_batch`` can independently take up to the provider's own
+    per-request timeout (set once, at construction, on its httpx client --
+    this function has no visibility into it and cannot preempt an in-flight
+    request) before this loop ever sees it fail. So "retries can add AT MOST
+    ``retry_budget_s`` seconds on top of the calls themselves" is true, but
+    "the calls themselves" can total ``max_retries * timeout_s`` on their
+    own -- the real worst case is ``max_wall_clock_s(attempts=max_retries,
+    timeout_s=<provider timeout>, retry_budget_s=retry_budget_s)`` (see that
+    function below), not ``retry_budget_s`` alone. A caller with a real
+    deadline (e.g. a user-facing query) must pick ``max_retries`` and the
+    provider's timeout so THAT formula fits its ceiling; this function
+    cannot do that for them.
     """
     attempts = max(1, max_retries)
     last_exc: BaseException | None = None

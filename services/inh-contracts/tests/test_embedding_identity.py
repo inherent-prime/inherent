@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from inh_contracts.embedding.identity import (
+    EmbeddingIdentityAdoptionRequiredError,
     EmbeddingIdentityMismatchError,
     decode_identity,
     encode_identity,
@@ -49,10 +50,78 @@ def test_mismatch_error_message_names_both_identities() -> None:
     assert str(CURRENT.dimension) in message
 
 
-def test_unstamped_legacy_collection_adopts_current_identity() -> None:
-    """No persisted identity (persisted=None) -> adopt, never raise."""
-    result = resolve_identity(persisted=None, current=CURRENT, collection_name="Workspace_legacy")
+# --- legacy-adopt policy (PR #314 review finding 3) ------------------------------------------
+#
+# An unstamped collection used to be adopted unconditionally -- which let an
+# operator who upgraded and switched providers in the same deploy get
+# pre-existing vectors from a DIFFERENT model permanently certified as
+# matching. The five branches below are exactly the ones the review asked
+# to be pinned: empty+unstamped, non-empty+unstamped with the opt-in off,
+# non-empty+unstamped with the opt-in on, stamped+match (above), and
+# stamped+mismatch (above).
+
+
+def test_unstamped_empty_collection_adopts_silently() -> None:
+    """Nothing to be wrong about in an empty collection -- always safe to adopt."""
+    result = resolve_identity(
+        persisted=None, current=CURRENT, collection_name="Workspace_legacy", is_empty=True
+    )
     assert result == CURRENT
+
+
+def test_unstamped_nonempty_collection_without_optin_raises() -> None:
+    """The dangerous case: refuse to silently certify unverifiable vectors."""
+    with pytest.raises(EmbeddingIdentityAdoptionRequiredError, match="Workspace_legacy"):
+        resolve_identity(
+            persisted=None,
+            current=CURRENT,
+            collection_name="Workspace_legacy",
+            is_empty=False,
+            allow_adopt_unstamped=False,
+        )
+
+
+def test_unstamped_nonempty_collection_without_optin_error_is_a_mismatch_error() -> None:
+    """Must subclass EmbeddingIdentityMismatchError so every existing
+    ``except EmbeddingIdentityMismatchError: raise`` guard on the write path
+    catches this too, without any call site needing to change."""
+    with pytest.raises(EmbeddingIdentityMismatchError):
+        resolve_identity(
+            persisted=None,
+            current=CURRENT,
+            collection_name="Workspace_legacy",
+            is_empty=False,
+            allow_adopt_unstamped=False,
+        )
+
+
+def test_unstamped_nonempty_collection_with_optin_adopts() -> None:
+    """Explicit operator opt-in (EMBEDDING_ADOPT_UNSTAMPED_COLLECTIONS=true) is honored."""
+    result = resolve_identity(
+        persisted=None,
+        current=CURRENT,
+        collection_name="Workspace_legacy",
+        is_empty=False,
+        allow_adopt_unstamped=True,
+    )
+    assert result == CURRENT
+
+
+def test_unstamped_unknown_emptiness_defaults_to_the_safe_non_adopt_branch() -> None:
+    """is_empty=None (not checked) must behave like is_empty=False, not True --
+    the safe default is "prove it", never "assume it"."""
+    with pytest.raises(EmbeddingIdentityAdoptionRequiredError):
+        resolve_identity(
+            persisted=None, current=CURRENT, collection_name="Workspace_legacy", is_empty=None
+        )
+
+
+def test_adoption_required_error_names_the_opt_in_env_var() -> None:
+    """The error must tell the operator how to proceed, not just that it failed."""
+    with pytest.raises(EmbeddingIdentityAdoptionRequiredError) as exc_info:
+        resolve_identity(persisted=None, current=CURRENT, collection_name="Workspace_legacy")
+    assert "EMBEDDING_ADOPT_UNSTAMPED_COLLECTIONS" in str(exc_info.value)
+    assert "Workspace_legacy" in str(exc_info.value)
 
 
 # --- encode/decode round trip ---------------------------------------------------------------
