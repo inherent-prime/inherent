@@ -18,6 +18,12 @@ import weaviate
 # Weaviate naming now lives in the shared contracts package (single source of
 # truth, #12). Re-exported here so existing imports keep working:
 #   from src.services.weaviate import get_workspace_collection_name
+from inh_contracts.embedding.identity import (
+    EmbeddingIdentityMismatchError,
+    decode_identity,
+    encode_identity,
+    resolve_identity,
+)
 from inh_contracts.naming import (
     WORKSPACE_COLLECTION_PREFIX,
     get_user_tenant_name,
@@ -122,16 +128,65 @@ class WeaviateService:
         try:
             if self.client.collections.exists(DOCUMENT_CHUNKS_COLLECTION):
                 logger.debug("Legacy collection exists", collection=DOCUMENT_CHUNKS_COLLECTION)
+                collection = self.client.collections.get(DOCUMENT_CHUNKS_COLLECTION)
+                self._check_or_stamp_collection_identity(collection, DOCUMENT_CHUNKS_COLLECTION)
                 return
 
+            from src.services.embedder import get_active_embedding_identity
+
+            current_identity = get_active_embedding_identity()
             self.client.collections.create(
                 name=DOCUMENT_CHUNKS_COLLECTION,
                 properties=self._get_chunk_properties(),
                 vectorizer_config=Configure.Vectorizer.none(),
+                # Stamp the active embedding identity at creation time (#311
+                # item 4) so a mismatch is caught the moment a different
+                # model/provider is later pointed at this same collection.
+                description=encode_identity(current_identity),
             )
             logger.info("Created legacy collection", collection=DOCUMENT_CHUNKS_COLLECTION)
+        except EmbeddingIdentityMismatchError:
+            # Always a hard error (#311 item 4) -- never swallow into the
+            # best-effort warning below, which exists for genuine
+            # connectivity/schema failures only.
+            raise
         except Exception as e:
             logger.warning("Failed to create legacy collection", error=str(e))
+
+    def _check_or_stamp_collection_identity(self, collection: Any, collection_name: str) -> None:
+        """Assert (or adopt) a collection's persisted embedding identity (#311 item 4).
+
+        The active provider's (model_id, dimension) is persisted as the
+        collection's Weaviate ``description`` (see
+        ``inh_contracts.embedding.identity`` for the encode/decode format and
+        the full policy write-up). Three outcomes:
+
+        - No persisted identity (legacy collection predating #311, or one
+          just created without it) -> ADOPT: stamp the collection with the
+          active identity now via ``config.update`` and return. This is what
+          keeps an existing deployment working with zero manual migration.
+        - Persisted identity matches -> return, nothing to do.
+        - Persisted identity does NOT match -> raise
+          ``EmbeddingIdentityMismatchError``. ALWAYS a hard error, never a
+          warning -- callers must not swallow it (see the two call sites
+          below, both of which are inside broad best-effort ``except``
+          blocks that explicitly re-raise this one exception type).
+        """
+        from src.services.embedder import get_active_embedding_identity
+
+        current = get_active_embedding_identity()
+        persisted = decode_identity(collection.config.get().description)
+        resolved = resolve_identity(
+            persisted=persisted, current=current, collection_name=collection_name
+        )
+        if persisted is None:
+            collection.config.update(description=encode_identity(resolved))
+            logger.info(
+                "embedding_identity_stamped",
+                collection=collection_name,
+                model_id=resolved.model_id,
+                dimension=resolved.dimension,
+            )
 
     def _get_chunk_properties(self) -> list[Property]:
         """Get the standard properties for chunk collections."""
@@ -252,10 +307,19 @@ class WeaviateService:
                 # properties (provenance/freshness/risk) gain them; otherwise a
                 # search selecting those fields fails on the old schema.
                 self._reconcile_collection_properties(collection_name)
+                # #311 item 4: assert (or adopt, for a legacy pre-#311
+                # collection) the persisted embedding identity BEFORE this
+                # collection is cached as usable -- a mismatch here must
+                # raise, never get cached over.
+                collection = self.client.collections.get(collection_name)
+                self._check_or_stamp_collection_identity(collection, collection_name)
                 self._collection_cache.add(collection_name)
                 logger.debug("Workspace collection exists", collection=collection_name)
                 return collection_name
 
+            from src.services.embedder import get_active_embedding_identity
+
+            current_identity = get_active_embedding_identity()
             # Create collection with multi-tenancy enabled
             self.client.collections.create(
                 name=collection_name,
@@ -267,6 +331,10 @@ class WeaviateService:
                     auto_tenant_creation=False,  # We manage tenant creation explicitly
                     auto_tenant_activation=True,  # Auto-activate on access
                 ),
+                # Stamp the active embedding identity at creation time (#311
+                # item 4) so a later mismatched provider/model is caught
+                # instead of silently writing into the same vector space.
+                description=encode_identity(current_identity),
             )
 
             self._collection_cache.add(collection_name)
@@ -277,6 +345,12 @@ class WeaviateService:
             )
             return collection_name
 
+        except EmbeddingIdentityMismatchError:
+            # Always a hard error (#311 item 4) -- must not be caught by the
+            # generic "already exists" race handling or the catch-all log+
+            # raise below (which still re-raises, but this makes the intent
+            # explicit and skips the "already exists" string-match entirely).
+            raise
         except Exception as e:
             # Handle race condition - collection might have been created by another process
             if "already exists" in str(e).lower():
@@ -626,6 +700,20 @@ class WeaviateService:
             f"{workspace_id}:{user_id}:{document_id}:{chunk_index}",
         )
 
+        # #311 item 4: fetch the collection and assert (or adopt) its
+        # persisted embedding identity BEFORE re-embedding -- a mismatch
+        # raises here, failing fast without wasting a network round-trip on
+        # an embed call whose result could never be safely written anyway.
+        # store_chunks_with_tenant already did this check via
+        # ensure_workspace_collection when the document was first ingested;
+        # re-checking here (cheaply short-circuited by _collection_cache) is
+        # what protects a standalone edit reaching a fresh WeaviateService
+        # instance that never called ensure_workspace_collection.
+        collection = self.client.collections.get(collection_name)
+        if collection_name not in self._collection_cache:
+            self._check_or_stamp_collection_identity(collection, collection_name)
+            self._collection_cache.add(collection_name)
+
         # Re-embed the new content. embed_text does blocking HTTP to the TEI
         # sidecar, so offload it to a thread -- same reasoning as the batch
         # embed in store_chunks_with_tenant (#19): otherwise this stalls the
@@ -634,7 +722,6 @@ class WeaviateService:
 
         vector = await asyncio.to_thread(embed_text, content)
 
-        collection = self.client.collections.get(collection_name)
         tenant_collection = collection.with_tenant(tenant_name)
 
         tenant_collection.data.update(

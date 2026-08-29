@@ -63,9 +63,12 @@ and binds all datastore ports to `127.0.0.1`.
 | --- | --- | --- |
 | `SEARCH_MAX_WORKSPACE_CONCURRENCY` | `8` | Max workspaces searched concurrently per multi-workspace request |
 | `FRESHNESS_MAX_AGE_DAYS` | `90` | Evidence older than this is flagged `is_stale` (never filtered) |
-| `EMBEDDING_SERVICE_URL` | `http://text-embeddings-inference:80` | TEI sidecar base URL |
+| `EMBEDDING_PROVIDER` | `tei` | `tei` (default, non-negotiable) or `openai_compatible` — see [Embedding provider](#embedding-provider-model-identity-guard) below |
+| `EMBEDDING_SERVICE_URL` | `http://text-embeddings-inference:80` | Base URL of the embedding endpoint |
+| `EMBEDDING_API_KEY` | unset | `Authorization: Bearer <key>` sent to the provider. TEI works with none set; never logged (**secret**) |
+| `EMBEDDING_MODEL_ID` | `BAAI/bge-small-en-v1.5` | Model identity — feeds the openai_compatible request body AND the model-identity guard. Must match what the provider actually serves |
 | `EMBEDDING_DIM` | `384` | Embedding vector dimension |
-| `EMBEDDING_TIMEOUT_S` | `30.0` | Per-request TEI timeout (seconds) |
+| `EMBEDDING_TIMEOUT_S` | `30.0` | Per-request timeout (seconds) |
 | `ENABLE_RERANKER` / `ENABLE_GRAPHRAG_INDEX` / `ENABLE_HIERARCHY_INDEX` | `false` | EXPERIMENTAL retrieval scaffolding — off by default, not implemented |
 | `ENABLE_DIVERSIFICATION` | `true` | Round-robin search results across `document_id` before truncating to page size, so one document can't crowd out every other result (#146). Set `false` to restore pre-2026-08-06 ranking. |
 | `DIVERSIFICATION_OVER_FETCH_MULTIPLIER` | `5` | When `ENABLE_DIVERSIFICATION` is on, fetch up to `min(100, limit * this)` candidates to diversify across; ignored when off |
@@ -139,11 +142,14 @@ and binds all datastore ports to `127.0.0.1`.
 | `CHUNKING_STRATEGY` | `sentences` | `tokens` / `sentences` / `paragraphs`. **#129:** only consulted for a content type with no registry entry — every currently-registered format resolves a `chunking_hint` instead (see below), so this var no longer governs chunking in practice for any of them. **No per-document override reaches the upload surface yet** (`DocumentIngestionInput.chunking_strategy` exists at the workflow layer, but neither `POST /v1/documents` nor the MCP `upload_document` tool expose it — tracked in [#198](https://github.com/inherent-prime/inherent/issues/198)); there is currently no way to force one strategy uniformly across formats after this change. |
 | `MAX_CHUNK_SIZE` / `CHUNK_OVERLAP` | `1000` / `200` | Chunk sizing |
 | `EMBEDDING_ENABLED` | `true` | Toggle embedding generation |
-| `EMBEDDING_SERVICE_URL` / `EMBEDDING_DIM` | `http://text-embeddings-inference:80` / `384` | TEI sidecar |
+| `EMBEDDING_PROVIDER` | `tei` | `tei` (default, non-negotiable) or `openai_compatible` — see [Embedding provider](#embedding-provider-model-identity-guard) below |
+| `EMBEDDING_SERVICE_URL` / `EMBEDDING_DIM` | `http://text-embeddings-inference:80` / `384` | Embedding endpoint base URL / vector dimension |
+| `EMBEDDING_API_KEY` | unset | `Authorization: Bearer <key>` sent to the provider. TEI works with none set; never logged (**secret**) |
+| `EMBEDDING_MODEL_ID` | `BAAI/bge-small-en-v1.5` | Model identity — feeds the openai_compatible request body AND the model-identity guard. Must match what the provider actually serves |
 | `EMBEDDING_MAX_TOKENS` | `512` | Hard token budget per chunk (bge-small context window) |
-| `EMBEDDING_BATCH_SIZE` / `EMBEDDING_TIMEOUT_S` | `32` / `30.0` | Chunks per TEI call / per-request timeout |
-| `EMBEDDING_MAX_CONCURRENCY` | `2` | In-flight TEI batch POSTs per `embed_texts` call (#231 phase 1). The product of this and `TEMPORAL_MAX_CONCURRENT_ACTIVITIES` is the TEI in-flight cap under bulk upload — raise carefully |
-| `EMBEDDING_BATCH_MAX_RETRIES` | `3` | Per-batch HTTP retries with backoff+jitter before the activity fails (#229). Worst-case batch wall clock is included in `store_in_weaviate` StartToClose via `weaviate_store_budget.py` |
+| `EMBEDDING_BATCH_SIZE` / `EMBEDDING_TIMEOUT_S` | `32` / `30.0` | Texts per embedding call / per-request timeout |
+| `EMBEDDING_MAX_CONCURRENCY` | `2` | In-flight batch POSTs per `embed_texts` call (#231 phase 1). The product of this and `TEMPORAL_MAX_CONCURRENT_ACTIVITIES` is the provider in-flight cap under bulk upload — raise carefully |
+| `EMBEDDING_BATCH_MAX_RETRIES` | `3` | Per-batch HTTP retries with backoff+jitter before the activity fails (#229). Worst-case batch wall clock is included in `store_in_weaviate` StartToClose via `weaviate_store_budget.py`, bounded by the shared retry wall-clock cap (#311) |
 | `MAX_WORKERS` / `MAX_RETRIES` / `RETRY_DELAY_SECONDS` | `4` / `3` / `5` | Worker concurrency and retry policy |
 
 #### Format-aware chunking (#129)
@@ -197,15 +203,88 @@ docstring for the full design rationale and cost tradeoffs.
 
 ## Compose / infrastructure
 
-Consumed by compose interpolation or upstream images, not the Python services:
+Consumed by compose interpolation or upstream images, not the Python services
+(`EMBEDDING_MODEL_ID` used to live here too, back when it only configured the
+TEI sidecar's own `--model-id` — #311 made both Python services read it as
+well, so it now lives in the per-service embedding rows above and must agree
+with whatever this same var tells the sidecar to load):
 
 | Variable | Default | Effect | Secret |
 | --- | --- | --- | --- |
 | `POSTGRES_USER` / `POSTGRES_DB` | `postgres` / `knowledge_base` | Postgres identity + DB | no |
 | `POSTGRES_PASSWORD` | dev `postgres`; **release: required** | Postgres password (embedded into `DATABASE_URL`) | yes |
 | `WEAVIATE_API_KEY` | dev `local-dev-weaviate-key`; **release: required** | Configures Weaviate's accepted keys AND both clients | yes |
-| `EMBEDDING_MODEL_ID` | `BAAI/bge-small-en-v1.5` | Model the TEI sidecar loads | no |
 | `INHERENT_REGISTRY` / `INHERENT_VERSION` | `ghcr.io/inherent-prime` / `latest` | Release-stack image source + tag | no |
+
+## Embedding provider & model-identity guard
+
+Both services build their embedding client through a shared
+`EmbeddingProvider` abstraction (`services/inh-contracts/src/inh_contracts/
+embedding/`, #311) — switching providers, adding auth, or changing the model
+is an **env-only** change; no call site in either service's code changes.
+
+**Provider selection.** `EMBEDDING_PROVIDER` picks the backend: `tei`
+(default — non-negotiable, `make up`/docker-compose with no new env vars
+behaves exactly as before #311) or `openai_compatible` (any endpoint
+implementing the OpenAI `/v1/embeddings` shape). Wire formats:
+
+- **tei**: `POST /embed` with `{"inputs": [...], "truncate": true}` → a bare
+  JSON list of vectors in request order. `truncate: true` tells TEI to
+  silently truncate inputs longer than the model's `max_input_length`
+  instead of returning 413 and crashing the whole batch.
+- **openai_compatible**: `POST /v1/embeddings` with `{"model": ..., "input":
+  [...]}` → `{"data": [{"index": ..., "embedding": [...]}, ...]}`. The
+  adapter sorts the response by each entry's `index` rather than assuming
+  the API preserves request order.
+
+**Auth.** `EMBEDDING_API_KEY`, when set, is sent as `Authorization: Bearer
+<key>` — never logged, and a key accidentally embedded in
+`EMBEDDING_SERVICE_URL` itself is stripped before that URL is logged, too.
+TEI accepts the header but does not require it, so an unset key is fully
+supported (zero-config local dev).
+
+**Retry.** Both the ingestion write path (`embed_texts`/`embed_text`) and
+the public-api query path (`embed_query` — previously had **zero** retry,
+the exact divergence #311 closes) retry transient failures (timeouts,
+connection errors, 429, 5xx) with exponential backoff + jitter; 4xx other
+than 429 fails fast. The total time spent sleeping across every retry of one
+call is capped by `BATCH_RETRY_SLEEP_BUDGET_S` (10s, shared constant) — an
+enforced ceiling, not an estimate, so retries can never blow past the
+caller's own timeout budget regardless of `EMBEDDING_BATCH_MAX_RETRIES`.
+
+**Model-identity guard.** Weaviate collections are created with
+`Configure.Vectorizer.none()` and never declare a dimension — Weaviate just
+pins vector width at first insert. Querying with model A against a
+collection built with model B returns plausible-looking noise with **no
+error anywhere**. To prevent that, the active provider's identity
+(`EMBEDDING_MODEL_ID` + `EMBEDDING_DIM`) is persisted as the Weaviate
+collection's `description` and checked on every write (`inh-ingestion-svc`,
+`WeaviateService`) and every vector query (`inh-public-api-svc`,
+`SearchService`):
+
+- **Matching identity** — request proceeds normally.
+- **Mismatched identity** (model_id and/or dimension differ) — **hard
+  error**, always, never a warning: `EmbeddingIdentityMismatchError` raises
+  and the write/search fails. Recovery is a deliberate migration (a
+  shadow-collection backfill + cutover, tracked as a #311 follow-up, not yet
+  built) — not retrying the same request.
+- **Unstamped collection** (created before #311, or by a script that never
+  wrote a description) — **adopted**: the write path stamps it with the
+  active identity the first time it's touched and proceeds; this is what
+  keeps an existing deployment working with zero manual migration. The
+  query path never itself stamps (it has no business writing Weaviate
+  schema from a read path) — it treats an unstamped collection as "nothing
+  to assert against yet" and relies on the write path having already
+  stamped anything that actually has data to query.
+
+If you see `EmbeddingIdentityMismatchError` in logs: either
+`EMBEDDING_PROVIDER`/`EMBEDDING_MODEL_ID`/`EMBEDDING_DIM` changed without a
+deliberate migration (e.g. someone changed the TEI sidecar's `--model-id`,
+or repointed `EMBEDDING_SERVICE_URL` at a different model, without updating
+these vars to match), or two different embedding configs are pointed at the
+same Weaviate instance. Fix the config to match the vector space the target
+collection was actually built with, or plan a real re-embed migration if the
+model genuinely needs to change.
 
 ## Not configurable via environment
 

@@ -192,11 +192,14 @@ def live_backend_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
     ``src/services/embedder.py`` is the one component that does NOT read
     ``Settings``: it reads ``os.environ["EMBEDDING_SERVICE_URL"]`` directly
-    and memoizes an ``httpx.Client`` in a module global. So it needs BOTH an
-    env var and an explicit reset of that global -- patching the settings
-    object alone leaves it pointed at the in-network ``text-embeddings-
-    inference`` hostname, which does not resolve from the test runner's host
-    (found the hard way: ``Error: [Errno 8] nodename nor servname provided``).
+    and memoizes an ``EmbeddingProvider`` (holding its own ``httpx.Client``)
+    in a module global (``_PROVIDER`` -- #311 renamed this from ``_CLIENT``
+    when the HTTP client moved behind the shared ``inh_contracts.embedding``
+    provider abstraction). So it needs BOTH an env var and an explicit reset
+    of that global -- patching the settings object alone leaves it pointed
+    at the in-network ``text-embeddings-inference`` hostname, which does not
+    resolve from the test runner's host (found the hard way: ``Error:
+    [Errno 8] nodename nor servname provided``).
 
     Only the stdio test needs this: the HTTP tests talk to the containerized
     app, which is already configured with the in-network hostnames.
@@ -204,16 +207,16 @@ def live_backend_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     import src.services.embedder as embedder
 
     def _drop_embedder_client() -> None:
-        """Close, then null, the memoized client.
+        """Close, then null, the memoized provider's client.
 
         Nulling alone would leak the previous ``httpx.Client``'s connection
         pool (sockets stay open until GC finalizes them), and the one on the
         way OUT points at a host port this fixture only made valid for the
         duration of the test.
         """
-        if embedder._CLIENT is not None:
-            embedder._CLIENT.close()
-        embedder._CLIENT = None
+        if embedder._PROVIDER is not None:
+            embedder._PROVIDER._get_client().close()
+        embedder._PROVIDER = None
 
     for field, value in _LIVE_BACKENDS.items():
         monkeypatch.setattr(app_settings, field, value)

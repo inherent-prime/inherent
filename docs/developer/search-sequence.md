@@ -270,9 +270,16 @@ everything else.
 1. **Postgres — authorization first.** API-key validation and
    `get_user_workspace_ids(user_id)` decide which workspaces the fan-out may
    touch. Weaviate is never queried for a workspace Postgres didn't authorize.
-2. **TEI — query becomes a vector.** Same model as ingestion
-   (`EMBEDDING_MODEL_ID`, default `BAAI/bge-small-en-v1.5`, 384-dim), so
-   query↔chunk cosine comparison is meaningful. Keyword mode skips this.
+2. **Embedding provider — query becomes a vector.** Same provider/model as
+   ingestion (`EMBEDDING_PROVIDER`/`EMBEDDING_MODEL_ID`, default `tei` /
+   `BAAI/bge-small-en-v1.5`, 384-dim — see
+   [Embedding provider & model-identity guard](../reference/configuration.md#embedding-provider-model-identity-guard)),
+   so query↔chunk cosine comparison is meaningful. Before the vector query
+   runs, the target collection's persisted embedding identity is checked
+   against the active provider's — a mismatch is a hard error, not a warning
+   (#311), so a misconfigured model can't silently return noise instead of
+   real matches. Keyword mode skips both the embed call and the identity
+   check entirely.
 3. **Weaviate — the actual search.** `nearVector` / `hybrid` / `bm25` per
    workspace, scoped to collection + tenant. Ranking and scoring is purely
    Weaviate — Postgres plays no part.

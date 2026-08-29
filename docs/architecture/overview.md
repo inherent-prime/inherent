@@ -662,11 +662,14 @@ diagnostic, not the document's status of record.
   is unmerged as of this writing; whether/when it lands, and whether the
   measured 15.7%/+11% deltas it self-reports hold after eval-gate review, is
   not something the current codebase can confirm.
-- **The embedding model's actual `max_input_length`.** `embedder.py`'s
-  `truncate=True` comment names 256 tokens (all-MiniLM-L6-v2), but the
-  configured/deployed model per `docker-compose.yml` and
-  `docs/reference/configuration.md` is `BAAI/bge-small-en-v1.5` (384-dim).
-  The two models may have different real input-length ceilings; this page
-  states the *mechanism* (TEI truncates silently) as fact, and does not
-  claim a specific token count is what's enforced in the deployed stack
-  today.
+- **The embedding model's actual `max_input_length`.** The `truncate=True`
+  comment in `inh_contracts.embedding.tei_provider` (#311 moved the TEI wire
+  adapter out of each service's `embedder.py` into the shared
+  `inh-contracts` package) deliberately no longer names a specific token
+  count or model — an earlier version of this comment named 256 tokens
+  (all-MiniLM-L6-v2) while the configured/deployed model per
+  `docker-compose.yml` and `docs/reference/configuration.md` is
+  `BAAI/bge-small-en-v1.5` (384-dim), and the two models have different real
+  input-length ceilings. This page states the *mechanism* (TEI truncates
+  silently) as fact, and does not claim a specific token count is what's
+  enforced in the deployed stack today.

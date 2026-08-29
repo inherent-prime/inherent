@@ -1,13 +1,30 @@
 """inh-contracts: shared contracts consumed by both Inherent services.
 
 Single source of truth for Weaviate naming (#12), the versioned cross-service
-event schemas (#17), and shared configuration defaults (#132). See
-``inh_contracts.naming``, ``inh_contracts.events`` and ``inh_contracts.defaults``.
-event schemas (#17), and the file-type support registry (#117). See
-``inh_contracts.naming``, ``inh_contracts.events`` and ``inh_contracts.file_types``.
+event schemas (#17), shared configuration defaults (#132), the file-type
+support registry (#117), and the embedding provider abstraction (#311). See
+``inh_contracts.naming``, ``inh_contracts.events``, ``inh_contracts.defaults``,
+``inh_contracts.file_types`` and ``inh_contracts.embedding``.
 """
 
 from inh_contracts.defaults import DEFAULT_MONGODB_URI, DEFAULT_S3_BUCKET, DEFAULT_S3_REGION
+from inh_contracts.embedding import (
+    DEFAULT_EMBEDDING_PROVIDER,
+    EmbeddingIdentity,
+    EmbeddingIdentityMismatchError,
+    EmbeddingProvider,
+    OpenAICompatibleProvider,
+    TEIProvider,
+    create_embedding_provider,
+    decode_identity,
+    embed_batch_with_retry,
+    embed_single,
+    embed_texts_batched,
+    encode_identity,
+    is_transient_embed_error,
+    redact_url,
+    resolve_identity,
+)
 from inh_contracts.events import (
     CONTRACT_VERSION,
     DocumentCompletionMessage,
@@ -61,4 +78,19 @@ __all__ = [
     "sniff_content_type",
     "check_extension_consistency",
     "render_markdown_table",
+    "EmbeddingProvider",
+    "EmbeddingIdentity",
+    "EmbeddingIdentityMismatchError",
+    "TEIProvider",
+    "OpenAICompatibleProvider",
+    "create_embedding_provider",
+    "redact_url",
+    "encode_identity",
+    "decode_identity",
+    "resolve_identity",
+    "embed_single",
+    "embed_texts_batched",
+    "embed_batch_with_retry",
+    "is_transient_embed_error",
+    "DEFAULT_EMBEDDING_PROVIDER",
 ]

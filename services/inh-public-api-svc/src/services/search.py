@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
+from inh_contracts.embedding.identity import decode_identity, resolve_identity
 from inh_contracts.naming import (
     WORKSPACE_COLLECTION_PREFIX,
     get_user_tenant_name,
@@ -152,6 +153,12 @@ class SearchService:
         self.weaviate_url = weaviate_url.rstrip("/")
         self._api_key = weaviate_api_key
         self._client: httpx.AsyncClient | None = None
+        # #311 item 4: collections whose embedding identity has already been
+        # asserted this process lifetime -- mirrors WeaviateService's
+        # _collection_cache on the ingestion side. The identity cannot change
+        # mid-process (a provider swap needs a restart), so re-checking on
+        # every query would only add a schema round-trip with no extra safety.
+        self._identity_checked: set[str] = set()
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get HTTP client for Weaviate."""
@@ -423,6 +430,55 @@ class SearchService:
         """
         return f'Cannot query field "{collection_name}"' in text
 
+    async def _ensure_identity_checked(self, collection_name: str) -> None:
+        """Assert a Weaviate collection's persisted embedding identity (#311 item 4).
+
+        Read-only counterpart to ``WeaviateService._check_or_stamp_collection_
+        identity`` on the ingestion write path. A mismatch is a hard error
+        (``EmbeddingIdentityMismatchError`` propagates, never caught here) --
+        it means this query's vector would be compared against a vector space
+        built by a different model, which returns plausible-looking noise
+        with no other error anywhere.
+
+        Deliberate asymmetry vs. the write path: this method NEVER stamps an
+        unstamped ("legacy") collection, even though it silently treats one
+        as fine (nothing to assert against yet). By the time a collection has
+        data to query, ingestion's write path has already created it via
+        ``ensure_workspace_collection``, which stamps identity at creation --
+        so a queryable-but-unstamped collection only happens on a deployment
+        upgrading through #311 before its next write touches that workspace,
+        and the write path will stamp it as soon as that happens. Query
+        (public-api) has no legitimate reason to PATCH Weaviate schema on a
+        read path, so it adopts the "nothing to check yet" reading locally
+        (via the cache below) without writing anything back.
+
+        A schema-endpoint outage or unexpected shape fails OPEN (returns
+        without asserting) rather than raising -- the real connectivity
+        problem will already surface from the GraphQL query this precedes,
+        and turning a schema-fetch hiccup into a confusing identity error
+        here would only obscure that.
+        """
+        if collection_name in self._identity_checked:
+            return
+        from src.services.embedder import get_active_embedding_identity
+
+        current = get_active_embedding_identity()
+        client = await self._get_client()
+        try:
+            resp = await client.get(f"/v1/schema/{collection_name}")
+        except httpx.HTTPError:
+            return
+        if resp.status_code != 200:
+            # 404 (collection doesn't exist yet) or any other non-200:
+            # nothing to assert against here -- _search_weaviate's own
+            # missing-collection/tenant handling covers the empty-result case.
+            return
+        persisted = decode_identity(resp.json().get("description"))
+        # Raises EmbeddingIdentityMismatchError on a genuine mismatch --
+        # intentionally NOT caught here, see docstring.
+        resolve_identity(persisted=persisted, current=current, collection_name=collection_name)
+        self._identity_checked.add(collection_name)
+
     async def _search_weaviate(
         self,
         workspace_id: str,
@@ -450,6 +506,14 @@ class SearchService:
 
         _require_safe_name(collection_name, "collection")
         _require_safe_name(tenant_name, "tenant")
+
+        # #311 item 4: assert the collection's persisted embedding identity
+        # BEFORE issuing the vector query -- only relevant when a query
+        # vector is actually used (semantic/hybrid); pure keyword (BM25)
+        # search never touches the vector space. A mismatch raises here,
+        # failing fast instead of returning plausible-looking noise.
+        if query_vector is not None:
+            await self._ensure_identity_checked(collection_name)
 
         graphql_query = self._build_graphql(collection_name, tenant_name, request, query_vector)
 
