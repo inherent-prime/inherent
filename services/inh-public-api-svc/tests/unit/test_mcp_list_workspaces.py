@@ -79,18 +79,19 @@ async def test_list_workspaces_user_scoped_key_sees_all_authorized() -> None:
     mock_db.session.return_value.__aexit__ = AsyncMock(return_value=None)
 
     # Single query returns all workspaces at once
-    async def mock_execute(query):
-        mock_result = AsyncMock()
-        mock_result.fetchall = AsyncMock(
-            return_value=[
-                _mock_workspace_row("ws-a", 10, "Workspace A"),
-                _mock_workspace_row("ws-b", 20, "Workspace B"),
-                _mock_workspace_row("ws-c", 0, None),
-            ]
-        )
+    mock_result = MagicMock()
+    mock_result.fetchall = MagicMock(
+        return_value=[
+            _mock_workspace_row("ws-a", 10, "Workspace A"),
+            _mock_workspace_row("ws-b", 20, "Workspace B"),
+            _mock_workspace_row("ws-c", 0, None),
+        ]
+    )
+
+    async def execute_side_effect(*args, **kwargs):
         return mock_result
 
-    mock_session.execute = mock_execute
+    mock_session.execute = AsyncMock(side_effect=execute_side_effect)
 
     with patch.object(mcp_server, "get_database", AsyncMock(return_value=mock_db)):
         result = await mcp_server._handle_list_workspaces(_key(), {})
@@ -121,14 +122,15 @@ async def test_list_workspaces_scoped_key_sees_only_bound_workspace() -> None:
     mock_db.session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
     mock_db.session.return_value.__aexit__ = AsyncMock(return_value=None)
 
-    async def mock_execute(query):
-        mock_result = AsyncMock()
-        mock_result.fetchall = AsyncMock(
-            return_value=[_mock_workspace_row(workspace_id, 15, "Bound Workspace")]
-        )
+    mock_result = MagicMock()
+    mock_result.fetchall = MagicMock(
+        return_value=[_mock_workspace_row(workspace_id, 15, "Bound Workspace")]
+    )
+
+    async def execute_side_effect(*args, **kwargs):
         return mock_result
 
-    mock_session.execute = mock_execute
+    mock_session.execute = AsyncMock(side_effect=execute_side_effect)
 
     with patch.object(mcp_server, "get_database", AsyncMock(return_value=mock_db)):
         result = await mcp_server._handle_list_workspaces(scoped_key, {})
@@ -177,14 +179,15 @@ async def test_list_workspaces_response_shape() -> None:
     mock_db.session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
     mock_db.session.return_value.__aexit__ = AsyncMock(return_value=None)
 
-    async def mock_execute(query):
-        mock_result = AsyncMock()
-        mock_result.fetchall = AsyncMock(
-            return_value=[_mock_workspace_row("ws-test", 42, "Test Workspace")]
-        )
+    mock_result = MagicMock()
+    mock_result.fetchall = MagicMock(
+        return_value=[_mock_workspace_row("ws-test", 42, "Test Workspace")]
+    )
+
+    async def execute_side_effect(*args, **kwargs):
         return mock_result
 
-    mock_session.execute = mock_execute
+    mock_session.execute = AsyncMock(side_effect=execute_side_effect)
 
     with patch.object(mcp_server, "get_database", AsyncMock(return_value=mock_db)):
         result = await mcp_server._handle_list_workspaces(_key(), {})
@@ -230,12 +233,12 @@ async def test_list_workspaces_single_query_regardless_of_workspace_count() -> N
     # Track execute calls
     execute_call_count = 0
 
-    async def mock_execute(query):
+    async def count_and_return(*args, **kwargs):
         nonlocal execute_call_count
         execute_call_count += 1
-        mock_result = AsyncMock()
+        mock_result = MagicMock()
         # Return all workspaces from single query
-        mock_result.fetchall = AsyncMock(
+        mock_result.fetchall = MagicMock(
             return_value=[
                 _mock_workspace_row(ws_id, i * 10, f"Workspace {i}")
                 for i, ws_id in enumerate(authorized_ws)
@@ -243,7 +246,7 @@ async def test_list_workspaces_single_query_regardless_of_workspace_count() -> N
         )
         return mock_result
 
-    mock_session.execute = mock_execute
+    mock_session.execute = AsyncMock(side_effect=count_and_return)
 
     with patch.object(mcp_server, "get_database", AsyncMock(return_value=mock_db)):
         result = await mcp_server._handle_list_workspaces(_key(), {})
@@ -271,15 +274,16 @@ async def test_list_workspaces_missing_metadata_row() -> None:
     mock_db.session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
     mock_db.session.return_value.__aexit__ = AsyncMock(return_value=None)
 
-    async def mock_execute(query):
-        mock_result = AsyncMock()
-        # Only ws-existing has a metadata row; ws-new is missing
-        mock_result.fetchall = AsyncMock(
-            return_value=[_mock_workspace_row("ws-existing", 10, "Existing")]
-        )
+    mock_result = MagicMock()
+    # Only ws-existing has a metadata row; ws-new is missing
+    mock_result.fetchall = MagicMock(
+        return_value=[_mock_workspace_row("ws-existing", 10, "Existing")]
+    )
+
+    async def execute_side_effect(*args, **kwargs):
         return mock_result
 
-    mock_session.execute = mock_execute
+    mock_session.execute = AsyncMock(side_effect=execute_side_effect)
 
     with patch.object(mcp_server, "get_database", AsyncMock(return_value=mock_db)):
         result = await mcp_server._handle_list_workspaces(_key(), {})
