@@ -21,7 +21,7 @@ permissions, and freshness signals.
 | If you need to... | Open this |
 | --- | --- |
 | Start the system locally and run the first upload/search flow | [Local quickstart](getting-started/local.md) |
-| Deploy to a Hetzner VM with Terraform | [Production](getting-started/production.md) |
+| Deploy to a Hetzner VM with Terraform | [Production](getting-started/deploy-hetzner.md) |
 | Harden the stack before real users/data | [Production hardening](deploy/production.md) |
 | Separate content by clearance, tenant, or need-to-know | [Access-control model](access-control.md) |
 | Replace a document that changed, or run a clean retrieval eval | [Keeping content current](keeping-content-current.md) |
