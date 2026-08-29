@@ -44,6 +44,54 @@ claude mcp add --transport http inherent https://api.inherent.sh/mcp \
   `validation_error`, `unknown_tool`, `internal_error`) instead of the plain
   prose stdio still returns.
 
+### OAuth 2.1 resource-server discovery (hosted only, #295)
+
+`/mcp`'s auth is `X-API-Key` / `Bearer ink_...` only, by default -- nothing
+below changes unless `OAUTH_ENABLED=true` is set (default **false**). A
+self-hosted deployment should leave this off: turning it on advertises
+`OAUTH_AUTHORIZATION_SERVER` as a trusted issuer for this resource, so it
+must only ever be set to an authorization server the operator actually
+runs (or, for the hosted SaaS deployment, Clerk).
+
+With `OAUTH_ENABLED=true`:
+
+- `GET /.well-known/oauth-protected-resource` serves an
+  [RFC 9728](https://datatracker.ietf.org/doc/html/rfc9728)
+  protected-resource metadata document naming `OAUTH_AUTHORIZATION_SERVER`
+  and the minimal `OAUTH_SCOPES_SUPPORTED` catalogue (default `["kb:read",
+  "kb:search"]` -- write access is never advertised upfront; it arrives via
+  a 403 `insufficient_scope` step-up on the specific tool that needs it).
+  This route does not exist at all when OAuth is disabled (a request 404s
+  exactly as if the route were never registered, because it wasn't).
+- An unauthenticated `/mcp` request's 401 carries a combined
+  `WWW-Authenticate` header advertising BOTH schemes --
+  `ApiKey, Bearer resource_metadata="...", scope="kb:read kb:search"` --
+  never silently dropping the `ApiKey` challenge existing clients rely on.
+- `Authorization: Bearer <token>` is treated as an OAuth access token only
+  when the token does NOT start with the `ink_` API-key prefix; a `Bearer
+  ink_...` value keeps resolving through the unchanged API-key path.
+  Presented tokens are verified against `OAUTH_AUTHORIZATION_SERVER`'s
+  published JWKS: signature, `iss`, `exp`, and -- non-negotiably, per
+  [RFC 8707 Sec 2](https://datatracker.ietf.org/doc/html/rfc8707#section-2)
+  -- that `aud` contains `OAUTH_RESOURCE_IDENTIFIER`. A token for any other
+  resource is rejected outright, not merely logged about. An expired token
+  always comes back as 401 (never 403), so a client's silent-refresh path
+  can key off status code alone.
+- Config: `OAUTH_ENABLED`, `OAUTH_AUTHORIZATION_SERVER`,
+  `OAUTH_RESOURCE_IDENTIFIER`, `OAUTH_SCOPES_SUPPORTED`, `OAUTH_JWKS_URL`
+  (optional override; defaults to
+  `<OAUTH_AUTHORIZATION_SERVER>/.well-known/jwks.json`),
+  `OAUTH_JWKS_CACHE_SECONDS` -- see `src/config/settings.py` for the full
+  field docs.
+- **Scope of #295**: this issue is the resource-server contract only
+  (discovery + the 401/403 challenge shapes + token verification). A
+  verified OAuth caller with sufficient scope for a tool still gets a
+  clearly-labeled "not yet available" rejection on `tools/call` --
+  executing a tool needs mapping the token's `sub` to an Inherent
+  user/workspace, which needs the identity link the commercial platform
+  owns, not this repo (see issue #295's "Scope" section). `tools/list`
+  works today for an OAuth caller since it needs no workspace resolution.
+
 ### stdio (self-hosters / internal development)
 
 - Start the service with `SERVICE_MODE=mcp`; the MCP server runs as its own

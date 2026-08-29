@@ -5,6 +5,33 @@ All notable changes to Inherent are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`/mcp` can now serve as an RFC 9728 OAuth 2.1 resource server, flag-gated
+  off by default (#295).** MCP clients (Claude Code included) discover an
+  authorization server via `WWW-Authenticate: Bearer` + a
+  `GET /.well-known/oauth-protected-resource` metadata document instead of
+  guessing — the prerequisite for a browser-popup sign-in flow, ahead of a
+  hosted OAuth rollout via Clerk. Everything is inert unless
+  `OAUTH_ENABLED=true` (default `false`): with it off, `/mcp`'s 401 and the
+  well-known route's absence are byte-identical to before this change — a
+  self-hosted stack must never advertise an authorization server it doesn't
+  run. With it on: `/mcp`'s 401 advertises `ApiKey` and `Bearer` together
+  (never silently dropping the scheme existing clients use); a presented
+  bearer token is verified against the configured authorization server's
+  JWKS (signature, `iss`, `exp`, and non-negotiably `aud` — a token minted
+  for a different resource is rejected, not warned about, per RFC 8707 Sec
+  2); an expired token is always 401, never 403; a token missing a tool's
+  required scope gets the spec's `insufficient_scope` shape. `X-API-Key` /
+  `Bearer ink_...` auth is completely unchanged, on `/mcp` and REST alike. A
+  new `Principal` abstraction (`src/services/auth.py`) is the seam #309's
+  per-identity entitlements/quotas will build on; #295 itself stops at
+  authentication — executing a tool call as an OAuth-authenticated identity
+  needs the account-linking work the commercial platform owns, not this
+  repo, so a validated OAuth caller gets an honest "not yet available"
+  rather than a guessed workspace. See `docs/reference/mcp-tools.md`
+  (#295).
+
 ### Changed
 
 - **Retrieval-eval golden corpus grown from 13 to 50 gated queries, closing

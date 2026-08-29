@@ -33,6 +33,21 @@ this module declares a tool description, schema, or handler a second time:
 stdio (``server.py::run_mcp_server``) is completely unaffected: same
 registry, same handlers, same ``api_key``-in-schema contract, same
 ``list[TextContent]`` / ``isError=False`` convention it has always had.
+
+OAuth 2.1 resource-server support (#295)
+-----------------------------------------
+Flag-gated by ``settings.oauth_enabled`` (default False -- see
+``src/config/settings.py``). ``mount_mcp_http``'s ASGI auth gate now
+dispatches on credential SHAPE: an ``X-API-Key`` header or an
+``Authorization: Bearer ink_...`` value still resolves through the
+UNCHANGED ``get_api_key_info`` path above; only an ``Authorization: Bearer
+<non-ink_ token>`` value, and only while OAuth is enabled, is verified as an
+OAuth access token instead (``src.services.auth.verify_oauth_token``). With
+the flag off, this module's behavior -- including every 401's
+``WWW-Authenticate`` header -- is byte-identical to before #295; see
+``tests/unit/test_oauth_config_gate.py``. See ``src/services/auth.py``'s
+"OAuth 2.1 resource-server support" section for the ``Principal`` /
+``TokenValidationError`` / challenge-building pieces this module wires in.
 """
 
 from __future__ import annotations
@@ -40,16 +55,24 @@ from __future__ import annotations
 import copy
 from contextvars import ContextVar
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, status
 from mcp.server import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.types import CallToolResult, TextContent, Tool
 from starlette.requests import Request
 from starlette.types import Receive, Scope, Send
 
+from src.config import settings
 from src.mcp_server.server import _TOOLS, ToolDef
 from src.models.api_key import APIKeyInfo
-from src.services.auth import get_api_key_info
+from src.services.auth import (
+    PERMISSION_SCOPE_MAP,
+    Principal,
+    TokenValidationError,
+    build_www_authenticate,
+    get_api_key_info,
+    verify_oauth_token,
+)
 from src.utils import get_logger
 
 logger = get_logger(__name__)
@@ -66,6 +89,18 @@ logger = get_logger(__name__)
 # ``src/middleware/request_context.py`` already uses for request-scoped state
 # across this app's own middleware stack.
 _current_key_info: ContextVar[APIKeyInfo | None] = ContextVar("mcp_http_key_info", default=None)
+
+# Carries an OAuth-authenticated caller (#295) alongside `_current_key_info`
+# above -- a SEPARATE contextvar rather than widening `_current_key_info`'s
+# type, so every existing test that sets `_current_key_info` directly to a
+# plain `APIKeyInfo` (see tests/contract/test_mcp_http_transport.py's
+# `_call_http_tool` helper) keeps working completely unedited. Exactly one
+# of the two is ever set on an authenticated request; `call_tool` below
+# checks `_current_key_info` first (unchanged code path) and falls back to
+# this one only when that is None.
+_current_oauth_principal: ContextVar[Principal | None] = ContextVar(
+    "mcp_http_oauth_principal", default=None
+)
 
 # Branchable failure classes surfaced in ``CallToolResult.structuredContent``
 # (#216: "errors must set isError=True with a branchable failure class").
@@ -208,7 +243,18 @@ def create_http_mcp_server() -> Server:
         runs, exactly like stdio's dispatcher and REST's route dependencies.
         """
         key_info = _current_key_info.get()
-        if key_info is None:  # pragma: no cover - defensive; the ASGI gate always sets this
+        if key_info is None:
+            # Not an API-key caller -- check the OAuth contextvar (#295)
+            # before falling back to the "nothing authenticated" defensive
+            # branch. Kept as a separate branch (not merged into the
+            # code below) so the API-key path -- and every test pinned to
+            # it -- is untouched byte-for-byte.
+            oauth_principal = _current_oauth_principal.get()
+            if oauth_principal is not None:
+                return await _call_tool_oauth(name, oauth_principal)
+
+            # pragma: no cover - defensive; the ASGI gate always sets one of
+            # the two contextvars above before handle_request ever runs.
             logger.error("MCP HTTP call_tool invoked with no authenticated key in context")
             return _error_result(
                 "Error: authentication context missing", FAILURE_CLASS_AUTHENTICATION
@@ -244,6 +290,61 @@ def create_http_mcp_server() -> Server:
     return server
 
 
+async def _call_tool_oauth(name: str, principal: Principal) -> CallToolResult:
+    """OAuth-authenticated `call_tool` dispatch (#295).
+
+    Scope-checks the call against the token's granted scopes -- the same
+    per-tool enforcement point the API-key path uses
+    (`key_info.has_permission`), just keyed on `PERMISSION_SCOPE_MAP`
+    instead. A token missing the tool's required scope gets the spec's
+    `insufficient_scope` shape (acceptance criteria): `structuredContent`
+    carries `error="insufficient_scope"` and the `scope` a client would need
+    to request on its next authorization attempt.
+
+    Deliberately stops there rather than invoking `tool.handler`: every
+    handler in `server.py` takes an `APIKeyInfo` and, through it, a
+    `user_id`/`workspace_id` this repo has no way to derive from an OAuth
+    token yet -- mapping the token's `sub` (Clerk identity) to an Inherent
+    user/workspace needs the account link issue #295 explicitly scopes OUT
+    ("the resource-server half only"; identity/entitlement resolution is
+    #309's territory). Executing a tool against a fabricated or unscoped
+    identity would be the exact fail-OPEN issue #295's own comments warn
+    against, so a validated-but-unresolvable OAuth caller gets a clear,
+    honest rejection instead of a guessed workspace.
+    """
+    tool = _http_tools().get(name)
+    if tool is None:
+        # Same undifferentiated message as the API-key path (see the
+        # comment on that branch above) -- whether the tool never existed or
+        # is HTTP-excluded is not something either caller should be able to
+        # probe for.
+        return _error_result(f"Error: Unknown tool '{name}'", FAILURE_CLASS_UNKNOWN_TOOL)
+
+    required_scope = PERMISSION_SCOPE_MAP.get(tool.permission, tool.permission)
+    if not principal.has_scope(required_scope):
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=f"Error: token missing required scope '{required_scope}'",
+                )
+            ],
+            structuredContent={
+                "error_class": FAILURE_CLASS_AUTHORIZATION,
+                "error": "insufficient_scope",
+                "scope": required_scope,
+            },
+            isError=True,
+        )
+
+    return _error_result(
+        "Error: OAuth-authenticated tool execution is not yet available -- "
+        "identity resolution for bearer tokens is tracked separately from "
+        "#295's resource-server auth contract",
+        FAILURE_CLASS_AUTHENTICATION,
+    )
+
+
 class _StreamableHTTPEndpoint:
     """Adapts the raw ``mcp_asgi_app`` coroutine (defined inside
     ``mount_mcp_http`` below) into an object Starlette's ``Route`` recognizes
@@ -262,6 +363,48 @@ class _StreamableHTTPEndpoint:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         await self._handler(scope, receive, send)
+
+
+def _looks_like_oauth_bearer(authorization: str | None) -> bool:
+    """True for an `Authorization: Bearer <token>` header whose token is NOT
+    an Inherent API key (#295's credential-shape dispatch).
+
+    API keys are always issued with the `ink_` prefix (see
+    `Makefile`'s `DEV_API_KEY`); a client is free to send one via either
+    `X-API-Key` or `Authorization: Bearer ink_...` and both must keep
+    resolving through the unchanged `get_api_key_info` path -- only a
+    `Bearer` credential that does NOT start with `ink_` is treated as an
+    OAuth access token.
+    """
+    if not authorization or not authorization.startswith("Bearer "):
+        return False
+    token = authorization[len("Bearer ") :]
+    return not token.startswith("ink_")
+
+
+def _resource_metadata_url(request: Request) -> str:
+    """Absolute URL of this deployment's RFC 9728 metadata document,
+    derived from the live request's own scheme+host rather than a fixed
+    setting -- so the SAME challenge is correct in dev/staging/prod without
+    a second base-URL knob that could drift from `error_base_url` (#222) or
+    from whatever host the client actually reached."""
+    return f"{str(request.base_url).rstrip('/')}/.well-known/oauth-protected-resource"
+
+
+def _oauth_401(request: Request, *, error: str) -> HTTPException:
+    """401 for a rejected OAuth bearer credential (#295).
+
+    `detail` is a generic message -- never anything derived from the
+    token or from a PyJWT exception's own text (see
+    `verify_oauth_token`'s docstring on why that's never safe to surface).
+    """
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or expired bearer token",
+        headers={
+            "WWW-Authenticate": build_www_authenticate(_resource_metadata_url(request), error=error)
+        },
+    )
 
 
 def mount_mcp_http(app: FastAPI) -> StreamableHTTPSessionManager:
@@ -321,29 +464,79 @@ def mount_mcp_http(app: FastAPI) -> StreamableHTTPSessionManager:
         way the MCP transport controls its own framing.
         """
         request = Request(scope, receive)
-        # Reuses REST's OWN dependency function directly (not "equivalent
-        # logic re-implemented here") -- called as a plain coroutine with the
-        # header values instead of through FastAPI's DI, which is exactly how
-        # `Depends(get_api_key_info)` already resolves it on every REST
-        # route. This is what makes #138 (workspace-scoped key binding) and
-        # #180 (expiry) closed BY CONSTRUCTION for MCP: any future fix to
-        # `require_api_key` / `get_api_key_info` applies to both surfaces the
-        # moment it lands, with nothing in this module to keep in sync.
-        # Raises `fastapi.HTTPException` on a missing/invalid/expired key,
-        # which propagates out of this ASGI callable exactly like it would
-        # out of a REST route handler -- Starlette's `ExceptionMiddleware`
-        # (the SAME handler `setup_exception_handlers` registers for REST)
-        # converts it to the SAME RFC 7807 401 response REST returns.
-        key_info = await get_api_key_info(
-            x_api_key=request.headers.get("x-api-key"),
-            authorization=request.headers.get("authorization"),
-        )
+        x_api_key = request.headers.get("x-api-key")
+        authorization = request.headers.get("authorization")
+
+        key_info: APIKeyInfo | None = None
+        oauth_principal: Principal | None = None
+
+        # Dispatch on credential SHAPE (#295, design constraint #5):
+        # `X-API-Key` / `Authorization: Bearer ink_...` -> the existing
+        # path, byte-for-byte unchanged below; `Authorization: Bearer
+        # <anything else>`, only when OAuth is enabled -> the new OAuth
+        # path. Everything else (including EVERY case when
+        # `settings.oauth_enabled` is False) falls through to the original
+        # `get_api_key_info` call unchanged -- this `if` is the ENTIRE
+        # surface through which OAuth can affect behavior, so "oauth
+        # disabled" really is "this module behaves exactly as it did before
+        # #295" by construction, not by care taken elsewhere.
+        if settings.oauth_enabled and _looks_like_oauth_bearer(authorization):
+            assert authorization is not None  # narrowed by _looks_like_oauth_bearer
+            token_str = authorization[len("Bearer ") :]
+            try:
+                claims = await verify_oauth_token(token_str)
+            except TokenValidationError as exc:
+                # `exc.reason` (e.g. "token_expired", "invalid_audience") is
+                # for server-side diagnosis only -- see
+                # `TokenValidationError`'s docstring for why it never reaches
+                # the client. Logged as a bare reason code, never with the
+                # token or any exception message that might echo it.
+                logger.warning("oauth_token_rejected", reason=exc.reason)
+                raise _oauth_401(request, error="invalid_token") from None
+            oauth_principal = Principal.from_oauth_claims(claims)
+        else:
+            # Reuses REST's OWN dependency function directly (not "equivalent
+            # logic re-implemented here") -- called as a plain coroutine with the
+            # header values instead of through FastAPI's DI, which is exactly how
+            # `Depends(get_api_key_info)` already resolves it on every REST
+            # route. This is what makes #138 (workspace-scoped key binding) and
+            # #180 (expiry) closed BY CONSTRUCTION for MCP: any future fix to
+            # `require_api_key` / `get_api_key_info` applies to both surfaces the
+            # moment it lands, with nothing in this module to keep in sync.
+            # Raises `fastapi.HTTPException` on a missing/invalid/expired key,
+            # which propagates out of this ASGI callable exactly like it would
+            # out of a REST route handler -- Starlette's `ExceptionMiddleware`
+            # (the SAME handler `setup_exception_handlers` registers for REST)
+            # converts it to the SAME RFC 7807 401 response REST returns.
+            try:
+                key_info = await get_api_key_info(
+                    x_api_key=x_api_key,
+                    authorization=authorization,
+                )
+            except HTTPException as exc:
+                # Advertise BOTH supported schemes on a 401 when OAuth is
+                # enabled (#295, design constraint #1) -- never silently
+                # replacing the `ApiKey` challenge REST/stdio clients
+                # already rely on, just adding `Bearer` alongside it. `detail`
+                # (the human-readable message) is untouched; only the
+                # `WWW-Authenticate` header value changes, and only when
+                # OAuth is enabled -- with it disabled this `except` block
+                # re-raises `exc` completely unmodified, so the 401 stays
+                # byte-identical to pre-#295 behavior.
+                if settings.oauth_enabled and exc.status_code == status.HTTP_401_UNAUTHORIZED:
+                    exc.headers = {
+                        **(exc.headers or {}),
+                        "WWW-Authenticate": build_www_authenticate(_resource_metadata_url(request)),
+                    }
+                raise
 
         token = _current_key_info.set(key_info)
+        oauth_token = _current_oauth_principal.set(oauth_principal)
         try:
             await session_manager.handle_request(scope, receive, send)
         finally:
             _current_key_info.reset(token)
+            _current_oauth_principal.reset(oauth_token)
 
     # `add_route`, NOT `app.mount("/mcp", mcp_asgi_app)` -- tried and
     # reverted. `Mount`'s path regex requires a `/` (or more) AFTER the mount
