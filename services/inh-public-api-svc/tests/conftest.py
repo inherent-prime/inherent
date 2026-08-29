@@ -8,6 +8,48 @@ import pytest
 from src.models.api_key import APIKeyInfo
 
 
+def pytest_configure(config):
+    """Register custom markers."""
+    config.addinivalue_line("markers", "compose: mark test as requiring a Docker Compose stack")
+
+
+def pytest_collection_modifyitems(config, items):
+    """Enforce the 'not compose' default even when command-line -m is used.
+
+    Problem: pytest's `-m` option REPLACES (not intersects) the default
+    `addopts = "-m 'not compose'"` from pyproject.toml. So a developer
+    running `pytest -m benchmark` would inadvertently select compose-marked
+    tests that need a live Docker stack, causing confusing failures.
+
+    Solution: If the effective marker expression does not mention "compose"
+    (meaning it's not explicitly included or excluded), deselect all
+    compose-marked items. This ensures the `not compose` safety default
+    is honored even when -m overrides addopts.
+
+    Rule: if "compose" is not in markexpr, deselect compose items.
+    This handles:
+    - No -m: markexpr = "not compose" (has "compose") → do nothing ✓
+    - -m smoke: markexpr = "smoke" (no "compose") → deselect ✓
+    - -m "compose and smoke": markexpr has "compose" → do nothing ✓
+    - -m "not compose": markexpr has "compose" → do nothing ✓
+
+    See issue #286.
+    """
+    # Get the effective marker expression (includes both addopts and command line)
+    markexpr = config.option.markexpr
+
+    # If the marker expression mentions "compose" (either inclusion or exclusion),
+    # respect it and don't deselect. Otherwise, enforce the default by deselecting.
+    if markexpr and "compose" in markexpr:
+        return
+
+    # Deselect all compose-marked tests
+    deselected = [item for item in items if "compose" in item.keywords]
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+        items[:] = [item for item in items if "compose" not in item.keywords]
+
+
 @pytest.fixture(autouse=True)
 def _reset_rate_limiter_singleton():
     """Isolate the global rate limiter between tests.
