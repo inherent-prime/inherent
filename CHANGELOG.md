@@ -84,7 +84,22 @@ All notable changes to Inherent are documented here. The format follows
   captured fields are unchanged. Captured events also record which transport
   produced them (`eval_query_events.transport`, migration 018, backfilled
   `'rest'` for pre-existing rows), so analytics can tell MCP traffic from
-  REST traffic.
+  REST traffic. **Capture is opt-in at the shared `_run_search` call site,
+  not an implicit side effect of calling it** (review finding): only
+  `search_documents` / `search_memory` request capture; `get_citations`
+  shares the identical retrieval path but never does, since it is a citation
+  *view* and has never returned an `event_id` an agent could attach feedback
+  to — minting one there would only have double-counted the query in MCP
+  analytics and permanently depressed MCP feedback-rate metrics with events
+  no agent could ever judge. Also disclosed: `eval_query_events.quality_verdict`
+  is always `NULL` for `transport='mcp'` rows and never reflects a fallback —
+  REST populates it from the adaptive quality gate that runs before its own
+  capture, and that gate does not exist on the MCP retrieval path. Record
+  *shape* cannot drift between the two transports (one shared
+  `capture_search_event` call, one field list); record *inputs* already do,
+  and that asymmetry is now pinned by a test and documented in
+  `docs/developer/search-sequence.md` and `docs/reference/mcp-tools.md`
+  rather than obscured by a test that patched the difference away.
 
 ### Added
 

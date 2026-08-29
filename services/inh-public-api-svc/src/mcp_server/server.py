@@ -402,6 +402,8 @@ async def _get_workspace_ids(
 async def _run_search(
     key_info: APIKeyInfo,
     arguments: dict,
+    *,
+    capture: bool = False,
 ) -> tuple[list, list[str], str | None, str | None]:
     """Shared retrieval used by search_documents/search_memory/get_citations.
 
@@ -416,15 +418,29 @@ async def _run_search(
     caller must be able to see that, not just guess it from an unqualified
     "across all workspaces" claim).
 
-    Evals capture (#241): a SINGLE-workspace search also mints an eval capture
-    event through ``capture_search_event`` — the exact same shared helper
-    ``src/api/v1/search.py`` calls for REST — so the two transports capture
-    through one code path instead of two independently-written ones that could
-    drift. A multi-workspace fan-out mints no event, matching REST (which only
-    ever captures its own single-workspace branch): there is no one response
-    to attribute a multi-workspace event to. ``event_id`` is ``None`` whenever
-    capture didn't happen (multi-workspace, capture disabled, or the write
-    failed) — the caller decides whether/how to surface it.
+    Evals capture (#241, and #241 review finding 1): capture is OPT-IN via the
+    ``capture`` keyword-only parameter, default ``False`` — it is never an
+    implicit side effect of calling this shared retrieval helper. Only when a
+    SINGLE-workspace search is run with ``capture=True`` does it mint an eval
+    capture event through ``capture_search_event`` — the exact same shared
+    helper ``src/api/v1/search.py`` calls for REST — so the two transports
+    capture through one code path instead of two independently-written ones
+    that could drift. ``_handle_search`` (search_documents / search_memory)
+    passes ``capture=True`` explicitly: report_feedback's schema promises an
+    event_id "from the search response you are judging", and that promise is
+    a search a caller can give feedback on. ``_handle_get_citations`` does
+    NOT set it — get_citations is a citation *view* over the same retrieval,
+    not a user-facing search result an agent judges, and it has never
+    returned an event_id, so a minted event would be an orphan no agent could
+    ever submit feedback against (before this fix, capture ran unconditionally
+    here and get_citations silently double-counted every MCP query in
+    analytics while depressing MCP feedback-rate metrics). A multi-workspace
+    fan-out never mints an event regardless of ``capture``, matching REST
+    (which only ever captures its own single-workspace branch): there is no
+    one response to attribute a multi-workspace event to. ``event_id`` is
+    ``None`` whenever capture wasn't requested, wasn't single-workspace,
+    capture is disabled, or the write failed — the caller decides
+    whether/how to surface it.
     """
     requested_workspace_id = arguments.get("workspace_id")
     query = arguments.get("query", "")
@@ -446,7 +462,7 @@ async def _run_search(
         for result in response.results:
             tagged.append((workspace_id, result))
 
-        if single_workspace and capture_enabled(workspace_id):
+        if capture and single_workspace and capture_enabled(workspace_id):
             event_id = await capture_search_event(
                 transport="mcp",
                 workspace_id=workspace_id,
@@ -512,8 +528,11 @@ async def _handle_search(key_info: APIKeyInfo, arguments: dict) -> list[TextCont
     for a multi-workspace search or when capture is disabled/failed — the
     same shape REST's ``SearchResponse.event_id`` already has, so an agent
     reading either transport's payload sees the identical contract.
+    ``_run_search`` is called with ``capture=True`` explicitly (#241 review
+    finding 1) — this is the tool that makes capture's opt-in decision, not
+    a default any caller inherits silently.
     """
-    tagged, workspace_ids, error, event_id = await _run_search(key_info, arguments)
+    tagged, workspace_ids, error, event_id = await _run_search(key_info, arguments, capture=True)
     if error:
         return [TextContent(type="text", text=error)]
 
@@ -570,11 +589,16 @@ async def _handle_get_citations(key_info: APIKeyInfo, arguments: dict) -> list[T
     reason ``_handle_search`` does (#138 follow-up): the caller must be able
     to verify actual coverage, not infer it from result count alone.
 
-    ``_run_search`` also mints a capture event for a single-workspace query
-    (#241) — get_citations is a citation *view* over the same retrieval, not
-    a second query, so it is captured too. Not surfaced here: report_feedback
-    is documented as judging a *search*, and get_citations has never returned
-    an ``event_id`` — adding one to this payload is a separate, undiscussed
+    ``_run_search`` is called WITHOUT ``capture=True`` (#241 review finding 1):
+    get_citations is a citation *view* over the same retrieval, not a
+    user-facing search an agent can judge, and it has never returned an
+    ``event_id``. report_feedback is documented as judging a *search you got
+    back an event_id for* — minting one here that this tool never surfaces
+    would be an orphan `eval_query_events` row no agent could ever attach
+    feedback to, double-counting this query in MCP analytics for nothing.
+    (Before this fix, capture ran unconditionally inside ``_run_search`` and
+    every get_citations call silently did exactly that.) Returning an
+    ``event_id`` from get_citations at all remains a separate, undiscussed
     product decision, not part of #241's scope (only search_documents /
     search_memory's payload is in the issue's DoD).
     """

@@ -16,11 +16,25 @@ These tests cover the acceptance criteria that can be verified offline:
    read (``test_single_workspace_search_returns_event_id``).
 2. report_feedback accepts an MCP-minted event_id
    (``test_event_id_round_trips_through_report_feedback``).
-3. REST behaviour/fields are unchanged for the same query
-   (``test_rest_and_mcp_capture_equivalent_events_for_the_same_query``).
+3. REST and MCP write through the identical ``insert_eval_event`` call with
+   the same field list -- record-*shape* parity, held constant by patching
+   REST's quality gate out of the comparison
+   (``test_rest_and_mcp_agree_on_record_shape_when_quality_gate_is_held_constant``).
+   That is NOT proof the two transports capture identical events for a live
+   query -- they do not; see
+   ``test_mcp_capture_has_null_quality_verdict_that_rest_never_has`` below,
+   which pins the real, documented asymmetry with REST's gate genuinely
+   running.
 4. The captured row records which transport produced it
    (``test_mcp_capture_records_mcp_transport``).
 5. Multi-workspace / capture-disabled / failed-write / empty-results shapes.
+6. Capture is opt-in at the ``_run_search`` call site (#241 review): the
+   search tools (``search_documents`` / ``search_memory``) pass
+   ``capture=True`` explicitly; ``get_citations`` shares the same retrieval
+   but never captures, so it cannot mint an orphan eval event that no agent
+   can ever submit feedback against
+   (``test_get_citations_mints_no_event``,
+   ``test_run_search_default_does_not_capture``).
 """
 
 from __future__ import annotations
@@ -35,6 +49,7 @@ from fastapi import BackgroundTasks
 from src.api.v1 import search as search_api
 from src.mcp_server import server as mcp_server
 from src.models.api_key import APIKeyInfo
+from src.models.citation import Citation
 from src.models.search import SearchRequest, SearchResponse, SearchResult
 
 pytestmark = pytest.mark.asyncio
@@ -189,11 +204,26 @@ async def test_mcp_capture_records_mcp_transport():
     assert db.insert_eval_event.call_args.kwargs["transport"] == "mcp"
 
 
-async def test_rest_and_mcp_capture_equivalent_events_for_the_same_query():
-    """REST behaviour is unchanged (#241 acceptance criterion 3): the same
-    query captured through each transport must produce the same event
-    fields, differing only in event_id/transport (and latency, which is
-    inherent to two separate SearchService.search calls in the harness)."""
+async def test_rest_and_mcp_agree_on_record_shape_when_quality_gate_is_held_constant():
+    """Record-SHAPE parity only (#241 review finding 2): ``capture_search_event``
+    is the exact same call for both transports, so its field LIST cannot
+    drift -- both write through one ``insert_eval_event`` call with identical
+    kwarg names.
+
+    This is deliberately NOT a claim that a live REST request and a live MCP
+    request capture the *same event* for the same query -- they do not. REST
+    captures AFTER ``_apply_quality_gate_and_fallback`` runs (populated
+    ``quality_verdict``, and fallback-substituted results/latency when a
+    fallback fired); MCP's ``_run_search`` calls ``SearchService.search``
+    directly, with no quality gate on that path, so ``transport='mcp'`` rows
+    always have ``quality_verdict = NULL`` and never reflect a fallback. REST's
+    gate is patched out here specifically to hold that difference constant so
+    the shape comparison isn't contaminated by it. The real asymmetry is
+    pinned, unpatched, by
+    ``test_mcp_capture_has_null_quality_verdict_that_rest_never_has`` below --
+    see that test and docs/developer/search-sequence.md for the documented
+    limitation.
+    """
     query = "refund policy"
 
     # --- REST -------------------------------------------------------------
@@ -235,6 +265,82 @@ async def test_rest_and_mcp_capture_equivalent_events_for_the_same_query():
     assert rest_kwargs == mcp_kwargs
     assert rest_db.insert_eval_event.call_args.kwargs["transport"] == "rest"
     assert mcp_db.insert_eval_event.call_args.kwargs["transport"] == "mcp"
+
+
+async def test_mcp_capture_has_null_quality_verdict_that_rest_never_has():
+    """Pins the real production asymmetry the parity test above patches away
+    (#241 review finding 2). REST's quality gate is NOT patched here: for the
+    same query with the same (sufficient-quality) results, REST's captured
+    row carries a populated ``quality_verdict`` and MCP's is always ``None``,
+    because MCP's ``_run_search`` calls ``SearchService.search`` directly
+    with no quality gate on that path at all. This is a stated, deliberate
+    limitation (see docs/developer/search-sequence.md and
+    docs/reference/mcp-tools.md), not a bug -- Option (b) from the review:
+    the difference is real and is disclosed rather than hidden.
+    """
+    query = "refund policy"
+
+    def _two_sufficient_results() -> SearchResponse:
+        # Two strong results clear both quality-gate thresholds (top score
+        # >= 0.5, result count >= MIN_SUFFICIENT_RESULTS) so the REST gate
+        # verdicts "sufficient" and never attempts a fallback retry -- a
+        # single SearchService.search call suffices on both transports.
+        return SearchResponse(
+            results=[
+                SearchResult(
+                    chunk_id="c1",
+                    document_id="d1",
+                    document_name="a.pdf",
+                    content="x",
+                    score=0.9,
+                ),
+                SearchResult(
+                    chunk_id="c2",
+                    document_id="d2",
+                    document_name="b.pdf",
+                    content="y",
+                    score=0.8,
+                ),
+            ],
+            query=query,
+            total_results=2,
+            processing_time_ms=5.0,
+            search_mode="hybrid",
+        )
+
+    # --- REST: the real quality gate runs, unpatched. ---------------------
+    rest_db = AsyncMock()
+    rest_search = AsyncMock()
+    rest_search.search = AsyncMock(return_value=_two_sufficient_results())
+    rest_auth = AsyncMock()
+    rest_auth.workspace_id = "ws-1"
+    rest_auth.key_info.user_id = "u-1"
+
+    with (
+        patch.object(search_api, "_expand_context_and_total_tokens", new=AsyncMock()),
+        patch.object(search_api, "_record_search_metrics", new=lambda *a, **k: None),
+        patch.object(search_api, "_schedule_audit", new=lambda *a, **k: None),
+        patch("src.services.eval_capture.get_database", new=AsyncMock(return_value=rest_db)),
+    ):
+        await search_api.search_documents(
+            request=SearchRequest(query=query, search_mode="hybrid"),
+            auth=rest_auth,
+            search_service=rest_search,
+            background_tasks=BackgroundTasks(),
+        )
+
+    # --- MCP: no quality gate exists on this path. -------------------------
+    mcp_db = AsyncMock()
+    mcp_db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
+    mcp_search = AsyncMock()
+    mcp_search.search = AsyncMock(return_value=_two_sufficient_results())
+
+    with _mcp_patches(mcp_db, mcp_search):
+        await mcp_server._handle_search(_key(), {"query": query, "search_mode": "hybrid"})
+
+    rest_search.search.assert_awaited_once()  # sufficient verdict, no fallback retry
+    assert rest_db.insert_eval_event.call_args.kwargs["quality_verdict"] == "sufficient"
+    assert mcp_db.insert_eval_event.call_args.kwargs["quality_verdict"] is None
 
 
 # --------------------------------------------------------------------------
@@ -337,3 +443,92 @@ async def test_scoped_key_single_bound_workspace_still_captures():
     payload = _structured_payload(content)
     assert payload["event_id"]
     assert db.insert_eval_event.call_args.kwargs["workspace_id"] == "ws-scoped"
+
+
+# --------------------------------------------------------------------------
+# 6. capture is opt-in at the _run_search call site (#241 review finding 1)
+# --------------------------------------------------------------------------
+
+
+async def test_get_citations_mints_no_event():
+    """Blocking review finding: capture lived inside ``_run_search``, which
+    ``get_citations`` also calls, so every ``get_citations`` call used to
+    mint an orphan ``eval_query_events`` row whose ``event_id`` was
+    immediately discarded -- double-counting MCP searches in analytics and
+    depressing MCP feedback-rate metrics with events no agent could ever
+    submit feedback against. ``get_citations`` now passes no ``capture``
+    argument (default ``False``) at its ``_run_search`` call site, so it
+    retrieves without recording."""
+    response_with_citation = SearchResponse(
+        results=[
+            SearchResult(
+                chunk_id="chunk-1",
+                document_id="doc-1",
+                document_name="report.pdf",
+                content="Paris is the capital of France.",
+                score=0.91,
+                citation=Citation(
+                    chunk_id="chunk-1",
+                    document_id="doc-1",
+                    document_name="report.pdf",
+                    content="Paris is the capital of France.",
+                    score=0.91,
+                ),
+            )
+        ],
+        query="q",
+        total_results=1,
+        processing_time_ms=7.5,
+        search_mode="hybrid",
+    )
+    db = AsyncMock()
+    db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
+    search = AsyncMock()
+    search.search = AsyncMock(return_value=response_with_citation)
+
+    with _mcp_patches(db, search):
+        content = await mcp_server._handle_get_citations(_key(), {"query": "q"})
+
+    payload = _structured_payload(content)
+    assert payload["citations"], "get_citations must still retrieve normally"
+    assert "event_id" not in payload, "get_citations has never surfaced an event_id"
+    db.insert_eval_event.assert_not_awaited()
+
+
+async def test_run_search_default_does_not_capture():
+    """``_run_search``'s ``capture`` parameter defaults to ``False`` --
+    capture is opt-in at the call site, not an implicit side effect of every
+    caller. Only ``_handle_search`` (search_documents / search_memory) passes
+    ``capture=True`` explicitly."""
+    db = AsyncMock()
+    db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
+    search = AsyncMock()
+    search.search = AsyncMock(return_value=_search_response())
+
+    with _mcp_patches(db, search):
+        _tagged, _workspace_ids, error, event_id = await mcp_server._run_search(
+            _key(), {"query": "q"}
+        )
+
+    assert error is None
+    assert event_id is None
+    db.insert_eval_event.assert_not_awaited()
+
+
+async def test_search_tools_still_capture_via_explicit_capture_true():
+    """The other half of the opt-in contract: search_documents / search_memory
+    (``_handle_search``) must keep capturing -- this only regresses if the
+    explicit ``capture=True`` at that call site is ever dropped."""
+    db = AsyncMock()
+    db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
+    search = AsyncMock()
+    search.search = AsyncMock(return_value=_search_response())
+
+    with _mcp_patches(db, search):
+        _tagged, _workspace_ids, error, event_id = await mcp_server._run_search(
+            _key(), {"query": "q"}, capture=True
+        )
+
+    assert error is None
+    assert event_id
+    db.insert_eval_event.assert_awaited_once()
