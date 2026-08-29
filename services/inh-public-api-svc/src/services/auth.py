@@ -489,7 +489,8 @@ async def verify_oauth_token(token: str) -> OAuthClaims:
     that ``aud`` contains this server's own ``oauth_resource_identifier``. A
     token for any other resource protected by the same authorization server
     is REJECTED here, not merely logged about (design constraint #4; see
-    ``tests/security/test_oauth_aud_validation.py``).
+    ``tests/security/test_oauth_token_validation.py::TestVerifyOAuthToken::
+    test_aud_mismatch_is_rejected_not_merely_warned``).
 
     Raises ``TokenValidationError`` on ANY failure, including
     "not configured" (``oauth_enabled=true`` without
@@ -502,7 +503,7 @@ async def verify_oauth_token(token: str) -> OAuthClaims:
     NEVER logs ``token`` -- not in this function, not via a caught
     exception's message (PyJWT's own messages can echo header/claim
     fragments), not via ``repr()`` of anything holding it. See
-    ``tests/security/test_oauth_token_not_logged.py``.
+    ``tests/security/test_oauth_token_validation.py::TestTokenNeverLogged``.
     """
     jwks_url = settings.effective_oauth_jwks_url
     if (

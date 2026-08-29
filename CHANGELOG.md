@@ -22,7 +22,15 @@ All notable changes to Inherent are documented here. The format follows
   JWKS (signature, `iss`, `exp`, and non-negotiably `aud` — a token minted
   for a different resource is rejected, not warned about, per RFC 8707 Sec
   2); an expired token is always 401, never 403; a token missing a tool's
-  required scope gets the spec's `insufficient_scope` shape. `X-API-Key` /
+  required scope gets the spec's `insufficient_scope` shape as a JSON-RPC
+  `tools/call` result (HTTP 200, `isError: true`,
+  `structuredContent.error: "insufficient_scope"`) rather than an HTTP 403 —
+  the Streamable HTTP transport has no way to attach a custom status code to
+  a parsed `tools/call` response, so a per-tool scope check (which needs the
+  tool name inside that parsed body) cannot raise a transport-level
+  challenge the way the connection-level 401 above does; see
+  `src/mcp_server/http_transport.py`'s `_call_tool_oauth` docstring.
+  `X-API-Key` /
   `Bearer ink_...` auth is completely unchanged, on `/mcp` and REST alike. A
   new `Principal` abstraction (`src/services/auth.py`) is the seam #309's
   per-identity entitlements/quotas will build on; #295 itself stops at

@@ -291,6 +291,49 @@ class TestInsufficientScope:
         assert body["structuredContent"]["error"] == "insufficient_scope"
         assert body["structuredContent"]["scope"] == "kb:search"
 
+    def test_insufficient_scope_is_not_a_transport_403(self, client: TestClient):
+        """Pins the #295 review's blocking finding: the AC's literal wording
+        ("returns 403 with error=insufficient_scope and a scope parameter")
+        cannot be implemented at the transport layer for `tools/call` -- see
+        `_call_tool_oauth`'s docstring (http_transport.py) for the full
+        reasoning (the Streamable HTTP transport, mounted
+        `json_response=True`, always answers a parsed JSON-RPC request with
+        HTTP 200; only connection-level rejection -- before the body is even
+        parsed -- can carry a real HTTP status, see
+        `TestOAuthConnectionGate::test_aud_mismatch_rejected_with_401_over_http`
+        for that path's genuine 401 + `WWW-Authenticate` challenge above).
+
+        So the AC's INTENT (a machine-readable insufficient_scope signal
+        naming the missing scope) is delivered as a JSON-RPC tool result
+        instead of an HTTP challenge -- this test pins BOTH halves of that
+        deviation explicitly: the status is 200, not 403, and there is no
+        `WWW-Authenticate` header on this response (there is no HTTP-level
+        challenge to carry one), so nothing about this response shape can be
+        mistaken for the transport-level 401 challenge tested elsewhere in
+        this file.
+        """
+        token = make_token(scope="kb:read")  # no kb:search
+        r = client.post(
+            "/mcp",
+            headers={**_HTTP_MCP_HEADERS, "Authorization": f"Bearer {token}"},
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "search_documents", "arguments": {"query": "x"}},
+            },
+        )
+        assert r.status_code == 200
+        assert r.status_code != 403
+        assert "www-authenticate" not in {h.lower() for h in r.headers}
+        body = r.json()["result"]
+        assert body["isError"] is True
+        assert body["structuredContent"] == {
+            "error_class": "authorization_failed",
+            "error": "insufficient_scope",
+            "scope": "kb:search",
+        }
+
     def test_sufficient_scope_passes_the_scope_gate(self, client: TestClient):
         """A token WITH the required scope clears the scope check -- #295
         stops at authentication, so this comes back as a clearly-labeled

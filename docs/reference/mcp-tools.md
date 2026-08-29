@@ -60,7 +60,15 @@ With `OAUTH_ENABLED=true`:
   protected-resource metadata document naming `OAUTH_AUTHORIZATION_SERVER`
   and the minimal `OAUTH_SCOPES_SUPPORTED` catalogue (default `["kb:read",
   "kb:search"]` -- write access is never advertised upfront; it arrives via
-  a 403 `insufficient_scope` step-up on the specific tool that needs it).
+  an `insufficient_scope` step-up on the specific tool that needs it,
+  returned as a JSON-RPC `tools/call` result -- `isError: true`,
+  `structuredContent.error: "insufficient_scope"`, `structuredContent.scope`
+  naming what is missing -- at HTTP **200**, not a transport-level 403: the
+  Streamable HTTP transport always answers a parsed `tools/call` with 200,
+  so a per-tool scope check, which only runs once the request body has been
+  parsed, has no way to change the surrounding HTTP status. A true HTTP 403
+  challenge is reserved for connection-level rejection below, which runs
+  before the body is parsed at all).
   This route does not exist at all when OAuth is disabled (a request 404s
   exactly as if the route were never registered, because it wasn't).
 - An unauthenticated `/mcp` request's 401 carries a combined
@@ -84,7 +92,8 @@ With `OAUTH_ENABLED=true`:
   `OAUTH_JWKS_CACHE_SECONDS` -- see `src/config/settings.py` for the full
   field docs.
 - **Scope of #295**: this issue is the resource-server contract only
-  (discovery + the 401/403 challenge shapes + token verification). A
+  (discovery + the 401 challenge shape + the insufficient-scope JSON-RPC
+  shape + token verification). A
   verified OAuth caller with sufficient scope for a tool still gets a
   clearly-labeled "not yet available" rejection on `tools/call` --
   executing a tool needs mapping the token's `sub` to an Inherent

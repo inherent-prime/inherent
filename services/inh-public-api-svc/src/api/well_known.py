@@ -42,11 +42,17 @@ async def oauth_protected_resource_metadata() -> dict:
     ``scopes_supported`` is deliberately the MINIMAL set
     (``settings.oauth_scopes_supported``, default ``["kb:read",
     "kb:search"]``) per the spec's scope-minimisation guidance -- write
-    access arrives via a 403 ``insufficient_scope`` step-up on the specific
+    access arrives via an ``insufficient_scope`` step-up on the specific
     tool that needs it, not by advertising the full permission catalogue
     upfront (some IdPs reject an auth request naming every scope with
     ``invalid_scope``; see ``PERMISSION_SCOPE_MAP`` in
-    ``src/services/auth.py``).
+    ``src/services/auth.py``). That step-up is a JSON-RPC ``tools/call``
+    result (``isError=True``, ``structuredContent.error=
+    "insufficient_scope"``) at HTTP 200, not an HTTP 403 -- the Streamable
+    HTTP transport has no mechanism to attach a custom status code to a
+    parsed ``tools/call`` response; see
+    ``src/mcp_server/http_transport.py``'s ``_call_tool_oauth`` docstring
+    for why.
 
     This module is only included in the app when ``oauth_enabled`` is true
     (see this file's module docstring), so there is no "disabled" branch

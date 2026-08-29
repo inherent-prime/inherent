@@ -94,7 +94,9 @@ class TestProtectedResourceMetadataRoute:
             assert body["authorization_servers"] == ["https://auth.inherent.sh"]
             # Minimal catalogue only (scope-minimisation) -- "write" is
             # deliberately absent even though PERMISSION_SCOPE_MAP maps it;
-            # it arrives via 403 insufficient_scope step-up instead.
+            # it arrives via an insufficient_scope step-up on the specific
+            # tool instead (a JSON-RPC tools/call result, not a transport
+            # 403 -- see http_transport.py's _call_tool_oauth docstring).
             assert body["scopes_supported"] == ["kb:read", "kb:search"]
             assert body["bearer_methods_supported"] == ["header"]
 

@@ -444,10 +444,17 @@ class Settings(BaseSettings):
             "the WWW-Authenticate: Bearer challenge's scope parameter "
             "(scope-minimisation guidance in RFC 9728 -- some IdPs reject "
             "auth requests naming a full scope catalogue with "
-            "invalid_scope). Write/delete access is granted via a 403 "
+            "invalid_scope). Write/delete access is granted via an "
             "insufficient_scope step-up on the specific tool that needs it, "
-            "never by advertising it upfront; see "
-            "src.services.auth.PERMISSION_SCOPE_MAP."
+            "never by advertising it upfront -- surfaced as a JSON-RPC "
+            "tools/call result (isError=True, structuredContent.error= "
+            "'insufficient_scope', HTTP 200), not a transport-level 403: "
+            "the MCP Streamable-HTTP transport always answers a parsed "
+            "tools/call with HTTP 200; only connection-level rejection "
+            "(missing/invalid/expired bearer, before the body is even "
+            "parsed) can carry a real HTTP status. See "
+            "src.services.auth.PERMISSION_SCOPE_MAP and "
+            "src.mcp_server.http_transport._call_tool_oauth's docstring."
         ),
     )
     oauth_jwks_url: str | None = Field(

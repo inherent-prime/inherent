@@ -297,9 +297,37 @@ async def _call_tool_oauth(name: str, principal: Principal) -> CallToolResult:
     per-tool enforcement point the API-key path uses
     (`key_info.has_permission`), just keyed on `PERMISSION_SCOPE_MAP`
     instead. A token missing the tool's required scope gets the spec's
-    `insufficient_scope` shape (acceptance criteria): `structuredContent`
-    carries `error="insufficient_scope"` and the `scope` a client would need
-    to request on its next authorization attempt.
+    `insufficient_scope` shape -- `structuredContent` carries
+    `error="insufficient_scope"` and the `scope` a client would need to
+    request on its next authorization attempt -- but as a JSON-RPC-level
+    `CallToolResult(isError=True)` at HTTP 200, NOT a transport-level 403.
+
+    That is a deliberate, unavoidable divergence from #295's literal
+    acceptance-criteria wording ("returns 403 with error=insufficient_scope"),
+    not an oversight: this function runs INSIDE the MCP SDK's low-level
+    `Server`'s message dispatch, already deep in one JSON-RPC request/response
+    cycle by the time it is called (the scope needed depends on `name`, which
+    only exists inside the parsed `tools/call` body -- it cannot be known
+    before that point). With this transport mounted `json_response=True`,
+    `StreamableHTTPServerTransport._handle_post_request` always wraps the
+    response to a parsed JSON-RPC request in HTTP 200 via
+    `_create_json_response(response_message)` (no `status_code` override
+    parameter is threaded through from a tool handler) -- and the low-level
+    `Server`'s own request loop catches any exception raised from within a
+    `call_tool` handler and folds it into a JSON-RPC error, never an ASGI
+    response of its own. So this dispatcher has no mechanism to make the
+    surrounding HTTP response anything other than 200, and raising instead of
+    returning would only trade a clear `isError=True` result for a generic
+    JSON-RPC INTERNAL_ERROR -- worse for the client, not better. A true
+    RFC 6750 403 challenge stays reserved for CONNECTION-level rejection
+    (missing/invalid/expired bearer -- see `_oauth_401` / `mcp_asgi_app`
+    below), which runs before the session manager ever parses the body and
+    can therefore still raise a real `HTTPException` the ASGI stack turns
+    into a genuine HTTP status. Per-tool scope is not a connection property,
+    so it cannot use that path. `docs/reference/mcp-tools.md` and
+    `src/config/settings.py` describe this actual shape, not a 403 that never
+    fires; see `tests/security/test_oauth_token_validation.py::
+    TestInsufficientScope` for the pinned status/body/headers.
 
     Deliberately stops there rather than invoking `tool.handler`: every
     handler in `server.py` takes an `APIKeyInfo` and, through it, a
