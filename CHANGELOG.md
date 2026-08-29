@@ -65,6 +65,16 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Added
 
+- **MCP: `list_workspaces` tool returns caller's authorized workspaces and
+  enables discovery of valid `workspace_id` values (#297).** Agents can now
+  call `list_workspaces` to discover which workspaces an API key is authorized
+  for, fixing the previous pattern where workspace-targeted tools like
+  `upload_document` and `get_retrieval_health` required out-of-band knowledge
+  of a valid `workspace_id`. A workspace-scoped key sees exactly its one bound
+  workspace; a user-scoped key sees every workspace its owner owns. Response
+  includes `workspace_id`, `name` (from workspace metadata if present), 
+  `document_count`, and `is_scoped_binding` flag. Exported on both stdio and
+  HTTP transports with `read` permission.
 - **Evals: `POST /v1/evals/runs` accepts optional replay scoping, and
   `DELETE /v1/evals/events` an opt-in case purge (#250).** Run-replay was
   unscoped — `start_run` and `execute_run` each independently selected *every*

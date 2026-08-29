@@ -29,7 +29,7 @@ claude mcp add --transport http inherent https://api.inherent.sh/mcp \
   a tool argument removes that surface entirely. Missing/invalid/expired
   keys get the same 401 REST returns, before any JSON-RPC request is even
   parsed.
-- **Tool surface: 10, not 14.** `verify_claim`, `search_memory`,
+- **Tool surface: 11, not 15.** `verify_claim`, `search_memory`,
   `get_citations`, and `report_feedback` are not advertised and cannot be
   called by name over HTTP
   (see [Surface difference](#surface-difference-http-vs-stdio) below) —
@@ -59,14 +59,14 @@ claude mcp add --transport http inherent https://api.inherent.sh/mcp \
   exactly its one workspace — a `workspace_id` naming any other workspace
   is rejected, even one the key's owner also owns. A user-scoped key
   (`workspace_id` unset on the key) may use any workspace its owner owns.
-- **All 14 tools** are advertised and callable, including the 4 excluded
+- **All 15 tools** are advertised and callable, including the 4 excluded
   from HTTP (below) — unaffected by the HTTP transport's existence.
 
 ## Surface difference: HTTP vs stdio
 
 | | stdio | Streamable HTTP |
 | --- | --- | --- |
-| Tool count | 14 | 10 |
+| Tool count | 15 | 11 |
 | API key | `api_key` schema argument | `X-API-Key` / `Authorization` header |
 | `verify_claim` | ✅ | ❌ excluded |
 | `search_memory` | ✅ | ❌ excluded |
@@ -118,6 +118,7 @@ parameters below.
 
 | Tool | HTTP | Parameters | Purpose | REST twin |
 | --- | --- | --- | --- | --- |
+| `list_workspaces` | ✅ | (none — uses authorized workspaces only) | List caller's authorized workspaces with metadata (`workspace_id`, `name`, `document_count`, `is_scoped_binding`). A workspace-scoped key sees exactly its bound workspace; a user-scoped key sees every workspace its owner owns | No direct REST twin; closest: `GET /v1/documents` |
 | `list_documents` | ✅ | `workspace_id`, `page` (1), `page_size` (20) | Paginated document listing | `GET /v1/documents` |
 | `get_document` | ✅ | `document_id` (required) | Single document's metadata | `GET /v1/documents/{id}` |
 | `list_chunks` | ✅ | `document_id` (required) | All chunks for a document | `GET /v1/chunks/{document_id}` |
@@ -164,6 +165,14 @@ reintroduced through the schema). Omit the field; do not pass
 
 ## Notes
 
+- `list_workspaces` (#297) returns only workspaces the caller's API key is
+  authorized for — a workspace-scoped key sees exactly one, its bound workspace,
+  while a user-scoped key sees every workspace its owner owns. Returns an
+  empty list (not an error) if the caller is authorized for zero workspaces.
+  The `is_scoped_binding` flag in the response indicates whether the key is
+  workspace-scoped (always `true` for a scoped key; always `false` for a
+  user-scoped key). Use `list_workspaces` to discover valid `workspace_id`
+  values before calling workspace-targeted tools like `upload_document`.
 - Search tools do not take `include_context` / `context_window` — use
   `get_document_context` for surrounding text.
 - Permissions are exact membership, same as REST: `write` does not imply

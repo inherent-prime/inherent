@@ -104,6 +104,7 @@ from inh_contracts.file_types import (
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
+from sqlalchemy import text
 
 from src.config.constants import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
 from src.models.api_key import APIKeyInfo
@@ -1167,6 +1168,79 @@ async def _handle_upload_document(key_info: APIKeyInfo, arguments: dict) -> list
     return [TextContent(type="text", text=result.model_dump_json())]
 
 
+async def _handle_list_workspaces(key_info: APIKeyInfo, arguments: dict) -> list[TextContent]:
+    """Handle list_workspaces tool.
+
+    Returns the caller's authorized workspaces with their metadata, using the
+    same authorization rule as every other tool (#138): a workspace-scoped key
+    sees exactly its one bound workspace; a user-scoped key sees every workspace
+    the user owns. Returns only ``workspace_id``, ``name`` (from metadata JSONB
+    if present), ``document_count``, and ``is_scoped_binding`` to match the
+    existing tool surface constraints (#297).
+    """
+    database = await get_database()
+    authorized = await get_authorized_workspace_ids(key_info, database)
+
+    if not authorized:
+        # No workspaces found — return empty list, not an error (#297)
+        return _structured(
+            "No workspaces found.",
+            {"workspaces": []},
+        )
+
+    # Fetch workspace metadata for all authorized workspaces
+    workspaces = []
+    async with database.session() as session:
+        for workspace_id in authorized:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT document_count, metadata
+                    FROM workspace_metadata
+                    WHERE workspace_id = :workspace_id
+                    """
+                ),
+                {"workspace_id": workspace_id},
+            )
+            row = result.fetchone()
+
+            # Extract name from metadata JSONB if it exists
+            name = None
+            document_count = 0
+            if row:
+                document_count = row.document_count or 0
+                metadata = row.metadata or {}
+                name = metadata.get("name") if isinstance(metadata, dict) else None
+
+            # is_scoped_binding indicates if this is a workspace-scoped key
+            # (only true if key_info.workspace_id is truthy, matching
+            # get_authorized_workspace_ids's truthiness check for #138)
+            is_scoped_binding = bool(key_info.workspace_id)
+
+            workspaces.append(
+                {
+                    "workspace_id": workspace_id,
+                    "name": name,
+                    "document_count": document_count,
+                    "is_scoped_binding": is_scoped_binding,
+                }
+            )
+
+    # Build human-readable summary
+    summary_parts = [f"Found {len(workspaces)} workspace(s):\n"]
+    for ws in workspaces:
+        summary_parts.append(f"- **{ws['workspace_id']}**")
+        if ws["name"]:
+            summary_parts.append(f" ({ws['name']})")
+        summary_parts.append(f" — {ws['document_count']} documents")
+        if ws["is_scoped_binding"]:
+            summary_parts.append(" (scoped binding)")
+        summary_parts.append("\n")
+
+    summary = "".join(summary_parts).rstrip()
+    return _structured(summary, {"workspaces": workspaces})
+
+
 # =============================================================================
 # Tool registry — THE single place a tool exists (#100)
 # =============================================================================
@@ -1486,6 +1560,21 @@ _TOOLS: dict[str, ToolDef] = {
         },
         permission="write",
         handler=_handle_upload_document,
+    ),
+    "list_workspaces": ToolDef(
+        description="List the caller's authorized workspaces with their metadata "
+        "(workspace_id, name, document_count, is_scoped_binding). A workspace-scoped "
+        "API key sees exactly its bound workspace; a user-scoped key sees every workspace "
+        "the user owns. Requires 'read' permission.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "api_key": {"type": "string", "description": "Your Inherent API key"},
+            },
+            "required": ["api_key"],
+        },
+        permission="read",
+        handler=_handle_list_workspaces,
     ),
 }
 
