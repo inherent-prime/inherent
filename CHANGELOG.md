@@ -30,6 +30,38 @@ All notable changes to Inherent are documented here. The format follows
   storing the raw turn on a later attempt. Ships standalone and inert —
   wired into no workflow yet, changing no existing pipeline's behaviour —
   ahead of the conversation-ingestion workflow (#306) that will consume it.
+- **`/mcp` can now serve as an RFC 9728 OAuth 2.1 resource server, flag-gated
+  off by default (#295).** MCP clients (Claude Code included) discover an
+  authorization server via `WWW-Authenticate: Bearer` + a
+  `GET /.well-known/oauth-protected-resource` metadata document instead of
+  guessing — the prerequisite for a browser-popup sign-in flow, ahead of a
+  hosted OAuth rollout via Clerk. Everything is inert unless
+  `OAUTH_ENABLED=true` (default `false`): with it off, `/mcp`'s 401 and the
+  well-known route's absence are byte-identical to before this change — a
+  self-hosted stack must never advertise an authorization server it doesn't
+  run. With it on: `/mcp`'s 401 advertises `ApiKey` and `Bearer` together
+  (never silently dropping the scheme existing clients use); a presented
+  bearer token is verified against the configured authorization server's
+  JWKS (signature, `iss`, `exp`, and non-negotiably `aud` — a token minted
+  for a different resource is rejected, not warned about, per RFC 8707 Sec
+  2); an expired token is always 401, never 403; a token missing a tool's
+  required scope gets the spec's `insufficient_scope` shape as a JSON-RPC
+  `tools/call` result (HTTP 200, `isError: true`,
+  `structuredContent.error: "insufficient_scope"`) rather than an HTTP 403 —
+  the Streamable HTTP transport has no way to attach a custom status code to
+  a parsed `tools/call` response, so a per-tool scope check (which needs the
+  tool name inside that parsed body) cannot raise a transport-level
+  challenge the way the connection-level 401 above does; see
+  `src/mcp_server/http_transport.py`'s `_call_tool_oauth` docstring.
+  `X-API-Key` /
+  `Bearer ink_...` auth is completely unchanged, on `/mcp` and REST alike. A
+  new `Principal` abstraction (`src/services/auth.py`) is the seam #309's
+  per-identity entitlements/quotas will build on; #295 itself stops at
+  authentication — executing a tool call as an OAuth-authenticated identity
+  needs the account-linking work the commercial platform owns, not this
+  repo, so a validated OAuth caller gets an honest "not yet available"
+  rather than a guessed workspace. See `docs/reference/mcp-tools.md`
+  (#295).
 
 ### Changed
 

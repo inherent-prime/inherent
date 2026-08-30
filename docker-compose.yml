@@ -369,6 +369,20 @@ services:
       # `ENABLE_DIVERSIFICATION=false docker compose up -d --force-recreate
       # inh-public-api-svc`.
       ENABLE_DIVERSIFICATION: ${ENABLE_DIVERSIFICATION:-true}
+      # Off by default (#295) -- a self-hosted stack must never advertise an
+      # authorization server it does not run, so `make dev` / `make
+      # quickstart` boot with OAuth disabled exactly like the code default.
+      # The compose-integration CI job (.github/workflows/integration.yml)
+      # opts this in, alongside OAUTH_AUTHORIZATION_SERVER and
+      # OAUTH_RESOURCE_IDENTIFIER below, so
+      # tests/integration/test_compose_mcp_oauth.py can exercise the real
+      # RFC 9728 discovery handshake against this container over the wire --
+      # the same `${VAR:-default}` opt-in pattern RATE_LIMIT_ENABLED uses
+      # above. A local operator who wants to poke at the OAuth path by hand
+      # sets the same three vars before `docker compose up`.
+      OAUTH_ENABLED: ${OAUTH_ENABLED:-false}
+      OAUTH_AUTHORIZATION_SERVER: ${OAUTH_AUTHORIZATION_SERVER:-}
+      OAUTH_RESOURCE_IDENTIFIER: ${OAUTH_RESOURCE_IDENTIFIER:-}
       LOG_LEVEL: INFO
     depends_on:
       postgres-init:
