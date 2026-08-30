@@ -6,6 +6,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from src.models.api_key import APIKeyInfo
+from tests.compose_marker_gate import pytest_collection_modifyitems, pytest_configure
+
+__all__ = ["pytest_collection_modifyitems", "pytest_configure"]
 
 
 @pytest.fixture(autouse=True)
