@@ -65,6 +65,18 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Added
 
+- **Azure cloud-native production Terraform target: AKS, HA, DR, one-click
+  deploy script, and docs (#320).** `infra/azure/` provisions a full
+  production stack on AKS (3 zones, autoscaling node pools, workload
+  identity), Postgres Flexible Server (zone-redundant HA), Cosmos DB for
+  MongoDB (vCore), Azure Cache for Redis (TLS, `noeviction`), Key Vault, and
+  Azure OpenAI for embeddings, with MinIO on-cluster mirrored nightly to Blob
+  Storage (GRS) for DR — see [#329](https://github.com/inherent-prime/inherent/issues/329)
+  for native Blob support. `scripts/deploy-azure.sh` bootstraps remote state
+  and applies the stack end to end; `docs/deploy/azure.md` documents every
+  layer, tfvar, and TCO estimate, and `docs/deploy/azure-dr-runbook.md` covers
+  zone/region-loss and PITR restore procedures.
+
 - **Evals: `POST /v1/evals/runs` accepts optional replay scoping, and
   `DELETE /v1/evals/events` an opt-in case purge (#250).** Run-replay was
   unscoped — `start_run` and `execute_run` each independently selected *every*
