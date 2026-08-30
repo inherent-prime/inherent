@@ -79,6 +79,7 @@ nav:
       - Advanced indexes: advanced-indexes.md
   - Reference:
       - API examples: examples/README.md
+      - CLI: reference/cli.md
       - REST API: reference/rest-api.md
       - MCP tools: reference/mcp-tools.md
       - Configuration: reference/configuration.md

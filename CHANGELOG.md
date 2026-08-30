@@ -65,6 +65,17 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Added
 
+- **`inherent up/down/status/logs/doctor` — one-command local stack lifecycle
+  from a pip-installed CLI, with secrets persisted at 0600 and service
+  counts taken from compose rather than hardcoded (#280).**
+- **`inherent docs/chunks/search` REST client commands that work against
+  local and remote stacks via `INHERENT_URL` / `INHERENT_API_KEY` (#281).**
+- **`inherent whoami/workspaces/keys` identity commands, with admin 404
+  fallback only for workspaces list and key writes local-only (#282).**
+- **`inherent connect claude|cursor` MCP config writer that merges into
+  existing agent config, backs up, and verifies `POST /mcp` initialize
+  (#283).**
+
 - **Evals: `POST /v1/evals/runs` accepts optional replay scoping, and
   `DELETE /v1/evals/events` an opt-in case purge (#250).** Run-replay was
   unscoped — `start_run` and `execute_run` each independently selected *every*

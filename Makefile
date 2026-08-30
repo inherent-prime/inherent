@@ -12,6 +12,7 @@ PUBLIC_API_DIR       ?= services/inh-public-api-svc
 # `make test`/`test-fast` nor CI, so a change to a shared constant (e.g.
 # DEFAULT_S3_REGION) or the Weaviate-naming derivation was caught by nothing.
 CONTRACTS_DIR        ?= services/inh-contracts
+CLI_DIR              ?= services/inh-cli
 
 PG_CONTAINER         ?= inherent-oss-postgres
 PG_USER              ?= postgres
@@ -65,6 +66,7 @@ install:
 	@uv --project $(INGESTION_DIR) sync --extra dev --group dev
 	@uv --project $(PUBLIC_API_DIR) sync --extra dev --group dev
 	@uv --project $(CONTRACTS_DIR) sync --extra dev --group dev
+	@uv --project $(CLI_DIR) sync --extra dev --group dev
 
 ## validate: Validate local environment settings across both services.
 validate: env
@@ -157,6 +159,7 @@ test:
 	@cd $(INGESTION_DIR) && uv run pytest
 	@cd $(PUBLIC_API_DIR) && uv run pytest
 	@cd $(CONTRACTS_DIR) && uv run pytest
+	@cd $(CLI_DIR) && uv run pytest
 	@echo "==> root tests/ (repo-level pins, e.g. Postgres init -- #183)"
 	@uvx 'pytest==9.0.2' tests/ -q
 
@@ -169,6 +172,7 @@ test-fast:
 	@cd $(INGESTION_DIR) && uv run pytest -m 'not compose and not slow and not benchmark'
 	@cd $(PUBLIC_API_DIR) && uv run pytest -m 'not compose and not slow and not benchmark'
 	@cd $(CONTRACTS_DIR) && uv run pytest
+	@cd $(CLI_DIR) && uv run pytest -m 'not compose'
 	@uvx 'pytest==9.0.2' tests/ -q
 
 ## require-stack: Pre-flight guard -- fails fast with an actionable message
@@ -255,20 +259,24 @@ lint:
 	@cd $(INGESTION_DIR) && uv run ruff check src tests
 	@cd $(PUBLIC_API_DIR) && uv run ruff check src tests
 	@cd $(CONTRACTS_DIR) && uv run ruff check src tests
+	@cd $(CLI_DIR) && uv run ruff check src tests
 
 ## format-check: Check formatting for both services.
 format-check:
 	@cd $(INGESTION_DIR) && uv run black --check src tests
 	@cd $(PUBLIC_API_DIR) && uv run black --check src tests
 	@cd $(CONTRACTS_DIR) && uv run black --check src tests
+	@cd $(CLI_DIR) && uv run black --check src tests
 
 ## type-check: Run mypy for services that currently enable it.
 type-check:
 	@cd $(PUBLIC_API_DIR) && uv run mypy src
+	@cd $(CLI_DIR) && uv run mypy src
 
 ## security-check: Run Bandit for services that currently enable it.
 security-check:
 	@cd $(PUBLIC_API_DIR) && uv run bandit -c pyproject.toml -r src
+	@cd $(CLI_DIR) && uv run bandit -c pyproject.toml -r src
 
 ## clean: Stop the stack and remove local Compose volumes.
 clean:

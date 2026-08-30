@@ -19,6 +19,9 @@ dist/
 build/
 
 data/
+# The CLI ships the release compose file as package data (#280).
+!services/inh-cli/src/inh_cli/data/
+!services/inh-cli/src/inh_cli/data/docker-compose.release.yml
 uploads/
 playwright-report/
 test-results/

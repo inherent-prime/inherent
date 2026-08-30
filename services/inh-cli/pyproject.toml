@@ -1,0 +1,117 @@
+[project]
+name = "inherent"
+version = "0.7.0"
+description = "Command-line client for the Inherent agent memory stack"
+readme = "Readme.md"
+requires-python = ">=3.11"
+dependencies = [
+    # ponytail: path dep — T9 (#284) replaces with a version pin at publish
+    "inh-contracts",
+    "typer>=0.15",
+    "click>=8.1",
+    "rich>=13.9",
+    "httpx>=0.27.2",
+]
+
+[project.scripts]
+inherent = "inh_cli.main:app"
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.0.2",
+    "pytest-asyncio==1.3.0",
+    "pytest-cov==7.0.0",
+    "httpx>=0.27.2",
+    "playwright>=1.49.0",
+    "ruff==0.14.10",
+    "black==24.10.0",
+    "pre-commit>=3.6.0",
+    "mypy==1.19.1",
+    "bandit[toml]==1.9.3",
+    "types-redis>=4.6.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv.sources]
+inh-contracts = { path = "../inh-contracts" }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/inh_cli"]
+
+# The release compose file ships inside the wheel so `pip install inherent`
+# has a topology to start. force-include wins over a stale copy in src/.
+[tool.hatch.build.targets.wheel.force-include]
+"../../docker-compose.release.yml" = "src/inh_cli/data/docker-compose.release.yml"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-v --tb=short -m 'not compose' --cov=src --cov-report=term-missing"
+markers = [
+    "unit: fast isolated unit tests",
+    "compose: requires a running docker-compose stack",
+    "smoke: PR-blocking end-to-end smoke subset",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W"]
+ignore = ["E501"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = false
+warn_unused_configs = true
+ignore_missing_imports = true
+strict_optional = false
+check_untyped_defs = false
+exclude = ["tests/", "build/", "dist/"]
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+ignore_errors = true
+
+[tool.bandit]
+exclude_dirs = ["tests", "build", "dist"]
+# B404/B603/B607: the CLI's job is to invoke `docker compose` by PATH name
+# with a constructed argv (never shell=True).
+skips = ["B101", "B404", "B603", "B607"]
+
+[tool.bandit.assert_used]
+skips = ["*_test.py", "test_*.py"]
+
+[tool.coverage.run]
+source = ["src"]
+omit = ["tests/*", "*/__pycache__/*"]
+
+[tool.coverage.report]
+precision = 1
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==9.0.2",
+    "pytest-asyncio==1.3.0",
+    "pytest-cov==7.0.0",
+    "ruff==0.14.10",
+    "black==24.10.0",
+    "mypy==1.19.1",
+    "bandit[toml]==1.9.3",
+    "pre-commit>=3.6.0",
+]

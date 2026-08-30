@@ -3,6 +3,23 @@
 Use this guide to start the full Inherent stack, upload a sample document, wait
 for ingestion, and run your first search.
 
+## Pip-first (no checkout)
+
+Adopters who only have Docker:
+
+```bash
+pip install inherent
+inherent up
+inherent docs upload ./README.md
+inherent search "what is inherent?"
+inherent connect claude --print
+```
+
+`inherent up` pulls published images, waits for healthchecks, seeds one
+workspace, and writes `~/.inherent/config.toml`. Full command reference:
+[CLI](../reference/cli.md). Contributors with a checkout keep using
+`make setup` / `make dev` below.
+
 ## What You Will Run
 
 Local development uses Docker Compose for the backing services and the two

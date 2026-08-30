@@ -104,6 +104,38 @@ repos:
         pass_filenames: false
         files: ^services/inh-contracts/(src|tests)/
 
+  # ---- inh-cli ----
+  - repo: local
+    hooks:
+      - id: ruff-cli
+        name: ruff (inh-cli)
+        entry: bash -c 'cd services/inh-cli && uv run ruff check src/ tests/'
+        language: system
+        types: [python]
+        pass_filenames: false
+        files: ^services/inh-cli/(src|tests)/
+      - id: black-cli
+        name: black (inh-cli)
+        entry: bash -c 'cd services/inh-cli && uv run black --check src/ tests/'
+        language: system
+        types: [python]
+        pass_filenames: false
+        files: ^services/inh-cli/(src|tests)/
+      - id: mypy-cli
+        name: mypy (inh-cli)
+        entry: bash -c 'cd services/inh-cli && uv run mypy src/'
+        language: system
+        types: [python]
+        pass_filenames: false
+        files: ^services/inh-cli/src/
+      - id: bandit-cli
+        name: bandit (inh-cli)
+        entry: bash -c 'cd services/inh-cli && uv run bandit -c pyproject.toml -r src/'
+        language: system
+        types: [python]
+        pass_filenames: false
+        files: ^services/inh-cli/src/
+
 # pre-commit.ci configuration (no-op locally; honored if the GitHub app is enabled)
 ci:
   autofix_commit_msg: "style: auto-fix by pre-commit hooks"
