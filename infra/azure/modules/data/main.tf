@@ -115,7 +115,7 @@ resource "azurerm_private_endpoint" "cosmos" {
   name                = "${local.name_prefix}-mongo-pe"
   resource_group_name = var.resource_group_name
   location            = var.location
-  subnet_id           = var.subnet_id
+  subnet_id           = var.pe_subnet_id
   tags                = var.tags
 
   private_service_connection {
@@ -137,6 +137,14 @@ resource "azurerm_private_endpoint" "cosmos" {
 # docs/deploy/production.md. Confirmed against the azurerm_redis_cache schema that
 # redis_configuration.maxmemory_policy is a plain optional string with no tier restriction
 # in the provider itself; Standard C1 (the spec default) is kept rather than forced to Premium.
+#
+# Azure's own Redis documentation additionally calls out that the memory-policy config
+# setting is listed for Standard/Premium tiers; the Basic tier (single node, no replication)
+# is documented there as NOT supporting it — a plan against redis_sku = "Basic" risks Azure
+# rejecting maxmemory_policy outright, not just silently ignoring it. envs/dev.tfvars.example
+# therefore keeps redis_sku = "Standard" even for the dev/eval profile (small capacity, but
+# not Basic) rather than cost-optimizing this one setting away — noeviction is what makes
+# Streams durable at all, dev environment or not.
 
 resource "azurerm_redis_cache" "main" {
   name                = "${local.name_prefix}-redis-${random_string.suffix.result}"
@@ -164,7 +172,7 @@ resource "azurerm_private_endpoint" "redis" {
   name                = "${local.name_prefix}-redis-pe"
   resource_group_name = var.resource_group_name
   location            = var.location
-  subnet_id           = var.subnet_id
+  subnet_id           = var.pe_subnet_id
   tags                = var.tags
 
   private_service_connection {
@@ -192,10 +200,22 @@ resource "azurerm_storage_account" "main" {
   # ZRS otherwise (zone-redundant, in-region only — cheaper, no DR).
   account_replication_type = var.enable_dr ? "GRS" : "ZRS"
 
-  min_tls_version                 = "TLS1_2"
-  https_traffic_only_enabled      = true
-  public_network_access_enabled   = !var.enable_private_endpoints
+  min_tls_version            = "TLS1_2"
+  https_traffic_only_enabled = true
+  # See modules/security's Key Vault resource for why this can't just be
+  # `!var.enable_private_endpoints`: a fully-disabled public endpoint ignores network_acls
+  # ip_rules entirely, so the deployer_ip_ranges escape hatch below needs the endpoint to
+  # stay enabled (and firewalled via default_action = "Deny") rather than switched off.
+  public_network_access_enabled   = !var.enable_private_endpoints || length(var.deployer_ip_ranges) > 0
   allow_nested_items_to_be_public = false
+
+  # NOTE: azurerm_storage_account's nested block is `network_rules`, not `network_acls`
+  # (that name is Key Vault's) — same concept, different block name per this provider.
+  network_rules {
+    default_action = var.enable_private_endpoints ? "Deny" : "Allow"
+    bypass         = ["AzureServices"]
+    ip_rules       = var.deployer_ip_ranges
+  }
 
   blob_properties {
     versioning_enabled = true
@@ -218,7 +238,7 @@ resource "azurerm_private_endpoint" "blob" {
   name                = "${local.name_prefix}-blob-pe"
   resource_group_name = var.resource_group_name
   location            = var.location
-  subnet_id           = var.subnet_id
+  subnet_id           = var.pe_subnet_id
   tags                = var.tags
 
   private_service_connection {
@@ -239,8 +259,14 @@ resource "azurerm_private_endpoint" "blob" {
 # are written too, for the setup Jobs that need discrete fields rather than a URI).
 
 resource "azurerm_key_vault_secret" "postgres_app_url" {
-  name  = "postgres-app-url"
-  value = "postgresql://${azurerm_postgresql_flexible_server.main.administrator_login}:${urlencode(var.postgres_admin_password)}@${azurerm_postgresql_flexible_server.main.fqdn}:5432/knowledge_base?sslmode=require"
+  name = "postgres-app-url"
+  # NO ?sslmode=require (or any query string): public-api rewrites postgresql:// to
+  # postgresql+asyncpg:// and asyncpg.connect() has no sslmode kwarg — a sslmode query
+  # param on the DSN raises TypeError on every connection attempt. TLS is not optional
+  # here regardless: PG Flexible Server enforces it server-side (require_secure_transport
+  # is ON by default and this module never turns it off), so the client-side flag would
+  # be redundant even if asyncpg accepted it.
+  value = "postgresql://${azurerm_postgresql_flexible_server.main.administrator_login}:${urlencode(var.postgres_admin_password)}@${azurerm_postgresql_flexible_server.main.fqdn}:5432/knowledge_base"
 
   key_vault_id = var.key_vault_id
 }

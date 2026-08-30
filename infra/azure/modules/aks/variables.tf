@@ -46,6 +46,19 @@ variable "pod_cidr" {
   default     = "10.244.0.0/16"
 }
 
+variable "service_cidr" {
+  description = <<-EOT
+    Kubernetes Service ClusterIP address space (network_profile.service_cidr). Azure's own
+    documented default for a fresh cluster is 10.0.0.0/16; this module sets it explicitly
+    (rather than leaving it to that implicit default) so modules/apps' networkPolicy.serviceCidr
+    input is always a value this module actually configured, not an assumption about what
+    Azure would have picked. Must not overlap pod_cidr, the AKS subnet, or any other routable
+    VNet range.
+  EOT
+  type        = string
+  default     = "10.0.0.0/16"
+}
+
 variable "enable_ha" {
   description = <<-EOT
     Root var: enable_ha. When true, node pools spread across all 3 availability

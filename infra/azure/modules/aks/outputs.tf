@@ -61,8 +61,13 @@ output "log_analytics_id" {
 }
 
 output "pod_cidr" {
-  description = "Overlay pod address space (var.pod_cidr passthrough) — modules/apps uses this for the public-api TRUSTED_PROXIES value (ingress controller pods live in this range)."
+  description = "Overlay pod address space (var.pod_cidr passthrough) — modules/apps uses this for the chart's networkPolicy.podCidr (ingress controller pods live in this range)."
   value       = var.pod_cidr
+}
+
+output "service_cidr" {
+  description = "Kubernetes Service ClusterIP address space (var.service_cidr passthrough) — modules/apps uses this for the chart's networkPolicy.serviceCidr."
+  value       = var.service_cidr
 }
 
 output "kubelet_identity_object_id" {

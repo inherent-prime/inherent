@@ -50,11 +50,6 @@ output "minio_root_password_kv_secret" {
   value       = azurerm_key_vault_secret.generated["minio-root-password"].name
 }
 
-output "app_api_key_seed_kv_secret" {
-  description = "Key Vault secret name holding the app API-key bootstrap seed."
-  value       = azurerm_key_vault_secret.generated["app-api-key-seed"].name
-}
-
 # Sensitive passthroughs — only for the modules (#322 data) that must set the raw value on
 # an Azure resource at create time (e.g. administrator_password) rather than read it from KV.
 output "postgres_admin_password" {
@@ -84,11 +79,5 @@ output "minio_root_user" {
 output "minio_root_password" {
   description = "Raw MinIO root password. Consumed by modules/apps."
   value       = random_password.minio_root_password.result
-  sensitive   = true
-}
-
-output "app_api_key_seed" {
-  description = "Raw app API-key bootstrap seed. Consumed by modules/apps' bootstrap Job."
-  value       = random_password.app_api_key_seed.result
   sensitive   = true
 }

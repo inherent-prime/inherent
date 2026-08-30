@@ -32,11 +32,21 @@ resource "azurerm_key_vault" "this" {
   purge_protection_enabled   = true
   soft_delete_retention_days = 90
 
-  public_network_access_enabled = !var.enable_private_endpoints
+  # NOTE: public_network_access_enabled = false disables the public endpoint outright — the
+  # network_acls ip_rules below have NO effect in that state (Azure only honors ip_rules on
+  # a public endpoint that exists, i.e. "Selected networks" mode). So when the deployer needs
+  # a firewalled public path in (deployer_ip_ranges non-empty), the endpoint must stay
+  # enabled and network_acls.default_action = "Deny" does the actual restricting instead;
+  # private-endpoint traffic reaches the vault either way (PEs bypass network_acls entirely).
+  public_network_access_enabled = !var.enable_private_endpoints || length(var.deployer_ip_ranges) > 0
 
   network_acls {
     default_action = var.enable_private_endpoints ? "Deny" : "Allow"
     bypass         = "AzureServices"
+    # Deployer egress IPs — required when enable_private_endpoints = true and Terraform
+    # runs outside the VNet, otherwise this module's own
+    # azurerm_key_vault_secret.generated writes below 403. See variable description.
+    ip_rules = var.deployer_ip_ranges
   }
 
   tags = var.tags
@@ -116,11 +126,6 @@ resource "random_password" "minio_root_password" {
   special = false
 }
 
-resource "random_password" "app_api_key_seed" {
-  length  = 48
-  special = false
-}
-
 locals {
   secrets = {
     postgres-admin-password = random_password.postgres_admin.result
@@ -128,7 +133,6 @@ locals {
     ingestion-api-key       = random_password.ingestion_api_key.result
     minio-root-user         = random_string.minio_root_user.result
     minio-root-password     = random_password.minio_root_password.result
-    app-api-key-seed        = random_password.app_api_key_seed.result
   }
 }
 

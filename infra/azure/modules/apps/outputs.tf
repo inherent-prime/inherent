@@ -11,6 +11,11 @@ output "api_hostname" {
   value       = var.api_hostname
 }
 
+output "api_fqdn" {
+  description = "Public API FQDN — root outputs.tf's api_fqdn and scripts/deploy-azure.sh's readiness wait read this directly (no try(), so a rename here breaks validate loudly instead of silently going null)."
+  value       = var.api_hostname
+}
+
 output "appgw_id" {
   description = <<-EOT
     Application Gateway resource id, or null when ingress_profile = "nginx".

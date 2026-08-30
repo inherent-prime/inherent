@@ -35,13 +35,21 @@ resource "azurerm_kubernetes_cluster" "this" {
     network_policy      = "azure"
     # Required by Azure whenever network_plugin_mode = "overlay" — see
     # variables.tf. Must not overlap the AKS subnet.
-    pod_cidr = var.pod_cidr
+    pod_cidr       = var.pod_cidr
+    service_cidr   = var.service_cidr
+    dns_service_ip = cidrhost(var.service_cidr, 10)
     # Standard LB SKU is required for zone redundancy and outbound rules at
     # this scale; azurerm only accepts "basic"/"standard" here (there is no
     # separate "standard_v2" enum value in this provider — Azure's Standard
     # LB is what's meant by that generation).
     load_balancer_sku = "standard"
-    outbound_type     = "loadBalancer"
+    # userAssignedNATGateway, not the default "loadBalancer": modules/network attaches a NAT
+    # gateway to the AKS subnet for stable, node-count-independent egress (see that module's
+    # comment). A subnet with a NAT gateway attached cannot also use the platform LB for
+    # outbound SNAT — "loadBalancer" here would conflict with the NAT gateway association at
+    # apply time. Ingress/inbound traffic is unaffected: this only controls the cluster's
+    # outbound path, not the Standard LB the ingress-nginx Service still provisions for inbound.
+    outbound_type = "userAssignedNATGateway"
   }
 
   default_node_pool {

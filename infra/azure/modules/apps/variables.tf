@@ -25,7 +25,7 @@ variable "location" {
 }
 
 variable "resource_group_name" {
-  description = "Resource group for the appgw_waf path's Application Gateway + public IP."
+  description = "Resource group for azurerm_federated_identity_credential.workload and (appgw_waf path only, currently unreachable — see ingress_profile validation) the Application Gateway + public IP."
   type        = string
 }
 
@@ -163,21 +163,36 @@ variable "openai_embedding_dim" {
 
 # --- aks module cross-module inputs --------------------------------------
 variable "aks_pod_cidr" {
-  description = "modules/aks output: pod_cidr. Used as the public-api TRUSTED_PROXIES value (the ingress controller's pods live in this range under Azure CNI Overlay)."
+  description = "modules/aks output: pod_cidr. Used as networkPolicy.podCidr (chart's NetworkPolicy egress excepts)."
+  type        = string
+}
+
+variable "aks_service_cidr" {
+  description = "modules/aks output: service_cidr. Used as networkPolicy.serviceCidr (chart's NetworkPolicy egress excepts, e.g. for in-cluster Service ClusterIPs)."
   type        = string
 }
 
 variable "workload_identity_client_id" {
-  description = "modules/security output: workload_identity_client_id. Annotated onto the chart's ServiceAccount (azure.workload.identity/client-id) for pods to auth to Key Vault/Blob without secrets. NOTE for the integrator: modules/security's federated_identity_credential subject must be \"system:serviceaccount:<namespace>:inherent\" (namespace = var.namespace, default \"inherent\") -- keep this in sync if the SA name (fixed \"inherent\" in charts/inherent/values.yaml) or namespace ever changes."
+  description = "modules/security output: workload_identity_client_id. Annotated onto the chart's ServiceAccount (azure.workload.identity/client-id) for pods to auth to Key Vault/Blob without secrets. NOTE for the integrator: azurerm_federated_identity_credential.workload's subject below is \"system:serviceaccount:<namespace>:inherent\" (namespace = var.namespace, default \"inherent\") -- keep this in sync if the SA name (fixed \"inherent\" in charts/inherent/values.yaml) or namespace ever changes."
+  type        = string
+}
+
+variable "workload_identity_id" {
+  description = "modules/security output: workload_identity_id (the user-assigned identity's resource id, NOT the client id above). parent_id for this module's azurerm_federated_identity_credential.workload — that credential is what actually lets AKS's workload-identity webhook exchange a Kubernetes ServiceAccount token for an Azure AD token; the client-id annotation alone (workload_identity_client_id) does nothing without it."
+  type        = string
+}
+
+variable "aks_oidc_issuer_url" {
+  description = "modules/aks output: oidc_issuer_url. The `issuer` on azurerm_federated_identity_credential.workload — must match the cluster that actually issues the ServiceAccount tokens the credential is meant to trust."
   type        = string
 }
 
 # --- deployment profile knobs (root vars, passed straight through) -------
 
 variable "embedding_profile" {
-  description = "Root var: embedding_profile (azure_openai|tei)."
+  description = "Root var: embedding_profile (azure_openai|tei). Default \"tei\" — azure_openai requires #311/PR #314."
   type        = string
-  default     = "azure_openai"
+  default     = "tei"
   validation {
     condition     = contains(["azure_openai", "tei"], var.embedding_profile)
     error_message = "embedding_profile must be azure_openai or tei."
@@ -185,12 +200,12 @@ variable "embedding_profile" {
 }
 
 variable "ingress_profile" {
-  description = "Root var: ingress_profile (nginx|appgw_waf)."
+  description = "Root var: ingress_profile. Only \"nginx\" is accepted — \"appgw_waf\" is rejected at the root (variables.tf), see that variable's validation comment for why (epic #320 follow-up)."
   type        = string
   default     = "nginx"
   validation {
-    condition     = contains(["nginx", "appgw_waf"], var.ingress_profile)
-    error_message = "ingress_profile must be nginx or appgw_waf."
+    condition     = var.ingress_profile == "nginx"
+    error_message = "ingress_profile \"appgw_waf\" is not yet supported — App Gateway/AGIC wiring is tracked as a follow-up under epic #320; use \"nginx\"."
   }
 }
 

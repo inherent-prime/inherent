@@ -39,9 +39,15 @@ variable "aks_subnet_cidr" {
 }
 
 variable "data_subnet_cidr" {
-  description = "Subnet CIDR for private endpoints (PG delegation, Redis, Cosmos, Key Vault, Blob)."
+  description = "PG Flexible Server subnet CIDR — delegated to Microsoft.DBforPostgreSQL/flexibleServers, PG only (private endpoints cannot share a delegated subnet, see pe_subnet_cidr)."
   type        = string
   default     = "10.20.16.0/24"
+}
+
+variable "pe_subnet_cidr" {
+  description = "Private-endpoint subnet CIDR for Redis, Cosmos Mongo vCore, Key Vault, and Blob. Kept separate from data_subnet_cidr because Azure forbids private endpoints in a subnet delegated to another service."
+  type        = string
+  default     = "10.20.18.0/24"
 }
 
 variable "appgw_subnet_cidr" {
@@ -60,7 +66,7 @@ variable "existing_vnet_id" {
 }
 
 variable "existing_subnet_ids" {
-  description = "Existing subnet IDs, keyed \"aks\"/\"data\"/\"appgw\". Required when existing_vnet_id is set."
+  description = "Existing subnet IDs, keyed \"aks\"/\"data\"/\"pe\"/\"appgw\". Required when existing_vnet_id is set. \"data\" must be delegated to Microsoft.DBforPostgreSQL/flexibleServers and host nothing else; \"pe\" hosts the Redis/Cosmos/Key Vault/Blob private endpoints and must NOT be delegated (Azure rejects private endpoints in a delegated subnet)."
   type        = map(string)
   default     = {}
 }

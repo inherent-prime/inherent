@@ -7,7 +7,7 @@ output "vnet_id" {
 }
 
 output "subnet_ids" {
-  description = "Subnet IDs keyed \"aks\", \"data\", \"appgw\"."
+  description = "Subnet IDs keyed \"aks\", \"data\" (PG Flexible, delegated), \"pe\" (Redis/Cosmos/Key Vault/Blob private endpoints), \"appgw\"."
   value       = local.subnet_ids
 }
 

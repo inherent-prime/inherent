@@ -19,9 +19,14 @@ locals {
       owned_by  = "modules/data"
     }
     redis_cache = {
-      mechanism = "none — cache-only data (rate-limit counters, MQ Streams durability lives in Postgres, not Redis)"
-      rpo       = "n/a"
-      rto       = "minutes (re-provision Azure Cache for Redis, reconnect)"
+      # NOT cache-only: Redis Streams (MQ_BACKEND=redis) hold in-flight upload/ingestion
+      # events, audit records, and consumer-group offsets — see modules/data's
+      # maxmemory_policy=noeviction comment for why Streams durability matters here at all.
+      # Losing the cache loses whatever hasn't been consumed/committed yet, same as any
+      # message queue without persistence enabled.
+      mechanism = "none — Redis has no backup/replication configured; a loss drops in-flight MQ Streams events (upload/ingestion jobs not yet consumed, audit records, consumer-group offsets). Recovery is re-publishing/re-ingesting: source documents already durable in MinIO/PG are re-submitted through the ingestion API to regenerate the events Redis lost, not a Redis-side restore."
+      rpo       = "up to the in-flight queue depth at time of loss (not time-based — bounded by how much is unconsumed, not by an interval)"
+      rto       = "minutes (re-provision Azure Cache for Redis, reconnect) + re-ingestion time for whatever was in flight"
       owned_by  = "modules/data"
     }
     weaviate_vectors = {
@@ -31,8 +36,8 @@ locals {
       owned_by  = "charts/inherent (installed by modules/apps)"
     }
     object_storage_minio = {
-      mechanism = "nightly `mc mirror` CronJob, MinIO -> GRS Blob"
-      rpo       = "<= 24 h (nightly mirror cadence)"
+      mechanism = "hourly rclone sync CronJob, MinIO -> GRS Blob"
+      rpo       = "<= 1 h (hourly mirror cadence)"
       rto       = "restore MinIO PVC from the mirrored Blob container"
       owned_by  = "charts/inherent (installed by modules/apps)"
     }

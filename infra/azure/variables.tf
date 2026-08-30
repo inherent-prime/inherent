@@ -40,9 +40,9 @@ variable "tags" {
 
 
 variable "embedding_profile" {
-  description = "\"azure_openai\" (default, depends on #311/PR #314) = azurerm_cognitive_account OpenAI deployment. \"tei\" = TEI CPU Deployment on AKS, self-hosted fallback."
+  description = "\"tei\" (default) = TEI CPU Deployment on AKS, self-hosted, no external dependency. \"azure_openai\" = azurerm_cognitive_account OpenAI deployment — requires #311/PR #314 to merge first; until then the app ignores EMBEDDING_PROVIDER/EMBEDDING_API_KEY and only speaks the TEI wire protocol, so \"azure_openai\" is not yet a working choice even though this module provisions the Azure resources for it."
   type        = string
-  default     = "azure_openai"
+  default     = "tei"
 
   validation {
     condition     = contains(["azure_openai", "tei"], var.embedding_profile)
@@ -66,13 +66,20 @@ variable "storage_profile" {
 }
 
 variable "ingress_profile" {
-  description = "\"nginx\" (default) = ingress-nginx + cert-manager (Let's Encrypt) on a Standard LB. \"appgw_waf\" = Application Gateway WAF_v2 (higher cost, WAF/DDoS posture) on the appgw subnet."
+  description = "\"nginx\" (default, only supported value today) = ingress-nginx + cert-manager (Let's Encrypt) on a Standard LB. \"appgw_waf\" (Application Gateway WAF_v2) is reserved but rejected by validation — see epic #320."
   type        = string
   default     = "nginx"
 
   validation {
-    condition     = contains(["nginx", "appgw_waf"], var.ingress_profile)
-    error_message = "ingress_profile must be \"nginx\" or \"appgw_waf\"."
+    # appgw_waf is intentionally rejected, not just undocumented: the App Gateway/AGIC
+    # wiring is incomplete (root main.tf hardcodes appgw_id = null to both modules/monitoring
+    # and modules/aks, so AGIC is never actually installed and traffic would never reach the
+    # cluster) and the chart's NetworkPolicy would drop AppGW-originated traffic outright.
+    # The appgw code paths stay in the tree (modules/apps/ingress.tf, modules/aks's
+    # ingress_application_gateway block) so the follow-up under epic #320 has something to
+    # finish wiring rather than rebuilding from scratch, but they are unreachable until then.
+    condition     = var.ingress_profile == "nginx"
+    error_message = "ingress_profile \"appgw_waf\" is not yet supported — App Gateway/AGIC wiring is tracked as a follow-up under epic #320; use \"nginx\"."
   }
 }
 
@@ -105,7 +112,7 @@ variable "existing_vnet_id" {
 }
 
 variable "existing_subnet_ids" {
-  description = "Existing subnet IDs, keyed \"aks\"/\"data\"/\"appgw\". Required when existing_vnet_id is set."
+  description = "Existing subnet IDs, keyed \"aks\"/\"data\"/\"pe\"/\"appgw\". Required when existing_vnet_id is set. \"data\" must be delegated to Microsoft.DBforPostgreSQL/flexibleServers (PG only); \"pe\" hosts the Redis/Cosmos/Key Vault/Blob private endpoints and must NOT be delegated."
   type        = map(string)
   default     = {}
 }
@@ -126,6 +133,50 @@ variable "enable_private_endpoints" {
   description = "Private-endpoint (or VNet-delegate, for PG) every data service and Key Vault, denying public network access. False only for disconnected/local evaluation."
   type        = bool
   default     = true
+}
+
+variable "deployer_ip_ranges" {
+  description = <<-EOT
+    CIDRs allowed through Key Vault's and the storage account's network ACLs in addition to
+    the VNet/private-endpoint path. Relevant only when enable_private_endpoints = true: in
+    that mode Terraform's own data-plane calls (Key Vault secret writes in modules/security,
+    storage container creates in modules/data) run as the deployer's own identity over the
+    public internet unless the deployer itself is inside the VNet (a jumpbox, a peered
+    self-hosted CI runner, VPN/ExpressRoute). If the deployer is NOT inside the VNet, this
+    MUST contain the deployer's egress IP/CIDR (e.g. ["203.0.113.4/32"]) or those writes 403.
+    Empty list (default) is correct only when the deployer runs inside the VNet.
+  EOT
+  type        = list(string)
+  default     = []
+}
+
+variable "vnet_cidr" {
+  description = "VNet address space (modules/network), used only when existing_vnet_id is not set."
+  type        = string
+  default     = "10.20.0.0/16"
+}
+
+variable "pod_cidr" {
+  description = "AKS Azure CNI Overlay pod address space (modules/aks). Must not overlap the AKS subnet or any other routable VNet range."
+  type        = string
+  default     = "10.244.0.0/16"
+}
+
+variable "aks_sku_tier" {
+  description = "AKS control-plane pricing tier (modules/aks). \"Standard\" (default) carries the financially-backed 99.95% uptime SLA this mission-critical deployment needs; \"Free\" is best-effort only."
+  type        = string
+  default     = "Standard"
+
+  validation {
+    condition     = contains(["Free", "Standard", "Premium"], var.aks_sku_tier)
+    error_message = "aks_sku_tier must be Free, Standard, or Premium."
+  }
+}
+
+variable "log_retention_days" {
+  description = "Log Analytics workspace retention, in days (modules/monitoring). 30 is the free-tier-friendly default; raise for longer audit/compliance windows (cost scales with retention x ingestion volume)."
+  type        = number
+  default     = 30
 }
 
 # --- Sizing --------------------------------------------------------------------------------
@@ -248,6 +299,17 @@ variable "dns_record" {
   description = "Record name created in dns_zone_name (e.g. \"api\" -> api.<dns_zone_name>). Ignored when api_hostname is set."
   type        = string
   default     = ""
+}
+
+variable "dns_zone_resource_group" {
+  description = "Resource group containing the existing dns_zone_name Azure DNS zone. Required (no implicit \"same RG as this deployment\" fallback) whenever dns_zone_name is set — Azure DNS zones are routinely managed in a separate/shared RG, so guessing would silently point at the wrong zone. Ignored when dns_zone_name is empty."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.dns_zone_name == "" || var.dns_zone_resource_group != ""
+    error_message = "dns_zone_resource_group is required when dns_zone_name is set."
+  }
 }
 
 variable "api_hostname" {

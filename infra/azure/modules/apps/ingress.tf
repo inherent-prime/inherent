@@ -64,32 +64,29 @@ resource "helm_release" "cert_manager" {
   }
 }
 
-resource "kubernetes_manifest" "letsencrypt_cluster_issuer" {
+# kubernetes_manifest (the naive choice for a CRD-backed object like ClusterIssuer) cannot
+# plan on a fresh cluster: it tries to read the CRD's OpenAPI schema at PLAN time to validate
+# the manifest, and cert-manager's CRDs don't exist yet before helm_release.cert_manager has
+# applied — `terraform plan` on a brand-new cluster fails outright, before apply ever runs.
+# charts/cluster-issuer (a tiny local chart, values: name/email/server/ingressClass) sidesteps
+# this the same way every other CRD-backed object in this module already does (helm_release):
+# helm only needs the CRDs to exist at APPLY time, which depends_on below guarantees.
+resource "helm_release" "cluster_issuer" {
   count = var.ingress_profile == "nginx" ? 1 : 0
 
-  manifest = {
-    apiVersion = "cert-manager.io/v1"
-    kind       = "ClusterIssuer"
-    metadata = {
-      name = "letsencrypt"
-    }
-    spec = {
-      acme = {
-        server = "https://acme-v02.api.letsencrypt.org/directory"
-        email  = var.letsencrypt_email
-        privateKeySecretRef = {
-          name = "letsencrypt-account-key"
-        }
-        solvers = [{
-          http01 = {
-            ingress = {
-              ingressClassName = "nginx"
-            }
-          }
-        }]
-      }
-    }
-  }
+  name             = "cluster-issuer"
+  namespace        = "cert-manager"
+  create_namespace = false
+  chart            = "${path.module}/../../../../charts/cluster-issuer"
+  wait             = true
+  timeout          = 300
+
+  values = [yamlencode({
+    name         = "letsencrypt"
+    email        = var.letsencrypt_email
+    server       = "https://acme-v02.api.letsencrypt.org/directory"
+    ingressClass = "nginx"
+  })]
 
   depends_on = [helm_release.cert_manager]
 }
@@ -134,7 +131,7 @@ resource "kubernetes_ingress_v1" "api_nginx" {
 
   depends_on = [
     helm_release.ingress_nginx,
-    kubernetes_manifest.letsencrypt_cluster_issuer,
+    helm_release.cluster_issuer,
     helm_release.inherent,
   ]
 }

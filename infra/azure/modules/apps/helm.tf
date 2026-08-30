@@ -21,7 +21,12 @@ locals {
         max = var.api_replicas_max
       }
       env = {
-        trustedProxies = var.aks_pod_cidr
+        # List, matching the chart's schema — the app does exact-IP matching (no CIDR
+        # support), so a CIDR like var.aks_pod_cidr can never be a valid entry here; empty
+        # list is the chart default (values.yaml documents the resulting rate-limiting
+        # caveat behind a shared-IP ingress). See networkPolicy.podCidr below for where
+        # aks_pod_cidr actually gets used.
+        trustedProxies = []
       }
     }
     ingestion = {
@@ -32,6 +37,10 @@ locals {
         sizeGi                = var.weaviate_disk_gb
         createZrsStorageClass = var.enable_ha
       }
+      # NOTE: weaviate keeps its own createZrsStorageClass key (chart-owned name, predates
+      # this coordination) — minio.persistence below uses the current shared schema name
+      # useZrsClass for the same gate. Both mean "storage-class-level ZRS", just spelled
+      # differently per the chart's schema at the time each was written.
       backup = {
         enabled   = var.enable_dr
         container = var.weaviate_backup_container
@@ -44,6 +53,9 @@ locals {
     minio = {
       persistence = {
         sizeGi = var.minio_disk_gb
+        # Same enable_ha gate as weaviate.persistence.createZrsStorageClass above — both
+        # point at the one shared templates/storageclass.yaml, rendered once.
+        useZrsClass = var.enable_ha
       }
       mirror = {
         enabled = var.enable_dr
@@ -58,10 +70,13 @@ locals {
     }
     temporal = {
       server = {
-        # 2 replicas when enable_ha (root var) — see charts/inherent
-        # templates/temporal/deployment.yaml comment on why splitting
-        # frontend/history/matching/worker isn't done at this scale.
-        replicas = var.enable_ha ? 2 : 1
+        # Always 1, regardless of enable_ha: temporalio/server's ringpop gossip membership
+        # (TCP 6933-6939 between replicas) is not wired through the chart's NetworkPolicy,
+        # so a 2nd replica would boot isolated rather than joining one cluster — see
+        # charts/inherent/values.yaml's temporal.server.replicas comment. HA for Temporal
+        # comes from AKS rescheduling a killed pod (workflow state lives in PG, not in the
+        # process) rather than from a multi-replica ringpop cluster.
+        replicas = 1
       }
       postgres = {
         host = var.pg_fqdn
@@ -75,7 +90,11 @@ locals {
     embedding = merge(
       {
         profile = var.embedding_profile
-        dim     = var.openai_embedding_dim
+        # TEI's CPU deployment (charts/inherent) is pinned to a 384-dim model — only
+        # openai_embedding_dim (var, default 1536 for text-embedding-3-small) applies to
+        # the azure_openai profile; hardcoding 384 for tei keeps the two profiles from
+        # silently sharing a dimension that only happens to be right for one of them.
+        dim = var.embedding_profile == "tei" ? 384 : var.openai_embedding_dim
       },
       var.embedding_profile == "azure_openai" ? {
         serviceUrl = var.openai_endpoint
@@ -96,10 +115,11 @@ locals {
       } : {}
     )
     networkPolicy = {
-      # Tighten from the chart's 0.0.0.0/0 default once the network module's
-      # private-endpoint/data subnet CIDR is known at this call site — left
-      # as the chart default here; wire a var + pass it through if the
-      # integrator wants this tightened at apply time.
+      # AKS CNI Overlay pod/service address spaces (modules/aks) — the chart's
+      # NetworkPolicy egress rules use these instead of 0.0.0.0/0 so the netpol posture
+      # actually restricts anything.
+      podCidr     = var.aks_pod_cidr
+      serviceCidr = var.aks_service_cidr
     }
   }
 }

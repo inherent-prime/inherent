@@ -40,7 +40,7 @@ output "storage_account_name" {
 
 output "api_fqdn" {
   description = "Public API ingress FQDN/IP (from modules/apps, ingress annotation per the spec)."
-  value       = try(module.apps.api_fqdn, null)
+  value       = module.apps.api_fqdn
 }
 
 output "openai_endpoint" {

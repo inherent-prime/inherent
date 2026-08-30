@@ -15,6 +15,18 @@ ingress_profile = "nginx"
 
 inherent_version = "0.6.0" # pinned release — never "latest" in prod
 
+# CHANGE ME — root main.tf's guardrail precondition fails the plan without one of these.
+api_hostname         = "api.example.com" # CHANGE ME
+letsencrypt_email    = "ops@example.com" # CHANGE ME — cert-manager ACME contact
+alert_email_address  = "ops@example.com" # CHANGE ME — monitoring action group receiver; falls back to letsencrypt_email if left empty
+
+deployer_ip_ranges = [] # CHANGE ME to the deployer's egress IP/CIDR if Terraform runs outside the VNet
+
+aks_sku_tier       = "Standard"
+log_retention_days = 30
+vnet_cidr          = "10.20.0.0/16"
+pod_cidr           = "10.244.0.0/16"
+
 aks_system_vm_size = "Standard_D2s_v5"
 aks_user_vm_size   = "Standard_D4s_v5"
 aks_user_min_count = 3
@@ -32,5 +44,6 @@ redis_capacity   = 1
 weaviate_disk_gb = 64
 minio_disk_gb    = 128
 
-embedding_profile = "azure_openai"
-storage_profile   = "minio"
+embedding_profile = "tei" # self-hosted, no external dependency
+# embedding_profile = "azure_openai" # requires #311/PR #314 to merge first — see docs/deploy/azure.md limitations
+storage_profile = "minio"
