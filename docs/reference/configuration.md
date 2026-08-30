@@ -153,6 +153,9 @@ and binds all datastore ports to `127.0.0.1`.
 | `EMBEDDING_MAX_CONCURRENCY` | `2` | In-flight batch POSTs per `embed_texts` call (#231 phase 1). The product of this and `TEMPORAL_MAX_CONCURRENT_ACTIVITIES` is the provider in-flight cap under bulk upload — raise carefully |
 | `EMBEDDING_BATCH_MAX_RETRIES` | `3` | Per-batch HTTP retries with backoff+jitter before the activity fails (#229). Worst-case batch wall clock (`attempts * EMBEDDING_TIMEOUT_S + BATCH_RETRY_SLEEP_BUDGET_S` = 100s with these defaults) is included in `store_in_weaviate` StartToClose via `weaviate_store_budget.py` — see [Retry](#embedding-provider-model-identity-guard) below for why this is a DIFFERENT number from inh-public-api-svc's query path using the same var name |
 | `EMBEDDING_ADOPT_UNSTAMPED_COLLECTIONS` | `false` | Ingestion-svc only. A NON-empty collection with no persisted embedding identity (created before #311) is refused by default rather than silently adopted (#311 PR #314 review finding 3) — see [Model-identity guard](#embedding-provider-model-identity-guard) below |
+| `EMBEDDING_BATCH_SIZE` / `EMBEDDING_TIMEOUT_S` | `32` / `30.0` | Chunks per TEI call / per-request timeout |
+| `EMBEDDING_MAX_CONCURRENCY` | `2` | In-flight TEI batch POSTs per `embed_texts` call (#231 phase 1). The product of this and `TEMPORAL_MAX_CONCURRENT_ACTIVITIES` is the TEI in-flight cap under bulk upload — raise carefully |
+| `EMBEDDING_BATCH_MAX_RETRIES` | `3` | Per-batch HTTP retries with backoff+jitter before the activity fails (#229). Worst-case batch wall clock is included in both `store_in_weaviate`'s StartToClose (capped at 2h, was 15m — #298) and its `heartbeat_timeout` (~2× worst-case batch, #298) via `weaviate_store_budget.py` |
 | `MAX_WORKERS` / `MAX_RETRIES` / `RETRY_DELAY_SECONDS` | `4` / `3` / `5` | Worker concurrency and retry policy |
 
 #### Format-aware chunking (#129)

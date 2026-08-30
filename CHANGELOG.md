@@ -82,6 +82,24 @@ All notable changes to Inherent are documented here. The format follows
   for all affected documents via `scripts/backfill_stale_content_type.py`, which
   syncs both Postgres and Weaviate in one pass. No re-indexing is required:
   both types use the same extractor and chunking hint.
+- **`store_in_weaviate` no longer fails deterministically on chunk-heavy
+  documents on CPU TEI (#298).** #239 scaled `store_in_weaviate`'s
+  `StartToClose` with chunk count but capped it at 15 minutes so one
+  pathological document couldn't pin a worker slot forever — a 60,215-chunk
+  document (real-world repro, #298) needs well over 15 minutes to embed even
+  with zero retries, so it hit that cap on every attempt and never
+  completed. `store_chunks_with_tenant` now embeds via
+  `embedder.embed_texts_with_progress`, which drives the batch loop on the
+  event loop instead of one opaque blocking call, so `store_in_weaviate` can
+  heartbeat real per-batch progress; the activity's `execute_activity` call
+  pairs that with a `heartbeat_timeout` (~2× one batch's worst-case retry
+  window) so a worker that genuinely stops advancing is still caught in
+  roughly that same window, independent of document size. That is what makes
+  it safe to raise the StartToClose cap 15m → 2h
+  (`STORE_MAX_TIMEOUT_SECONDS`, `embedding_defaults.py`) instead of just
+  moving the same indeterminate hang further out. See
+  `docs/developer/learnings.md` #298 for the chunked-continuation
+  alternative considered and rejected.
 
 - **Dead-letter rows left at `pending` for a document that later succeeded no
   longer read as broken, and can no longer replay a stale payload (#287).**

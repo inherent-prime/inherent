@@ -227,6 +227,12 @@ async def store_in_weaviate(input: StoreDocumentInput) -> StoreDocumentOutput:
     3. Ensures user tenant exists within collection
     4. Stores all chunks with multi-tenant isolation
 
+    Step 4 (weaviate.py's ``store_chunks_with_tenant``) heartbeats real
+    per-batch embedding progress (#298) -- the workflow call site pairs that
+    with ``heartbeat_timeout`` so a worker that stops advancing is caught in
+    roughly one batch's worst-case retry window, without needing a low
+    start_to_close_timeout to bound the same risk.
+
     Args:
         input: Contains document metadata and workflow_run_id to read chunks from staging
 

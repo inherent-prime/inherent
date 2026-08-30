@@ -389,3 +389,134 @@ def test_embedding_api_key_embedded_in_url_is_redacted_from_logs(monkeypatch):
 
     assert spy.records, "expected the init log call to have fired"
     assert secret not in spy.rendered()
+
+
+# --- embed_texts_with_progress (#298) ---------------------------------------
+#
+# Async sibling of embed_texts used by store_chunks_with_tenant so
+# store_in_weaviate can heartbeat real per-batch progress instead of going
+# dark for a whole document's embed. Same batching/retry/ordering contract
+# as embed_texts -- these tests focus on what's new: the on_batch_done
+# callback and offload-per-batch (rather than offload-the-whole-call).
+
+
+async def test_embed_texts_with_progress_matches_embed_texts_contract(monkeypatch):
+    """Same order/dim/empty-handling contract as the sync embed_texts."""
+    from src.services.embedder import embed_texts_with_progress
+
+    fake = _install_fake(monkeypatch)
+    out = await embed_texts_with_progress(["hello world", "", "another sentence"])
+    assert len(out) == 3
+    assert len(out[0]) == 384
+    assert all(x == 0.0 for x in out[1])
+    assert out[0] != out[2]
+    assert len(fake.calls) == 1
+    assert fake.calls[0] == ["hello world", "another sentence"]
+
+
+async def test_embed_texts_with_progress_empty_list_no_callback(monkeypatch):
+    from src.services.embedder import embed_texts_with_progress
+
+    _install_fake(monkeypatch)
+    calls: list[tuple[int, int]] = []
+    out = await embed_texts_with_progress([], on_batch_done=calls.append)
+    assert out == []
+    assert calls == []
+
+
+async def test_embed_texts_with_progress_reports_progress_per_batch(monkeypatch):
+    """Progress is real, per-batch signal: on_batch_done must fire once per
+    batch with a monotonically increasing completed count that reaches
+    (total, total) -- this is what lets store_in_weaviate heartbeat with
+    genuine progress during a long store rather than a fixed timer."""
+    from src.services import embedder as emb
+
+    monkeypatch.setenv("EMBEDDING_BATCH_SIZE", "10")
+    monkeypatch.setenv("EMBEDDING_MAX_CONCURRENCY", "1")  # deterministic order
+
+    def fake_post(inputs):
+        return [[0.0] * emb._embedding_dim() for _ in inputs]
+
+    monkeypatch.setattr(
+        emb, "embed_batch_with_retry", lambda _p, inputs, **_kw: fake_post(inputs)
+    )
+
+    progress: list[tuple[int, int]] = []
+    out = await emb.embed_texts_with_progress(
+        [f"chunk-{i}" for i in range(25)],  # -> 3 batches of [10, 10, 5]
+        on_batch_done=lambda done, total: progress.append((done, total)),
+    )
+    assert len(out) == 25
+    assert progress == [(1, 3), (2, 3), (3, 3)]
+
+
+async def test_embed_texts_with_progress_offloads_each_batch_to_a_thread(monkeypatch):
+    """The blocking per-batch HTTP call must be offloaded (#19) -- same
+    reasoning as embed_texts, now per batch instead of per whole call."""
+    from src.services import embedder as emb
+
+    monkeypatch.setenv("EMBEDDING_BATCH_SIZE", "10")
+    monkeypatch.setenv("EMBEDDING_MAX_CONCURRENCY", "1")
+
+    offloaded: list[int] = []
+    real_to_thread = emb.asyncio.to_thread
+
+    async def spying_to_thread(func, *args, **kwargs):
+        # args = (provider, inputs) post-#311 -- the batch is args[1], not
+        # args[0], because embed_batch_with_retry takes the provider first.
+        offloaded.append(len(args[1]))  # batch size
+        return await real_to_thread(func, *args, **kwargs)
+
+    def fake_post(inputs):
+        return [[0.0] * emb._embedding_dim() for _ in inputs]
+
+    monkeypatch.setattr(
+        emb, "embed_batch_with_retry", lambda _p, inputs, **_kw: fake_post(inputs)
+    )
+    monkeypatch.setattr(emb.asyncio, "to_thread", spying_to_thread)
+
+    out = await emb.embed_texts_with_progress([f"chunk-{i}" for i in range(25)])
+    assert len(out) == 25
+    assert offloaded == [10, 10, 5]
+
+
+async def test_embed_texts_with_progress_stops_dispatch_when_cancelled(monkeypatch):
+    """#298: unlike the old single asyncio.to_thread(embed_texts, ...) call
+    (which could not be interrupted once started), a cancellation of the
+    enclosing task must stop further, not-yet-started batches from being
+    dispatched -- this is the "stop wasting CPU after Temporal has given up"
+    half of the issue."""
+    import asyncio
+
+    from src.services import embedder as emb
+
+    monkeypatch.setenv("EMBEDDING_BATCH_SIZE", "1")
+    monkeypatch.setenv("EMBEDDING_MAX_CONCURRENCY", "1")  # strictly serial
+
+    dispatched: list[str] = []
+    release = asyncio.Event()
+
+    def blocking_post(inputs):
+        dispatched.append(inputs[0])
+        if inputs[0] == "chunk-0":
+            # Simulate the first batch being the one that's slow/wedged.
+            import time as _time
+
+            while not release.is_set():
+                _time.sleep(0.01)
+        return [[0.0] * emb._embedding_dim() for _ in inputs]
+
+    monkeypatch.setattr(
+        emb, "embed_batch_with_retry", lambda _p, inputs, **_kw: blocking_post(inputs)
+    )
+
+    task = asyncio.ensure_future(emb.embed_texts_with_progress([f"chunk-{i}" for i in range(5)]))
+    await asyncio.sleep(0.05)  # let the first batch start and block
+    task.cancel()
+    release.set()  # let the blocked thread finish so the test can exit cleanly
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # Only the in-flight batch was dispatched -- batches 2-5 never started.
+    assert dispatched == ["chunk-0"]

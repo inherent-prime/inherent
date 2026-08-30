@@ -49,7 +49,10 @@ with workflow.unsafe.imports_passed_through():
         UpdateStatsInput,
         WorkflowResult,
     )
-    from src.temporal.weaviate_store_budget import weaviate_store_timeout
+    from src.temporal.weaviate_store_budget import (
+        weaviate_store_heartbeat_timeout,
+        weaviate_store_timeout,
+    )
 
 
 def _document_failure(message: str) -> ApplicationError:
@@ -548,10 +551,18 @@ class DocumentIngestionWorkflow:
             # #228: budget scales with chunk count (embedding is O(batches)).
             # #229: longer initial interval spreads thundering-herd retries when
             # the TEI sidecar is saturated (Temporal also applies ~20% jitter).
+            # #298: heartbeat_timeout pairs with per-batch heartbeating inside
+            # the activity (weaviate.store_chunks_with_tenant) so a worker that
+            # stops making progress is caught in roughly one batch's worst-case
+            # retry window, independent of how large start_to_close_timeout is
+            # for this document. That is what makes it safe to budget
+            # start_to_close_timeout for large documents actually finishing
+            # (STORE_MAX_TIMEOUT_SECONDS) rather than for bounding a hang.
             wv_task = workflow.execute_activity(
                 store_in_weaviate,
                 store_input,
                 start_to_close_timeout=weaviate_store_timeout(chunk_output.chunk_count),
+                heartbeat_timeout=weaviate_store_heartbeat_timeout(),
                 retry_policy=RetryPolicy(
                     maximum_attempts=5,
                     initial_interval=timedelta(seconds=5),
