@@ -66,7 +66,7 @@ All notable changes to Inherent are documented here. The format follows
 ### Added
 
 - **Azure cloud-native production Terraform target: AKS, HA, DR, one-click
-  deploy script, and docs (#320).** `infra/azure/` provisions a full
+  deploy script, and docs (#338, #320).** `infra/azure/` provisions a full
   production stack on AKS (3 zones, autoscaling node pools), Postgres
   Flexible Server (zone-redundant HA), Cosmos DB for MongoDB (vCore), Azure
   Cache for Redis (TLS, `noeviction`), Key Vault, and self-hosted TEI on AKS
