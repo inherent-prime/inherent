@@ -3,8 +3,8 @@
 Covers the acceptance criteria on the HTTP surface mounted at ``POST /mcp``
 inside this service's existing FastAPI app (``src/mcp_server/http_transport.py``):
 
-- **Schema**: exactly the 10 documented tools are advertised; the 3 the issue
-  excludes (``verify_claim`` / ``search_memory`` / ``get_citations``) --
+- **Schema**: exactly the 11 documented tools are advertised (#220 + #297); the 3
+  the issue excludes (``verify_claim`` / ``search_memory`` / ``get_citations``)
   plus ``report_feedback``, excluded by the same "10, not 13" intent -- are
   absent from HTTP but UNCHANGED on stdio. No HTTP schema mentions
   ``api_key`` anywhere.
@@ -51,7 +51,7 @@ from src.models.api_key import APIKeyInfo
 
 pytestmark = [pytest.mark.contract]
 
-# The issue's "10, not 13" acceptance list, verbatim.
+# The issue's "10, not 13" acceptance list (#220), plus list_workspaces (#297).
 HTTP_EXPOSED_TOOLS = {
     "search_documents",
     "list_documents",
@@ -63,6 +63,7 @@ HTTP_EXPOSED_TOOLS = {
     "delete_document",
     "refresh_stale_source",
     "get_retrieval_health",
+    "list_workspaces",
 }
 
 # Excluded from HTTP: the issue's explicit 3, plus report_feedback (see the
@@ -121,10 +122,12 @@ async def _call_http_tool(
 
 
 # =========================================================================== #
-# Schema: exactly 10 tools, api_key stripped, excluded 3(+1) absent
+# Schema: exactly 11 tools, api_key stripped, excluded 3(+1) absent
 # =========================================================================== #
 class TestHttpToolSurface:
     async def test_exactly_the_documented_ten_tools_are_advertised(self):
+        """Verify the documented 11 HTTP-exposed tools (#220 + #297) are
+        exactly those advertised (no extra, no missing)."""
         tools = await _list_http_tools()
         assert set(tools) == HTTP_EXPOSED_TOOLS
 
