@@ -102,6 +102,56 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Added
 
+- **Shared `EmbeddingProvider` abstraction: provider choice, auth, and a
+  Weaviate model-identity guard (#311).** inh-ingestion-svc and
+  inh-public-api-svc each carried their own TEI-only HTTP client with
+  divergent behavior — only the ingestion write path retried transient
+  failures; the public-api query path (`embed_query`) had none at all. Both
+  now build their client through one `EmbeddingProvider` interface in the
+  shared `inh-contracts` package (mirroring the existing `BaseMQService` /
+  `create_mq_service()` pattern), with `TEIProvider` (default, non-negotiable
+  — `make up`/docker-compose with no new env vars behaves exactly as before)
+  and a new `OpenAICompatibleProvider`. `EMBEDDING_PROVIDER` selects the
+  backend; switching is an env change only, with no call-site changes in
+  `weaviate.py` or `search.py`. `EMBEDDING_API_KEY` adds
+  `Authorization: Bearer` auth (never logged, and a key accidentally
+  embedded in `EMBEDDING_SERVICE_URL` is redacted before that URL is
+  logged) — TEI still works with no key set. The ingestion write path's
+  exponential-backoff-with-jitter retry (4xx except 429 fails fast; total
+  sleep time is now an *enforced* ceiling, not just an estimate) is shared
+  by both paths, closing the query-path retry gap — with independently
+  tuned wall-clock budgets, since the query path sits inside a synchronous,
+  user-facing request while the ingestion path embeds in a background
+  Temporal activity: `inh-public-api-svc`'s query embed defaults to 2
+  attempts × 5s timeout + 2s sleep budget (12s worst case, under the
+  incident's own 15s consumer ceiling), not the ingestion batch path's 3 ×
+  30s + 10s (100s, sized into `store_in_weaviate`'s StartToClose via
+  `weaviate_store_budget.py`) — the retry-budget constant alone bounds
+  cumulative sleep, not the attempts themselves, so reusing the batch
+  numbers on the query path (as first shipped) let retries there add up to
+  ~91.5s, blowing well past its own caller's ceiling. And a model-identity
+  mismatch on the query path now fails the whole request even inside a
+  multi-workspace search, instead of degrading to partial results for that
+  workspace. Separately — and highest severity — Weaviate collections are
+  created with `Configure.Vectorizer.none()` and never declare a dimension,
+  so querying with model A against a collection built with model B
+  previously returned plausible-looking noise with no error anywhere. The
+  active provider's identity (`EMBEDDING_MODEL_ID` + `EMBEDDING_DIM`) is now
+  persisted as each collection's Weaviate `description` and asserted on
+  every write (`WeaviateService`) and vector query (`SearchService`): a
+  mismatch is a hard error (`EmbeddingIdentityMismatchError`), always, never
+  a warning. An unstamped legacy collection is adopted (stamped) by the
+  write path only when it is verifiably EMPTY; a non-empty unstamped
+  collection is refused by default (`EmbeddingIdentityAdoptionRequiredError`)
+  rather than silently certified as matching the active provider, unless an
+  operator opts in via `EMBEDDING_ADOPT_UNSTAMPED_COLLECTIONS=true` after
+  confirming its vectors actually match. The read-only query path never
+  stamps or adopts, and now logs loudly (rather than staying silent) the
+  first time it queries a still-unstamped collection. See the "Embedding
+  provider & model-identity guard" section of `docs/reference/
+  configuration.md` for the wire formats, the full identity-guard policy,
+  and how to recover from a mismatch.
+
 - **Evals: `POST /v1/evals/runs` accepts optional replay scoping, and
   `DELETE /v1/evals/events` an opt-in case purge (#250).** Run-replay was
   unscoped — `start_run` and `execute_run` each independently selected *every*

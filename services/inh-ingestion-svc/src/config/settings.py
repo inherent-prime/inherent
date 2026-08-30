@@ -114,6 +114,38 @@ class Settings(BaseSettings):
     # we don't silently rely on TEI's server-side truncation (which would drop
     # the tail of an oversized chunk and degrade retrieval quality).
     embedding_max_tokens: int = Field(512, alias="EMBEDDING_MAX_TOKENS")
+    # #311: which EmbeddingProvider backend embedder.py constructs. "tei"
+    # (default) is NON-NEGOTIABLE -- `make up`/docker-compose with no new env
+    # vars must behave exactly as before this setting existed. The other
+    # supported value is "openai_compatible" (any /v1/embeddings-shaped API).
+    embedding_provider: str = Field("tei", alias="EMBEDDING_PROVIDER")
+    # #311: sent as `Authorization: Bearer <key>` to the embedding provider.
+    # TEI accepts one but does not require it (zero-config local dev); an
+    # openai_compatible backend generally requires one. NEVER logged.
+    embedding_api_key: str | None = Field(None, alias="EMBEDDING_API_KEY")
+    # #311: the model this service believes it is talking to -- feeds both
+    # the openai_compatible request body's "model" field AND the Weaviate
+    # collection model-identity guard (src/services/weaviate.py). Default
+    # matches EMBEDDING_MODEL_ID's existing use as the TEI sidecar's own
+    # --model-id in docker-compose.yml, so a stock `make up` stays
+    # self-consistent out of the box. An operator who changes the TEI
+    # sidecar's model (or points EMBEDDING_SERVICE_URL somewhere else) MUST
+    # update this (and EMBEDDING_DIM if it changed) or the identity guard
+    # will -- correctly -- refuse to serve stale-vector-space results.
+    embedding_model_id: str = Field("BAAI/bge-small-en-v1.5", alias="EMBEDDING_MODEL_ID")
+    # PR #314 review finding 3: an unstamped ("legacy") collection used to be
+    # adopted unconditionally -- silently certifying whatever model wrote its
+    # EXISTING vectors as the current active provider, with no check at all.
+    # Default OFF: a non-empty unstamped collection now raises
+    # EmbeddingIdentityAdoptionRequiredError instead of adopting, unless an
+    # operator deliberately sets this to true (only after confirming the
+    # collection's existing vectors actually match the active provider --
+    # see docs/reference/configuration.md#embedding-provider-model-identity-guard).
+    # An EMPTY unstamped collection always adopts silently regardless of this
+    # flag -- there is nothing yet that could be wrong.
+    embedding_adopt_unstamped_collections: bool = Field(
+        False, alias="EMBEDDING_ADOPT_UNSTAMPED_COLLECTIONS"
+    )
 
     # Performance Configuration
     max_workers: int = Field(4, alias="MAX_WORKERS")

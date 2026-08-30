@@ -17,6 +17,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from inh_contracts.embedding.identity import EmbeddingIdentityMismatchError
 
 from src.api.v1 import search as search_api
 from src.config import settings
@@ -145,6 +146,55 @@ async def test_one_workspace_failure_yields_partial_results() -> None:
     returned_ws = {r.document_id for r in results}
     assert returned_ws == {"good1", "good2"}
     assert len(results) == 2
+
+
+@pytest.mark.asyncio
+async def test_identity_mismatch_propagates_instead_of_partial_result() -> None:
+    """PR #314 review finding 1: unlike a generic per-workspace failure, a
+    model-identity mismatch in ONE workspace must fail the WHOLE
+    multi-workspace search, not degrade to partial results — that is the
+    exact silent-corruption failure #311 item 4 exists to prevent."""
+    svc = MagicMock()
+    svc.embed_query_vector = MagicMock(return_value=None)
+
+    async def _search(*, workspace_id, user_id, request, query_vector):  # noqa: ANN001
+        if workspace_id == "corrupted":
+            raise EmbeddingIdentityMismatchError("model mismatch on Workspace_corrupted")
+        return _response([_result(f"c-{workspace_id}", workspace_id, 0.5)])
+
+    svc.search = _search
+
+    req = SearchRequest(query="x", search_mode="semantic")
+    with pytest.raises(EmbeddingIdentityMismatchError):
+        await search_api._search_workspaces_concurrently(
+            svc, user_id="u1", workspace_ids=["good1", "corrupted", "good2"], request=req
+        )
+
+
+@pytest.mark.asyncio
+async def test_identity_mismatch_does_not_hit_the_partial_failure_log(monkeypatch) -> None:
+    """The mismatch must take the re-raise branch, not the generic
+    ``except Exception`` partial-result-isolation branch — confirms ordering,
+    not just that SOME exception eventually surfaces."""
+    warnings: list[tuple] = []
+    monkeypatch.setattr(
+        search_api.logger, "warning", lambda *a, **kw: warnings.append((a, kw)), raising=True
+    )
+
+    svc = MagicMock()
+    svc.embed_query_vector = MagicMock(return_value=None)
+
+    async def _search(*, workspace_id, user_id, request, query_vector):  # noqa: ANN001
+        raise EmbeddingIdentityMismatchError("boom")
+
+    svc.search = _search
+
+    req = SearchRequest(query="x", search_mode="semantic")
+    with pytest.raises(EmbeddingIdentityMismatchError):
+        await search_api._search_workspaces_concurrently(
+            svc, user_id="u1", workspace_ids=["ws1"], request=req
+        )
+    assert warnings == []
 
 
 @pytest.mark.asyncio
