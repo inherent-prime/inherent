@@ -8,11 +8,12 @@ metadata:
     {{- include "inherent.labels" . | nindent 4 }}
     {{- include "inherent.selectorLabels" (dict "component" "tei") | nindent 4 }}
 spec:
-  # Non-default fallback (embedding_profile != "azure_openai") — see
-  # .memory/azure-build-spec.md "Ground truth": prod profile is cloud-native
-  # Azure OpenAI by default; TEI-on-AKS is the documented self-hosted
-  # fallback (e.g. while #311/PR #314 hasn't merged yet, or air-gapped/
-  # no-OpenAI-quota scenarios).
+  # DEFAULT profile (embedding.profile="tei", values.yaml). The app only
+  # ever speaks TEI's wire protocol (POST /embed) today — azure_openai is a
+  # gated, non-functional alternative until #311/PR #314 merges an
+  # openai_compatible provider (see values.yaml's embedding.profile
+  # comment). This self-hosted BAAI/bge-small-en-v1.5 sidecar is what
+  # actually serves embeddings in a stock install.
   replicas: 1
   selector:
     matchLabels:

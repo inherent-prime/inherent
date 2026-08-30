@@ -73,10 +73,22 @@ publicApi:
     rateLimitEnabled: true # RATE_LIMIT_ENABLED — multi-replica correctness needs REDIS_URL set (see secrets.redis below)
     enableHsts: true # ENABLE_HSTS
     logLevel: INFO
-    # TRUSTED_PROXIES — CIDR of the ingress controller's pod network, so the
-    # app trusts X-Forwarded-For from it. Environment-specific; modules/apps
-    # sets this from the AKS pod CIDR (Azure CNI overlay pod address space).
-    trustedProxies: ""
+    # TRUSTED_PROXIES — JSON list of exact peer IPs whose X-Forwarded-For /
+    # X-Real-IP the app will believe (settings.py: trusted_proxies:
+    # list[str], matched by EXACT string equality against request.client.host
+    # -- there is no CIDR support in the app). Rendered via `| toJson` in
+    # templates/public-api/deployment.yaml so this MUST be a YAML list, never
+    # a bare string -- pydantic-settings json.loads() this env var, and both
+    # "" and a bare CIDR string raise a SettingsError at import time
+    # (CrashLoopBackOff on every public-api pod, since settings.py has
+    # `settings = get_settings()` at module scope). Default [] = trust
+    # nobody (safe; peer IP is always used as-is). Because there is no CIDR
+    # matching, listing every ingress-controller pod IP one-by-one behind a
+    # Deployment (whose pod IPs churn on every reschedule) is not a durable
+    # fix -- per-client rate limiting/audit-IP behind the nginx ingress is a
+    # KNOWN LIMITATION until the app grows CIDR support (tracked under
+    # follow-up #320). modules/apps sets this list from terraform.
+    trustedProxies: []
     mongodbDbName: main # MONGODB_DB_NAME
     s3Bucket: inherent-documents # AWS_S3_BUCKET
     s3Region: us-east-1 # AWS_S3_REGION
@@ -128,9 +140,11 @@ weaviate:
   persistence:
     # Azure Disk CSI storage class. "managed-csi-premium" (Premium_LRS) is
     # the AKS built-in class; it is NOT the same as Premium_ZRS. Set
-    # createZrsStorageClass=true to also render a custom StorageClass using
-    # the Premium_ZRS Azure Disk SKU (zone-redundant) and point
-    # storageClassName at it — needed for the enable_ha prod profile.
+    # createZrsStorageClass=true to also render a custom StorageClass (in
+    # the now-shared templates/storageclass.yaml -- minio.persistence.
+    # useZrsClass above gates the same template) using the Premium_ZRS Azure
+    # Disk SKU (zone-redundant) and point storageClassName at it — needed
+    # for the enable_ha prod profile.
     storageClassName: managed-csi-premium
     createZrsStorageClass: false
     zrsStorageClassName: managed-csi-premium-zrs
@@ -140,8 +154,21 @@ weaviate:
     # from secrets.weaviate (required, see top of file).
     users: inherent@local
   # backup-azure module: DR snapshots to Blob (GRS). Gated on enable_dr.
+  # Enabling this only turns on weaviate's ENABLE_MODULES=backup-azure (the
+  # capability); templates/weaviate/backup-cronjob.yaml is what actually
+  # TRIGGERS a backup on a schedule via POST /v1/backups/azure — the module
+  # being enabled with nothing ever calling that endpoint was itself a
+  # finding (no backups were ever taken despite the module being "on").
   backup:
     enabled: false
+    # Daily, not hourly/nightly-only-in-name: vectors are re-derivable from
+    # the source documents already durably stored elsewhere (Postgres/Mongo/
+    # object storage), so a same-day RPO is the documented DR posture for
+    # this specific, regenerable data class — see modules/dr's dr_summary.
+    schedule: "0 3 * * *" # daily 03:00 UTC
+    curlImage:
+      repository: curlimages/curl
+      tag: "8.10.1"
     container: weaviate-backups # BACKUP_AZURE_CONTAINER
     connectionStringSecretRef:
       name: "" # Secret holding AZURE_STORAGE_CONNECTION_STRING, set by modules/apps when dr.enabled
@@ -166,6 +193,15 @@ minio:
     limits: { cpu: "1", memory: 2Gi }
   persistence:
     storageClassName: managed-csi-premium
+    # Set true to point this PVC at the same zone-redundant (Premium_ZRS)
+    # StorageClass weaviate's STatefulSet uses instead of the zonal
+    # managed-csi-premium (Premium_LRS) default above. Previously this PVC
+    # hardcoded Premium_LRS unconditionally while the docs claimed ZRS --
+    # this flag is what actually makes that claim true. Shares
+    # weaviate.persistence.zrsStorageClassName / the StorageClass object,
+    # which templates/storageclass.yaml renders exactly once, gated on
+    # EITHER this flag or weaviate.persistence.createZrsStorageClass.
+    useZrsClass: false
     sizeGi: 128 # minio_disk_gb
   bucket: inherent-documents # AWS_S3_BUCKET — created by the bucket-init Job via `mc`
   # Nightly mirror to Azure Blob (GRS) for DR. Gated on enable_dr.
@@ -195,7 +231,17 @@ temporal:
     image:
       repository: temporalio/server
       tag: "1.24.2" # PINNED — NOT temporalio/auto-setup; schema/namespace setup is explicit (below), matching prod best practice over compose's auto-setup shortcut
-    # 2 replicas when enable_ha; 1 otherwise (dev/cost-floor profile).
+    # ALWAYS 1, regardless of enable_ha (unlike every other component's
+    # HA knob). This is the plain temporalio/server all-in-one image running
+    # every service (frontend/history/matching/worker) in one process; two
+    # replicas of it need Temporal's ringpop gossip membership protocol
+    # (TCP 6933-6939 between replicas) to form one cluster, and the
+    # NetworkPolicies in templates/networkpolicy.yaml don't open that port
+    # between temporal pods -- a 2nd replica would boot as an isolated
+    # second cluster fighting the first over the same PG-backed schema
+    # (split-brain), not a redundant peer. PG-backed state + AKS
+    # rescheduling a crashed pod is the supported HA posture at 1 replica;
+    # raising this requires wiring ringpop through the NetworkPolicy first.
     replicas: 1
     resources:
       requests: { cpu: 250m, memory: 512Mi }
@@ -205,13 +251,22 @@ temporal:
       repository: temporalio/admin-tools
       tag: "1.24.2-tctl-1.18.1-cli-1.0.0" # PINNED, matches docker-compose.yml temporal-init
   namespaces:
-    # Registered by the namespace-register hook Job. "default" for
-    # document-ingestion workflows, "audit" for the audit-log worker
-    # (mirrors docker-compose.yml's temporal-init describe-before-register
-    # guard rails — see templates/temporal/namespace-register-job.yaml).
+    # Registered by an initContainer on the ingestion Deployment (NOT a
+    # post-install hook Job -- a post-install namespace-register Job runs
+    # AFTER helm considers the release's resources ready, but ingestion's
+    # own readiness probe needs the "audit" namespace to already exist, so a
+    # post-install-hook version of this deadlocks a fresh `helm install
+    # --wait`: ingestion never goes Ready, so the post-install hook that
+    # would create the namespace never fires. Doing it in an initContainer
+    # instead runs it strictly BEFORE ingestion's containers (and therefore
+    # its readiness probe) start. "default" for document-ingestion
+    # workflows, "audit" for the audit-log worker -- mirrors
+    # docker-compose.yml's temporal-init describe-before-register guard
+    # rails (see templates/ingestion/deployment.yaml's initContainer).
     - default
     - audit
-  retentionDays: 3 # matches docker-compose.yml's `--retention 3`
+  retentionDays: 7 # "default" namespace workflow-history retention. "audit" namespace uses auditRetentionDays below instead (matches docker-compose.yml's temporal-init --retention 3 for the audit namespace specifically).
+  auditRetentionDays: 3
   # Self-hosted temporalio/server (not auto-setup) needs its PG connection
   # as discrete fields (host/user/password), not a DSN — separate from
   # secrets.postgres (which holds public-api/ingestion's DATABASE_URL).
@@ -229,18 +284,41 @@ temporal:
 
 # --- embeddings ------------------------------------------------------------
 embedding:
-  # "azure_openai" (default, cloud-native) | "tei" (self-hosted fallback,
-  # non-default — see modules/ai and #311/PR #314 dependency note).
-  profile: azure_openai
+  # "tei" (DEFAULT, self-hosted BAAI/bge-small-en-v1.5 sidecar) | "azure_openai"
+  # (cloud-native, GATED — see prominent warning on the azure_openai-only env
+  # block in templates/public-api/deployment.yaml and
+  # templates/ingestion/deployment.yaml). The app (services/inh-public-api-svc
+  # and inh-ingestion-svc's Settings, extra="ignore") does not implement an
+  # EMBEDDING_PROVIDER/EMBEDDING_API_KEY/EMBEDDING_MODEL_ID-driven provider
+  # today — PR #314 (tracked by #311) is unmerged. It ALWAYS speaks TEI's
+  # native wire protocol (POST /embed) to EMBEDDING_SERVICE_URL regardless of
+  # this value. So profile=azure_openai currently renders env vars the app
+  # silently ignores and connects to nothing that speaks that protocol —
+  # CANNOT work until #311/PR #314 merges. tei is the only profile that
+  # actually functions; it stays the default until that PR lands.
+  profile: tei
   # EMBEDDING_SERVICE_URL — REQUIRED when profile=azure_openai. Set by
   # modules/apps from modules/ai's `openai_endpoint` output. The app's
-  # openai_compatible provider (PR #314) appends "/v1/embeddings" itself.
+  # openai_compatible provider (PR #314, NOT YET MERGED) would append
+  # "/v1/embeddings" itself once it exists.
   serviceUrl: ""
   # EMBEDDING_MODEL_ID — REQUIRED when profile=azure_openai (Azure OpenAI
   # deployment name, from modules/ai's embedding_deployment_name output).
   # For profile=tei this is the HF model id served by the TEI sidecar.
   modelId: ""
-  dim: 1536 # EMBEDDING_DIM — must match the deployed model (text-embedding-3-small=1536)
+  # EMBEDDING_DIM — the SINGLE source of truth for vector dimensionality;
+  # every template reads this one value (never a hardcoded literal). MUST
+  # match whichever model is actually serving embeddings for the active
+  # profile, or every stored vector silently gets the wrong dimension
+  # (Weaviate class schema mismatch / vector corruption, not a startup
+  # error): 384 for profile=tei's default embedding.tei.modelId
+  # (BAAI/bge-small-en-v1.5) below; 1536 for profile=azure_openai's
+  # text-embedding-3-small (modules/apps sets embedding.dim from
+  # terraform's openai_embedding_dim var when profile=azure_openai — do not
+  # hand-edit this default to 1536 without also switching the profile, that
+  # exact combination was the bug: tei's 384-dim model behind an
+  # EMBEDDING_DIM=1536 default).
+  dim: 384
   tei:
     image:
       repository: ghcr.io/huggingface/text-embeddings-inference
@@ -283,14 +361,25 @@ networkPolicy:
   enabled: true
   ingressControllerNamespace: ingress-nginx
   dnsNamespace: kube-system
-  # Egress CIDRs allowed for pods that must reach external Azure PaaS
-  # (PG Flexible, Cosmos vCore, Azure Cache for Redis, Azure OpenAI, Key
-  # Vault CSI). Default is open (these services aren't in the cluster's pod
-  # CIDR so this doesn't grant intra-cluster access); tighten to the
-  # data/private-endpoint subnet CIDR in enterprise/BYO-VNet mode
-  # (existing_subnet_ids.data from the network module).
-  externalCidrs:
-    - 0.0.0.0/0
+  # Egress destination for pods that must reach external Azure PaaS (PG
+  # Flexible, Cosmos vCore, Azure Cache for Redis, Azure OpenAI, Key Vault
+  # CSI, Azure Blob for DR/backup jobs): 0.0.0.0/0 EXCEPT the cluster's own
+  # pod and Service CIDRs below. The `except` is load-bearing, not
+  # decorative — a bare 0.0.0.0/0 ipBlock (no except) also matches every
+  # in-cluster pod IP and every ClusterIP, so it grants the components on
+  # this policy's podSelector (below) unrestricted intra-cluster access,
+  # silently nullifying every scoped pod-to-pod allow policy elsewhere in
+  # this file (the exact opposite of what an older version of this comment
+  # claimed — "these services aren't in the cluster's pod CIDR so this
+  # doesn't grant intra-cluster access" was false: 0.0.0.0/0 with no except
+  # IS the cluster's pod CIDR too). modules/apps injects the AKS cluster's
+  # real pod_cidr / service_cidr; the two defaults below are the Azure CNI
+  # Overlay defaults, correct only for a fresh default-config cluster —
+  # tighten further to the data/private-endpoint subnet CIDR in
+  # enterprise/BYO-VNet mode if you want egress scoped tighter than
+  # "anything outside the cluster".
+  podCidr: "10.244.0.0/16"
+  serviceCidr: "10.0.0.0/16"
 
 dr:
   # Convenience flag mirrored from root var `enable_dr`, used only to gate

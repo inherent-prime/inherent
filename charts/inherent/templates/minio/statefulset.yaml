@@ -67,7 +67,11 @@ spec:
         name: minio-data
       spec:
         accessModes: ["ReadWriteOnce"]
-        storageClassName: {{ .Values.minio.persistence.storageClassName }}
+        # useZrsClass=true points this PVC at the SAME zone-redundant
+        # StorageClass weaviate's STS uses (templates/storageclass.yaml,
+        # shared/emitted once) instead of the zonal managed-csi-premium
+        # default — see values.yaml's minio.persistence.useZrsClass comment.
+        storageClassName: {{ .Values.minio.persistence.useZrsClass | ternary .Values.weaviate.persistence.zrsStorageClassName .Values.minio.persistence.storageClassName }}
         resources:
           requests:
             storage: {{ .Values.minio.persistence.sizeGi }}Gi

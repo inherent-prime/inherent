@@ -94,6 +94,15 @@ spec:
             - name: AWS_S3_REGION
               value: {{ .Values.publicApi.env.s3Region | quote }}
             {{- if eq .Values.embedding.profile "azure_openai" }}
+            # DANGER — profile=azure_openai: this block sets
+            # EMBEDDING_PROVIDER/EMBEDDING_API_KEY/EMBEDDING_MODEL_ID, but
+            # the app does not read them yet (extra="ignore" in Settings;
+            # requires #311/PR #314 to merge an openai_compatible provider).
+            # Until that PR merges, the app still always speaks the TEI wire
+            # protocol to EMBEDDING_SERVICE_URL below — this profile CANNOT
+            # work today. tei (the values.yaml default) is the supported
+            # profile. Kept here, gated, so the wiring is ready the moment
+            # #314 merges — do not flip the default before then.
             - name: EMBEDDING_PROVIDER
               value: "openai_compatible"
             - name: EMBEDDING_SERVICE_URL
@@ -116,7 +125,14 @@ spec:
             - name: RATE_LIMIT_ENABLED
               value: {{ .Values.publicApi.env.rateLimitEnabled | quote }}
             - name: TRUSTED_PROXIES
-              value: {{ .Values.publicApi.env.trustedProxies | quote }}
+              # settings.py: trusted_proxies: list[str], parsed by
+              # pydantic-settings via json.loads(env_var) — MUST be rendered
+              # as a JSON array, not a bare string/CIDR (either of those
+              # raises SettingsError at import time -> CrashLoopBackOff on
+              # every pod, since `settings = get_settings()` runs at module
+              # scope). See values.yaml's publicApi.env.trustedProxies
+              # comment for the exact-IP-match caveat.
+              value: {{ .Values.publicApi.env.trustedProxies | toJson | quote }}
             - name: ENABLE_HSTS
               value: {{ .Values.publicApi.env.enableHsts | quote }}
             - name: LOG_LEVEL

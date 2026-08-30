@@ -99,6 +99,8 @@ spec:
         name: weaviate-data
       spec:
         accessModes: ["ReadWriteOnce"]
+        # See ../storageclass.yaml (shared with minio when
+        # minio.persistence.useZrsClass is also true).
         storageClassName: {{ .Values.weaviate.persistence.createZrsStorageClass | ternary .Values.weaviate.persistence.zrsStorageClassName .Values.weaviate.persistence.storageClassName }}
         resources:
           requests:

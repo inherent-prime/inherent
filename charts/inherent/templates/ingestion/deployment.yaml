@@ -27,6 +27,67 @@ spec:
         prometheus.io/path: "/metrics"
     spec:
       serviceAccountName: {{ include "inherent.serviceAccountName" . }}
+      {{- if .Values.temporal.enabled }}
+      initContainers:
+        # Registers the Temporal namespaces ingestion needs BEFORE this
+        # pod's own containers (and therefore its readiness probe) start.
+        # This replaced a post-install/post-upgrade hook Job
+        # (templates/temporal/namespace-register-job.yaml, deleted): that
+        # Job only runs after helm considers the release's ordinary
+        # resources (including THIS Deployment) ready, but this Deployment's
+        # readiness requires the "audit" namespace to already exist — with
+        # `helm_release wait=true` (modules/apps' default) that was a
+        # deadlock on every fresh install: ingestion never goes Ready, so
+        # the post-install hook that would create its namespace never
+        # fires. An initContainer runs unconditionally before the pod is
+        # considered ready, so there's no such ordering cycle. Pinned to the
+        # SAME admin-tools tag as templates/temporal/schema-setup-job.yaml
+        # (both read temporal.adminTools.image) so the tctl/schema tooling
+        # versions never drift apart.
+        - name: temporal-namespace-register
+          image: "{{ .Values.temporal.adminTools.image.repository }}:{{ .Values.temporal.adminTools.image.tag }}"
+          command:
+            - /bin/sh
+            - -lc
+            - |
+              set -e
+              # Wait for the frontend gRPC port before the first `tctl` call
+              # — this initContainer can start before the temporal
+              # Deployment's pod is Ready (they're independent chart
+              # resources with no helm ordering between them).
+              for i in $(seq 1 30); do
+                (echo > /dev/tcp/temporal/7233) >/dev/null 2>&1 && break
+                echo "waiting for temporal:7233..."; sleep 2
+              done
+
+              # Mirrors docker-compose.yml's temporal-init exactly (#148):
+              # describe-before-register, and refuse to blindly register on
+              # top of a non-"not found" describe failure (network flake /
+              # version mismatch must not be treated as "missing" — that
+              # could itself fail and permanently block ingestion boot).
+              register_ns() {
+                ns="$1"
+                retention="$2"
+                if DESCRIBE_OUT=$(tctl --address temporal:7233 --namespace "$ns" namespace describe 2>&1); then
+                  echo "Temporal namespace '$ns' already registered."
+                elif echo "$DESCRIBE_OUT" | grep -qi "notfound\|not found"; then
+                  echo "Registering Temporal namespace '$ns' (retention ${retention}d)..."
+                  tctl --address temporal:7233 --namespace "$ns" namespace register --retention "$retention"
+                else
+                  echo "$DESCRIBE_OUT" >&2
+                  echo "Temporal namespace describe failed for '$ns' for a reason other than 'not found' -- refusing to register blindly." >&2
+                  exit 1
+                fi
+              }
+
+              {{- range .Values.temporal.namespaces }}
+              {{- if eq . "audit" }}
+              register_ns {{ . | quote }} {{ $.Values.temporal.auditRetentionDays | quote }}
+              {{- else }}
+              register_ns {{ . | quote }} {{ $.Values.temporal.retentionDays | quote }}
+              {{- end }}
+              {{- end }}
+      {{- end }}
       containers:
         - name: ingestion
           image: "{{ .Values.image.registry }}/ingestion-svc:{{ .Values.image.tag }}"
@@ -109,6 +170,11 @@ spec:
                   name: {{ required "secrets.ingestion.name is required (INGESTION_API_KEY) -- see values.yaml top-of-file REQUIRED values note" .Values.secrets.ingestion.name }}
                   key: {{ .Values.secrets.ingestion.key }}
             {{- if eq .Values.embedding.profile "azure_openai" }}
+            # DANGER — profile=azure_openai: gated on #311/PR #314 (unmerged)
+            # — see the matching comment in
+            # templates/public-api/deployment.yaml and values.yaml's
+            # embedding.profile comment. The app ignores these vars and
+            # always speaks TEI's wire protocol until that PR merges.
             - name: EMBEDDING_PROVIDER
               value: "openai_compatible"
             - name: EMBEDDING_SERVICE_URL

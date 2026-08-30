@@ -42,7 +42,11 @@ spec:
               value: {{ .Values.temporal.postgres.port | quote }}
             - name: POSTGRES_USER
               value: {{ required "temporal.postgres.user is required" .Values.temporal.postgres.user | quote }}
-            - name: POSTGRES_PWD
+            # temporal-sql-tool reads its DB password from the SQL_PASSWORD
+            # env var (not passed via --password $VAR on argv, which would
+            # leak the plaintext password to anything that can read this
+            # container's process list — e.g. `kubectl exec ... ps`, #40).
+            - name: SQL_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ required "temporal.postgres.passwordSecretRef.name is required" .Values.temporal.postgres.passwordSecretRef.name }}
@@ -52,7 +56,13 @@ spec:
             - -c
             - |
               set -e
-              SQL_TOOL="temporal-sql-tool --plugin postgres12 --endpoint $POSTGRES_SEEDS --port $DB_PORT --user $POSTGRES_USER --password $POSTGRES_PWD"
+              # --tls / --tls-enable-host-verification / --tls-server-name:
+              # Azure Database for PostgreSQL Flexible Server enforces TLS
+              # server-side (require_secure_transport=ON) — without these,
+              # every call below fails with "SSL is required" before any
+              # schema gets set up. --tls-server-name matches SQL_HOST_NAME
+              # on the temporal Deployment (templates/temporal/deployment.yaml).
+              SQL_TOOL="temporal-sql-tool --plugin postgres12 --endpoint $POSTGRES_SEEDS --port $DB_PORT --user $POSTGRES_USER --tls --tls-enable-host-verification --tls-server-name $POSTGRES_SEEDS"
 
               setup_db() {
                 db_name="$1"
@@ -65,6 +75,13 @@ spec:
                 $SQL_TOOL --database "$db_name" update-schema -d "$schema_dir"
               }
 
-              setup_db "{{ .Values.temporal.postgres.dbName }}" /etc/temporal/schema/postgresql/v96/temporal/versioned
-              setup_db "{{ .Values.temporal.postgres.visibilityDbName }}" /etc/temporal/schema/postgresql/v96/visibility/versioned
+              # v12, NOT v96 -- the schema files baked into the
+              # temporalio/admin-tools:1.24.2-* image only ship
+              # /etc/temporal/schema/postgresql/v12/... (v96 was Temporal's
+              # PG 9.6-era schema dir, dropped from this image's schema tree
+              # long before 1.24; pointing at it makes update-schema fail
+              # immediately -- this Job is the release's FIRST pre-install
+              # hook, so that failure blocked the entire helm install).
+              setup_db "{{ .Values.temporal.postgres.dbName }}" /etc/temporal/schema/postgresql/v12/temporal/versioned
+              setup_db "{{ .Values.temporal.postgres.visibilityDbName }}" /etc/temporal/schema/postgresql/v12/visibility/versioned
 {{- end }}

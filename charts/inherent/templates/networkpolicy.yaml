@@ -11,9 +11,10 @@
 # See build spec: "Never expose: PG, Mongo(Cosmos), Redis, Weaviate, MinIO,
 # Temporal. Only ingress → public-api :8080." — enforced here on the
 # ingress side; egress to the external managed PaaS services is unavoidable
-# for public-api/ingestion/temporal and is scoped via
-# networkPolicy.externalCidrs (tighten to the data subnet CIDR for
-# enterprise/BYO-VNet mode instead of the 0.0.0.0/0 default).
+# for public-api/ingestion/temporal and is scoped via the
+# networkPolicy.podCidr / networkPolicy.serviceCidr except-list on the
+# allow-external-egress policy below (tighten further to the
+# data/private-endpoint subnet CIDR for enterprise/BYO-VNet mode).
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -61,6 +62,13 @@ spec:
     matchLabels:
       {{- include "inherent.selectorLabels" (dict "component" "public-api") | nindent 6 }}
   policyTypes: ["Ingress"]
+  # Only admits ingress-nginx today (the only supported ingress_profile —
+  # appgw_waf is validation-rejected on the terraform side, see
+  # .memory/azure-fix-round1.md). If/when AGIC (Application Gateway
+  # Ingress Controller) support lands (follow-up #320), this policy also
+  # needs an `ipBlock` allow for the Application Gateway subnet's CIDR —
+  # AGIC's traffic doesn't originate from an in-cluster ingress-nginx
+  # namespace the way this namespaceSelector assumes.
   ingress:
     - from:
         - namespaceSelector:
@@ -123,7 +131,14 @@ spec:
             matchExpressions:
               - key: app.kubernetes.io/component
                 operator: In
-                values: ["public-api", "ingestion"]
+                values:
+                  - public-api
+                  - ingestion
+                  {{- if .Values.weaviate.backup.enabled }}
+                  # The backup CronJob (templates/weaviate/backup-cronjob.yaml)
+                  # POSTs directly to weaviate:8080's /v1/backups/azure API.
+                  - weaviate-backup
+                  {{- end }}
       ports:
         - protocol: TCP
           port: 8080
@@ -202,8 +217,10 @@ spec:
           port: 80
     {{- end }}
 ---
-# ... ingress side (on temporal, from ingestion + the namespace-register hook
-# Job, which also speaks the frontend gRPC port).
+# ... ingress side (on temporal, from ingestion — which also runs the
+# namespace-register initContainer, see templates/ingestion/deployment.yaml —
+# and therefore needs no separate hook-Job component on this allow-list
+# anymore).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -222,7 +239,7 @@ spec:
             matchExpressions:
               - key: app.kubernetes.io/component
                 operator: In
-                values: ["ingestion", "temporal-namespace-register"]
+                values: ["ingestion"]
       ports:
         - protocol: TCP
           port: 7233
@@ -276,34 +293,44 @@ spec:
       ports:
         - protocol: TCP
           port: 9000
+{{- if .Values.weaviate.backup.enabled }}
 ---
+# Egress FROM the weaviate backup CronJob (templates/weaviate/backup-cronjob.yaml)
+# to weaviate itself — the matching Ingress-side allow is on
+# allow-weaviate-ingress-from-app above (the "weaviate-backup" component
+# entry, also gated on weaviate.backup.enabled). DNS needs no separate rule
+# here: allow-dns-egress above applies to every pod (podSelector: {}).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-namespace-register-egress-to-temporal
+  name: allow-weaviate-backup-egress-to-weaviate
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "inherent.labels" . | nindent 4 }}
 spec:
   podSelector:
     matchLabels:
-      {{- include "inherent.selectorLabels" (dict "component" "temporal-namespace-register") | nindent 6 }}
+      {{- include "inherent.selectorLabels" (dict "component" "weaviate-backup") | nindent 6 }}
   policyTypes: ["Egress"]
   egress:
     - to:
         - podSelector:
             matchLabels:
-              {{- include "inherent.selectorLabels" (dict "component" "temporal") | nindent 14 }}
+              {{- include "inherent.selectorLabels" (dict "component" "weaviate") | nindent 14 }}
       ports:
         - protocol: TCP
-          port: 7233
+          port: 8080
+{{- end }}
 ---
 # Egress to external Azure managed services (PG Flexible, Cosmos vCore,
 # Azure Cache for Redis, Azure OpenAI, Key Vault CSI, and — for the DR hook
 # Jobs/weaviate backup — Azure Blob). Scoped to the specific
 # components that actually need it, not "all pods" — weaviate/minio/temporal
 # server pods themselves stay off this list (they only need what the rules
-# above already grant), except weaviate when backup-azure is enabled.
+# above already grant), except weaviate when backup-azure is enabled. The
+# ipBlock's `except` (see below) is what keeps this from ALSO granting those
+# components unrestricted intra-cluster access — see
+# networkPolicy.podCidr's comment in values.yaml.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -322,6 +349,11 @@ spec:
           - migrate
           - temporal
           - temporal-schema-setup
+          # deploy-azure.sh's `kubectl run` bootstrap pods (one-off DB/Cosmos
+          # bootstrap commands run from inside the cluster's network, not
+          # from this chart) carry app.kubernetes.io/component=bootstrap and
+          # need the same external egress to reach PG/Cosmos.
+          - bootstrap
           {{- if .Values.minio.mirror.enabled }}
           - minio-mirror
           {{- end }}
@@ -331,8 +363,9 @@ spec:
   policyTypes: ["Egress"]
   egress:
     - to:
-        {{- range .Values.networkPolicy.externalCidrs }}
         - ipBlock:
-            cidr: {{ . | quote }}
-        {{- end }}
+            cidr: "0.0.0.0/0"
+            except:
+              - {{ .Values.networkPolicy.podCidr | quote }}
+              - {{ .Values.networkPolicy.serviceCidr | quote }}
 {{- end }}
