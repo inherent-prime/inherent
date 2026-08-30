@@ -419,6 +419,76 @@ class ChunkEditResult:
 CHUNK_EDIT_COMPENSATION_MAX_ATTEMPTS = 2
 
 
+# =============================================================================
+# Redaction Models (#307)
+# =============================================================================
+
+
+@dataclass
+class RedactTurnInput:
+    """One conversation turn to redact, as passed into `redact_turns`.
+
+    `role`/`ts`/`client` are optional pass-through metadata (matching #306's
+    turn shape) -- `redact_turns` never inspects them, only `text` and
+    `turn_id`; they ride along so the caller doesn't need a second lookup to
+    reassemble a `RedactedTurn` back into a full turn record.
+    """
+
+    turn_id: str
+    text: str
+    role: str | None = None
+
+
+@dataclass
+class RedactedTurn:
+    """One turn AFTER redaction -- the only form downstream should ever read.
+
+    See the `redact_turns` module docstring (src/temporal/activities/
+    redact.py): a downstream activity that re-derives turn text from
+    anywhere other than this output (e.g. a workflow's raw pre-redaction
+    buffer) reopens exactly the leak #307 exists to close.
+    """
+
+    turn_id: str
+    text: str
+    role: str | None = None
+    # Per-turn counts by redaction_type (e.g. {"api_key": 1, "jwt": 2}),
+    # empty when nothing in this turn matched any detector.
+    redaction_counts: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass
+class RedactTurnsInput:
+    """Input for the `redact_turns` activity (#307).
+
+    Carries the batch of turns to redact plus enough context
+    (workflow_run_id/workspace_id/document_id) to attribute an audit record
+    if a turn's redaction fails -- see RedactTurnsOutput.dropped_turn_ids.
+    """
+
+    turns: list[RedactTurnInput]
+    workflow_run_id: str | None = None
+    workspace_id: str | None = None
+    document_id: str | None = None
+
+
+@dataclass
+class RedactTurnsOutput:
+    """Output of the `redact_turns` activity (#307).
+
+    `redacted_turns` holds only turns that redacted successfully.
+    `dropped_turn_ids` names every turn dropped because its own redaction
+    pass raised (per-turn granularity -- one bad turn never fails the whole
+    batch, see the module docstring in redact.py). `redaction_counts` is the
+    BATCH-level sum of every turn's `RedactedTurn.redaction_counts`, for
+    metric emission (#307: "Emit a metric for redactions by type").
+    """
+
+    redacted_turns: list[RedactedTurn] = field(default_factory=list)
+    dropped_turn_ids: list[str] = field(default_factory=list)
+    redaction_counts: dict[str, int] = field(default_factory=dict)
+
+
 @dataclass
 class ChunkEditWeaviateFailureInput:
     """Input for the record_chunk_edit_weaviate_failure activity (#137).

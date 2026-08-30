@@ -406,6 +406,33 @@ class DatabaseService:
             ),
         )
 
+        # Redaction audit table (#307): records a per-turn redaction FAILURE
+        # (the turn was dropped rather than stored unredacted) -- deliberately
+        # narrow, see migration 019's comment. No raw turn text column exists
+        # here on purpose; record_redaction_failure below is the only writer
+        # and only accepts turn_id/detector/error class+message.
+        self.redaction_audit = Table(
+            "redaction_audit",
+            self.metadata,
+            Column("id", BigInteger, primary_key=True, autoincrement=True),
+            Column("turn_id", String(255), nullable=False),
+            Column("workflow_run_id", String(255), nullable=True),
+            Column("workspace_id", String(255), nullable=True),
+            Column("document_id", String(255), nullable=True),
+            Column("detector", String(100), nullable=False),
+            Column("error_type", String(255), nullable=False),
+            Column("error_message", Text, nullable=True),
+            Column(
+                "created_at",
+                DateTime(timezone=True),
+                nullable=False,
+                server_default=func.now(),
+            ),
+            Index("idx_redaction_audit_turn_id", "turn_id"),
+            Index("idx_redaction_audit_workflow_run_id", "workflow_run_id"),
+            Index("idx_redaction_audit_document_id", "document_id"),
+        )
+
     def connect(self) -> None:
         """Connect to PostgreSQL database via DATABASE_URL.
 
@@ -1933,3 +1960,74 @@ class DatabaseService:
             ).fetchall()
 
             return [dict(row._mapping) for row in results]
+
+    async def record_redaction_failure(
+        self,
+        turn_id: str,
+        detector: str,
+        error_type: str,
+        error_message: str | None,
+        workflow_run_id: str | None = None,
+        workspace_id: str | None = None,
+        document_id: str | None = None,
+    ) -> int:
+        """Insert a redaction_audit row for a turn dropped by redact_turns (#307).
+
+        Called from src/temporal/activities/redact.py exactly once per
+        dropped turn -- never on success, only when that turn's own
+        redaction pass raised. Deliberately accepts no raw text parameter at
+        all: there is no argument this method could pass through into
+        ``error_message`` other than the caller-supplied exception's own
+        message, so a caller cannot accidentally widen this into a second
+        place a leaked credential ends up (see redact.py's module docstring
+        and migration 019's comment on the table itself).
+
+        Best-effort like ``record_ingestion_event``/``add_dead_letter_job``:
+        raises RuntimeError only when the database isn't connected at all
+        (a genuine setup bug); a normal insert failure propagates to the
+        caller, which -- per #307's "non-retryable" contract -- must not
+        turn that into a reason to retry the whole redact_turns activity.
+
+        Args:
+            turn_id: the dropped turn's identifier (never its text).
+            detector: which named detector raised (e.g. 'jwt', 'custom').
+            error_type: the exception's class name (e.g. 'ValueError').
+            error_message: str(exception) -- expected to describe the
+                failure, not quote the input; callers must not construct
+                exception messages that embed raw turn text.
+            workflow_run_id / workspace_id / document_id: optional batch
+                context for later lookups, same shape as ingestion_events.
+
+        Returns:
+            The redaction_audit row id.
+        """
+        if not self.engine:
+            raise RuntimeError("Database not connected")
+
+        with self.get_session() as session:
+            result = session.execute(
+                self.redaction_audit.insert()
+                .values(
+                    turn_id=turn_id,
+                    workflow_run_id=workflow_run_id,
+                    workspace_id=workspace_id,
+                    document_id=document_id,
+                    detector=detector,
+                    error_type=error_type,
+                    error_message=error_message,
+                )
+                .returning(self.redaction_audit.c.id)
+            )
+            audit_id: int = result.scalar_one()  # type: ignore[assignment]
+
+            logger.warning(
+                "Recorded redaction failure -- turn dropped",
+                audit_id=audit_id,
+                turn_id=turn_id,
+                detector=detector,
+                error_type=error_type,
+                # Deliberately no error_message/text in the structured log
+                # fields here -- see redact.py's module docstring: logging is
+                # the leak vector unit tests forget.
+            )
+            return audit_id

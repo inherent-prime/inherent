@@ -183,6 +183,34 @@ Every chunk records which strategy actually produced it in
 `services/inh-ingestion-svc/src/temporal/activities/chunk.py`'s module
 docstring for the full design rationale and cost tradeoffs.
 
+### Redaction (#307)
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `REDACTION_PATTERNS_EXTRA` | `[]` (JSON array of regex strings) | Extra self-hosted patterns for the `redact_turns` Temporal activity, applied in addition to the built-in detector set (`services/inh-ingestion-svc/src/services/redaction_patterns.py`): common API-key prefixes, JWTs, PEM private-key blocks, connection strings with embedded credentials, and a high-entropy-token catch-all. Each string is compiled as its own regex; a match is replaced with `[redacted:custom]` |
+
+⚠️ **Standalone as of this writing.** `redact_turns` is not yet called by
+any workflow — it ships as an independently reviewable, independently
+tested activity ahead of the conversation-ingestion pipeline
+([#306](https://github.com/inherent-prime/inherent/issues/306)) that will
+call it. Setting `REDACTION_PATTERNS_EXTRA` today has no observable effect
+until that wiring lands.
+
+⚠️ **Best-effort, not a guarantee.** This is pattern matching — it will not
+catch every credential shape (a secret with no recognizable prefix and low
+apparent entropy can pass through unredacted). Do not represent this as a
+complete guarantee to end users; see the module docstring in
+`redaction_patterns.py` for the full "honest limits" statement.
+
+⚠️ **Non-retryable.** `redact_turns` fails a turn's own redaction pass by
+dropping that turn and writing an audit row (`redaction_audit` table,
+migration `019_redaction_audit.sql`) rather than retrying — retrying risks
+storing the raw turn on a later attempt. Whoever wires this into #306's
+workflow must call it with `RetryPolicy(maximum_attempts=1)` and must read
+downstream chunk text **only** from `redact_turns`'s own output, never from
+the workflow's raw pre-redaction turn buffer — see the activity's module
+docstring (`src/temporal/activities/redact.py`) for the full reasoning.
+
 ### Temporal & tenancy
 
 | Variable | Default | Effect |
