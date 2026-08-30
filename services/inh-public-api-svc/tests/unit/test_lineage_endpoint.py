@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from src.config.settings import settings as _app_settings
 from src.main import create_app
 from src.models.api_key import APIKeyInfo
 from src.models.document import Document, DocumentChunk
@@ -58,8 +59,21 @@ def lineage_doc() -> Document:
     )
 
 
-@pytest.fixture
-def lineage_chunk() -> DocumentChunk:
+# Freshness fixtures are RELATIVE to now, never absolute (#332).
+# These previously pinned ingested_at to a literal date and asserted
+# is_stale is False. That silently expires: the assertion held until the
+# date aged past settings.freshness_max_age_days (90), then failed forever
+# -- and it failed on main, so every open PR inherited a red job for a
+# reason unrelated to its own diff. Anchor to now +/- the threshold so the
+# tests assert the BEHAVIOUR (recent evidence is fresh, old evidence is
+# stale) rather than a calendar date.
+_FRESH_INGESTED_AT = (_dt.datetime.now(_dt.UTC) - _dt.timedelta(days=1)).isoformat()
+_STALE_INGESTED_AT = (
+    _dt.datetime.now(_dt.UTC) - _dt.timedelta(days=_app_settings.freshness_max_age_days + 1)
+).isoformat()
+
+
+def _chunk_ingested_at(ingested_at: str) -> DocumentChunk:
     return DocumentChunk(
         id="chunk-1",
         document_id="doc-1",
@@ -68,9 +82,14 @@ def lineage_chunk() -> DocumentChunk:
         metadata={
             "source_uri": "s3://bucket/report.pdf",
             "content_hash": "abc123",
-            "ingested_at": "2026-06-01T00:00:00Z",
+            "ingested_at": ingested_at,
         },
     )
+
+
+@pytest.fixture
+def lineage_chunk() -> DocumentChunk:
+    return _chunk_ingested_at(_FRESH_INGESTED_AT)
 
 
 @pytest.fixture
@@ -103,6 +122,21 @@ async def client(app):
 
 
 class TestLineageEndpoint:
+    async def test_evidence_older_than_the_threshold_is_flagged_stale(self, mock_db, client):
+        """The mirror image of the fresh case (#332).
+
+        Without this, nothing pins is_stale=True, so a bug that hardwired the
+        flag to False would look identical to a passing suite -- which is
+        exactly how the expiring fixture this test accompanies stayed
+        invisible until the day it flipped.
+        """
+        mock_db.get_document_chunks = AsyncMock(
+            return_value=[_chunk_ingested_at(_STALE_INGESTED_AT)]
+        )
+        resp = await client.get("/v1/documents/doc-1/lineage", headers={"X-API-Key": "k"})
+        assert resp.status_code == 200
+        assert resp.json()["is_stale"] is True
+
     async def test_returns_provenance_and_freshness(self, client):
         resp = await client.get("/v1/documents/doc-1/lineage", headers={"X-API-Key": "k"})
         assert resp.status_code == 200
@@ -110,7 +144,7 @@ class TestLineageEndpoint:
         assert body["document_name"] == "report.pdf"
         assert body["source_uri"] == "s3://bucket/report.pdf"
         assert body["content_hash"] == "abc123"
-        assert body["ingested_at"].startswith("2026-06-01")
+        assert body["ingested_at"].startswith(_FRESH_INGESTED_AT[:10])
         assert body["is_stale"] is False
         assert body["chunk_id"] == "chunk-1"
 
