@@ -23,6 +23,7 @@ from inh_contracts.naming import (
     get_user_tenant_name,
     get_workspace_collection_name,
 )
+from temporalio import activity
 from weaviate.classes.config import Configure, DataType, Property
 from weaviate.classes.init import Auth
 from weaviate.classes.query import Filter, MetadataQuery
@@ -43,6 +44,26 @@ logger = structlog.get_logger(__name__)
 
 # Legacy collection name (kept for backward compatibility)
 DOCUMENT_CHUNKS_COLLECTION = "DocumentChunk"
+
+
+def _heartbeat_embed_progress(completed_batches: int, total_batches: int) -> None:
+    """Heartbeat with real embedding progress (#298).
+
+    Passed as ``embed_texts_with_progress``'s ``on_batch_done`` callback in
+    ``store_chunks_with_tenant`` below. Only takes effect inside a Temporal
+    activity -- ``store_chunks_with_tenant`` is also called directly by
+    ``processor.py`` and ``reindex_from_postgres.py`` outside any activity,
+    where ``activity.heartbeat()`` raises "not in an activity". Progress is
+    a genuine batch-completion count, not a timer, so the heartbeat_timeout
+    set on the store_in_weaviate activity (see
+    ``weaviate_store_budget.weaviate_store_heartbeat_timeout``) still
+    detects a worker that has actually stopped making progress rather than
+    one that is merely slow.
+    """
+    if activity.in_activity():
+        activity.heartbeat(
+            {"chunk_batches_done": completed_batches, "chunk_batches_total": total_batches}
+        )
 
 
 class WeaviateService:
@@ -484,14 +505,20 @@ class WeaviateService:
             # Use tenant-scoped operations
             tenant_collection = collection.with_tenant(tenant_name)
 
-            # Compute embeddings in one batch (much faster than per-chunk).
-            # embed_texts does blocking HTTP to the TEI sidecar, so offload it to
-            # a thread — otherwise it stalls the event loop (and every other
-            # coroutine) for the whole document's embedding round-trip (#19).
-            from src.services.embedder import embed_texts
+            # Compute embeddings in batches (much faster than per-chunk). Each
+            # batch's blocking TEI HTTP call is offloaded to a thread so it
+            # never stalls the event loop (#19) -- but the batch *loop* itself
+            # runs here, on this coroutine, so store_in_weaviate can heartbeat
+            # with real per-batch progress instead of going dark for the whole
+            # document's embed (#298: a 60k-chunk document could otherwise
+            # never finish inside any activity budget short enough to also
+            # catch a genuinely wedged worker fast).
+            from src.services.embedder import embed_texts_with_progress
 
             chunk_texts = [c.content for c in chunks]
-            vectors = await asyncio.to_thread(embed_texts, chunk_texts)
+            vectors = await embed_texts_with_progress(
+                chunk_texts, on_batch_done=_heartbeat_embed_progress
+            )
 
             # Single ingest timestamp for this store call (#42): all chunks of a
             # document share one ingested_at so freshness is consistent per store.

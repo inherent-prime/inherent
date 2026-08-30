@@ -30,14 +30,22 @@ Config:
                             Temporal activity attempt (#229). 4xx (except 429)
                             fail fast. Worst-case batch wall clock is baked
                             into weaviate_store_budget via embedding_defaults.
+
+``embed_texts_with_progress`` (#298) is the async sibling of ``embed_texts``:
+same batching/retry contract, but it drives the batch loop from an asyncio
+coroutine instead of a single blocking call, so a caller (store_in_weaviate)
+can heartbeat with genuine per-batch progress instead of going dark for the
+whole document's embed.
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
 import random
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import httpx
@@ -232,6 +240,81 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
                 offset, vecs = fut.result()
                 for j, vec in enumerate(vecs):
                     results[offset + j] = vec
+
+    out: list[list[float]] = [[0.0] * dim for _ in texts]
+    for j, i in enumerate(keep_idx):
+        out[i] = results[j]
+    return out
+
+
+async def embed_texts_with_progress(
+    texts: list[str],
+    *,
+    on_batch_done: Callable[[int, int], None] | None = None,
+) -> list[list[float]]:
+    """Async sibling of ``embed_texts`` that reports progress per batch (#298).
+
+    Same batching, ordering and empty-input contract as ``embed_texts``, but
+    drives the batch loop from *this* coroutine instead of blocking one
+    worker thread for the whole document. Each batch's HTTP round trip is
+    still offloaded via ``asyncio.to_thread`` (TEI calls are synchronous
+    httpx) and bounded to EMBEDDING_MAX_CONCURRENCY in flight -- but because
+    the loop itself runs on the event loop, ``on_batch_done`` fires back
+    here, in the calling task's context, right after each batch's thread
+    call returns.
+
+    That is the point: it lets a Temporal activity heartbeat with genuine
+    per-batch progress (see store_in_weaviate / weaviate.store_chunks_with_
+    tenant). A batch that never returns stops advancing the counter, so a
+    heartbeat_timeout paired with this still catches a truly wedged embed --
+    unlike a heartbeat fired on a fixed timer, which would keep reporting
+    "alive" no matter what the blocked call is actually doing.
+
+    Cancellation also becomes observable between batches: if the enclosing
+    activity task is cancelled (e.g. heartbeat_timeout expiring server-side),
+    ``asyncio.gather`` below raises into this coroutine and any batch not
+    yet started is never dispatched. Before this, the whole document's embed
+    ran as one opaque ``asyncio.to_thread(embed_texts, ...)`` call that could
+    not be interrupted at any granularity once started (#298).
+
+    Args:
+        texts: Chunk texts to embed, one per output vector (order preserved).
+        on_batch_done: Optional callback invoked as ``(completed, total)``
+            after each batch finishes -- ``completed`` is the count of
+            batches done so far (not tied to any particular batch), so it is
+            safe to call regardless of which batch happened to finish.
+    """
+    dim = _embedding_dim()
+    if not texts:
+        return []
+    keep_idx = [i for i, t in enumerate(texts) if t and t.strip()]
+    if not keep_idx:
+        return [[0.0] * dim for _ in texts]
+
+    batch = _batch_size()
+    keep_texts = [texts[i] for i in keep_idx]
+    batches: list[tuple[int, list[str]]] = []
+    for offset in range(0, len(keep_texts), batch):
+        batches.append((offset, keep_texts[offset : offset + batch]))
+
+    total = len(batches)
+    concurrency = min(_max_concurrency(), total)
+    sem = asyncio.Semaphore(concurrency)
+    results: dict[int, list[float]] = {}
+    completed = 0
+
+    async def _run(item: tuple[int, list[str]]) -> None:
+        nonlocal completed
+        offset, inputs = item
+        async with sem:
+            vecs = await asyncio.to_thread(_post_embed_with_retry, inputs)
+        for j, vec in enumerate(vecs):
+            results[offset + j] = vec
+        completed += 1
+        if on_batch_done is not None:
+            on_batch_done(completed, total)
+
+    await asyncio.gather(*(_run(item) for item in batches))
 
     out: list[list[float]] = [[0.0] * dim for _ in texts]
     for j, i in enumerate(keep_idx):

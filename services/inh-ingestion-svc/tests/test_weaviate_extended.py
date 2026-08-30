@@ -51,10 +51,11 @@ class TestWeaviateServiceExtended:
             )
         ]
 
-        # store_chunks_with_tenant calls embed_texts (HTTP to TEI sidecar);
-        # patch it to a fixed-shape stub so the test runs offline.
+        # store_chunks_with_tenant calls embed_texts_with_progress (HTTP to
+        # TEI sidecar, #298); patch it to a fixed-shape stub so the test
+        # runs offline.
         with patch(
-            "src.services.embedder.embed_texts",
+            "src.services.embedder.embed_texts_with_progress",
             return_value=[[0.1] * 384 for _ in chunks],
         ):
             count = await weaviate_service.store_chunks_with_tenant(

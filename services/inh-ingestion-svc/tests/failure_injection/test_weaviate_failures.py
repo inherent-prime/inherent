@@ -64,8 +64,10 @@ async def test_store_chunks_with_tenant_propagates_client_error(mock_settings, c
     collection.with_tenant.return_value = tenant_collection
     service.client.collections.get.return_value = collection
 
+    # store_chunks_with_tenant now calls the async, per-batch-heartbeating
+    # embed_texts_with_progress (#298) instead of the sync embed_texts.
     with patch(
-        "src.services.embedder.embed_texts",
+        "src.services.embedder.embed_texts_with_progress",
         return_value=[[0.0, 0.1, 0.2]],
     ):
         with pytest.raises(Exception, match="weaviate unavailable"):

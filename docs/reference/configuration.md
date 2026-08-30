@@ -143,7 +143,7 @@ and binds all datastore ports to `127.0.0.1`.
 | `EMBEDDING_MAX_TOKENS` | `512` | Hard token budget per chunk (bge-small context window) |
 | `EMBEDDING_BATCH_SIZE` / `EMBEDDING_TIMEOUT_S` | `32` / `30.0` | Chunks per TEI call / per-request timeout |
 | `EMBEDDING_MAX_CONCURRENCY` | `2` | In-flight TEI batch POSTs per `embed_texts` call (#231 phase 1). The product of this and `TEMPORAL_MAX_CONCURRENT_ACTIVITIES` is the TEI in-flight cap under bulk upload — raise carefully |
-| `EMBEDDING_BATCH_MAX_RETRIES` | `3` | Per-batch HTTP retries with backoff+jitter before the activity fails (#229). Worst-case batch wall clock is included in `store_in_weaviate` StartToClose via `weaviate_store_budget.py` |
+| `EMBEDDING_BATCH_MAX_RETRIES` | `3` | Per-batch HTTP retries with backoff+jitter before the activity fails (#229). Worst-case batch wall clock is included in both `store_in_weaviate`'s StartToClose (capped at 2h, was 15m — #298) and its `heartbeat_timeout` (~2× worst-case batch, #298) via `weaviate_store_budget.py` |
 | `MAX_WORKERS` / `MAX_RETRIES` / `RETRY_DELAY_SECONDS` | `4` / `3` / `5` | Worker concurrency and retry policy |
 
 #### Format-aware chunking (#129)
