@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from src.config.settings import settings as _app_settings
 from src.mcp_server import server as mcp_server
 from src.models.api_key import APIKeyInfo
 from src.models.citation import Citation
@@ -26,6 +27,14 @@ from src.models.document import Document, DocumentChunk
 from src.models.search import SearchResponse, SearchResult
 
 pytestmark = pytest.mark.asyncio
+
+# Relative, never an absolute date (#332): a literal ingested_at silently
+# expires once it ages past settings.freshness_max_age_days, turning a green
+# test red on a calendar boundary rather than on a code change.
+_FRESH_INGESTED_AT = (_dt.datetime.now(_dt.UTC) - _dt.timedelta(days=1)).isoformat()
+_STALE_INGESTED_AT = (
+    _dt.datetime.now(_dt.UTC) - _dt.timedelta(days=_app_settings.freshness_max_age_days + 1)
+).isoformat()
 
 
 def _key(*, permissions: list[str], user_id: str = "user-1") -> APIKeyInfo:
@@ -317,7 +326,7 @@ class TestMemoryPrimitives:
             metadata={
                 "source_uri": "s3://bucket/report.pdf",
                 "content_hash": "abc123",
-                "ingested_at": "2026-06-01T00:00:00Z",
+                "ingested_at": _FRESH_INGESTED_AT,
             },
         )
         mock_db = AsyncMock()
@@ -333,7 +342,7 @@ class TestMemoryPrimitives:
         assert payload["document_name"] == "report.pdf"
         assert payload["source_uri"] == "s3://bucket/report.pdf"
         assert payload["content_hash"] == "abc123"
-        assert payload["ingested_at"].startswith("2026-06-01")
+        assert payload["ingested_at"].startswith(_FRESH_INGESTED_AT[:10])
         assert payload["is_stale"] is False
 
     async def test_explain_lineage_blocks_foreign_document(self):
