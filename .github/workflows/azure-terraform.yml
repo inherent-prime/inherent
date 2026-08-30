@@ -1,0 +1,95 @@
+# Azure Terraform -- validate-only lane for the Azure production stack
+# (infra/azure/, charts/inherent, scripts/deploy-azure.sh). #328, epic #320.
+#
+# Deliberately no cloud credentials anywhere in this workflow: `plan`/`apply`
+# never run in CI. That is not an oversight -- it is the direct lesson from
+# the deleted Hetzner e2e lane (docs/testing.md:199-235), which reported
+# SUCCESS on every run even when its meaningful steps silently skipped
+# themselves for want of credentials, right up until v0.6.0 shipped believing
+# it had e2e coverage it never had. A validate-only lane that fails loudly
+# when misconfigured is worth more than a plan/apply lane that can go green
+# for the wrong reason. Real infra changes are exercised by
+# scripts/deploy-azure.sh against a real subscription (see docs/deploy/azure.md),
+# never by this workflow.
+name: Azure Terraform
+
+on:
+  pull_request:
+    paths:
+      - "infra/azure/**"
+      - "charts/**"
+      - "scripts/deploy-azure.sh"
+      - ".github/workflows/azure-terraform.yml"
+  push:
+    branches: [main]
+    paths:
+      - "infra/azure/**"
+      - "charts/**"
+      - "scripts/deploy-azure.sh"
+      - ".github/workflows/azure-terraform.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: azure-terraform-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  azure-terraform-validate:
+    name: azure-terraform-validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+          terraform_wrapper: false
+
+      - name: terraform fmt -check
+        run: terraform -chdir=infra/azure fmt -check -recursive
+
+      # No backend, no credentials: this only downloads providers/modules and
+      # checks the config is internally consistent -- never touches Azure.
+      - name: terraform init (no backend)
+        run: terraform -chdir=infra/azure init -backend=false -input=false
+
+      - name: terraform validate (root)
+        run: terraform -chdir=infra/azure validate -no-color
+
+      # Root `validate` does not descend into modules on its own, and a typo
+      # inside a leaf module's .tf that no root variable ever exercises would
+      # otherwise pass silently -- validate each module directory too.
+      - name: terraform validate (each module)
+        run: |
+          set -euo pipefail
+          for d in infra/azure/modules/*/; do
+            echo "::group::validate ${d}"
+            terraform -chdir="${d}" init -backend=false -input=false
+            terraform -chdir="${d}" validate -no-color
+            echo "::endgroup::"
+          done
+
+      - name: Set up tflint
+        uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: "v0.53.0"
+
+      - name: tflint
+        run: tflint --recursive --chdir infra/azure
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: "v3.15.4"
+
+      - name: helm lint charts/inherent
+        run: helm lint charts/inherent
+
+      # shellcheck ships preinstalled on the ubuntu-latest runner image.
+      - name: shellcheck scripts/deploy-azure.sh
+        run: shellcheck scripts/deploy-azure.sh
