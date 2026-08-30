@@ -67,15 +67,23 @@ All notable changes to Inherent are documented here. The format follows
 
 - **Azure cloud-native production Terraform target: AKS, HA, DR, one-click
   deploy script, and docs (#320).** `infra/azure/` provisions a full
-  production stack on AKS (3 zones, autoscaling node pools, workload
-  identity), Postgres Flexible Server (zone-redundant HA), Cosmos DB for
-  MongoDB (vCore), Azure Cache for Redis (TLS, `noeviction`), Key Vault, and
-  Azure OpenAI for embeddings, with MinIO on-cluster mirrored nightly to Blob
-  Storage (GRS) for DR — see [#329](https://github.com/inherent-prime/inherent/issues/329)
-  for native Blob support. `scripts/deploy-azure.sh` bootstraps remote state
-  and applies the stack end to end; `docs/deploy/azure.md` documents every
+  production stack on AKS (3 zones, autoscaling node pools), Postgres
+  Flexible Server (zone-redundant HA), Cosmos DB for MongoDB (vCore), Azure
+  Cache for Redis (TLS, `noeviction`), Key Vault, and self-hosted TEI on AKS
+  as the default embedding path — an Azure OpenAI resource is provisioned
+  alongside it, one tfvar away, but stays inactive until the
+  `openai_compatible` provider path merges
+  ([#311](https://github.com/inherent-prime/inherent/issues/311),
+  [PR #314](https://github.com/inherent-prime/inherent/pull/314)) — with
+  MinIO on-cluster mirrored hourly to Blob Storage (GRS) for DR, keeping
+  object-storage RPO within the stack's ≤1h target — see
+  [#329](https://github.com/inherent-prime/inherent/issues/329) for native
+  Blob support. `scripts/deploy-azure.sh` bootstraps remote state and
+  applies the stack end to end; `docs/deploy/azure.md` documents every
   layer, tfvar, and TCO estimate, and `docs/deploy/azure-dr-runbook.md` covers
-  zone/region-loss and PITR restore procedures.
+  zone/region-loss and PITR restore procedures. `ingress_profile = "appgw_waf"`
+  and least-privilege Postgres app roles remain tracked follow-ups under this
+  same epic.
 
 - **Evals: `POST /v1/evals/runs` accepts optional replay scoping, and
   `DELETE /v1/evals/events` an opt-in case purge (#250).** Run-replay was

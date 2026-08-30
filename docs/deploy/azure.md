@@ -19,7 +19,7 @@ graph TB
 
     subgraph primary["Azure — primary region (eastus2)"]
         subgraph netl["Network"]
-            ing["Ingress: nginx or AppGW WAF"]
+            ing["Ingress: nginx (only supported path)"]
         end
         subgraph computel["Compute — AKS, 3 zones"]
             api["public-api xN"]
@@ -38,7 +38,8 @@ graph TB
             kv["Key Vault"]
         end
         subgraph ail["AI"]
-            aoai["Azure OpenAI"]
+            aoai["Azure OpenAI — provisioned, not yet wired in"]
+            tei["TEI on AKS — default"]
         end
     end
 
@@ -54,13 +55,15 @@ graph TB
     api --> redis
     api --> weav
     api --> minio
-    api --> aoai
+    api --> tei
     worker --> temporal
     worker --> pg
     worker --> weav
     worker --> minio
-    worker --> aoai
-    computel -.->|workload identity| kv
+    worker --> tei
+    api -.->|"switch after #314"| aoai
+    worker -.->|"switch after #314"| aoai
+    computel -.->|federated OIDC credential, no workload consumes it yet| kv
     blob -.->|GRS replication| blobdr
     pg -.->|geo-backup| pgbackup
 ```
@@ -68,10 +71,10 @@ graph TB
 | Layer | What Terraform creates |
 | --- | --- |
 | Network | VNet, subnets (aks / data / appgw), NSGs, private DNS zones, NAT gateway |
-| Security | Key Vault, workload identity, generated secrets, CSI secrets driver |
+| Security | Key Vault, a federated OIDC identity (not yet consumed by any workload), generated secrets materialized as Kubernetes Secrets from Terraform state (see the [state-file secret caveat](#7-enterprise-vnet-integration)) |
 | Data | Postgres Flexible (HA), Cosmos DB for MongoDB (vCore), Azure Cache for Redis, Storage Account (GRS) |
 | Compute | AKS (3 zones, autoscaling pools), all app workloads via one Helm chart |
-| AI | Azure OpenAI resource + embedding deployment |
+| AI | Self-hosted TEI on AKS (**default embedding path**) + an Azure OpenAI resource, provisioned but not yet wired to the app — see [§10](#10-limitations-roadmap) |
 | Monitoring | Log Analytics workspace, Container/VM insights, alert rules, action group |
 | DR (optional, default on) | Secondary-region GRS, geo-backups, restore runbook outputs |
 
@@ -94,15 +97,15 @@ graph LR
             pekv["PE: Key Vault"]
             peblob["PE: Blob"]
         end
-        subgraph subappgw["appgw subnet"]
-            appgw["App Gateway WAF — optional"]
+        subgraph subappgw["appgw subnet — reserved, unused"]
+            appgw["App Gateway WAF — roadmap, not deployable"]
         end
         nsg["NSGs — deny data-plane from internet"]
         nat["NAT Gateway — egress"]
     end
     dnszones["Private DNS zones: postgres, redis, cosmos, vault, blob"]
 
-    internet["Internet"] -->|"443"| lb["LB: ingress-nginx or AppGW"]
+    internet["Internet"] -->|"443"| lb["LB: ingress-nginx"]
     lb --> nodes
     nodes --> pepg
     nodes --> pecos
@@ -120,7 +123,7 @@ graph LR
 | NAT gateway | Required | Only egress path for AKS nodes unless BYO-VNet supplies its own |
 | Private DNS zones | Required when private endpoints are on | Resolve `*.privatelink.*` names inside the VNet |
 | Private endpoints | Optional, on by default | `enable_private_endpoints` (default `true`) |
-| App Gateway WAF | Optional | `ingress_profile = "appgw_waf"`; default is `nginx` |
+| App Gateway WAF | **Roadmap, not deployable today** | `ingress_profile = "appgw_waf"` is rejected by validation ("not yet supported"); code exists but is unreachable — AGIC wiring tracked as follow-up under [epic #320](https://github.com/inherent-prime/inherent/issues/320). `nginx` is the only supported value and the default |
 | Private AKS cluster (no public API server) | Optional | `private_cluster_enabled` (default `false`) |
 | Bring-your-own VNet | Optional | `existing_vnet_id` + `existing_subnet_ids`; default `""` creates a new VNet |
 | Authorized IP ranges on the AKS API server | Optional | `authorized_ip_ranges`; empty list = no additional restriction beyond public/private mode |
@@ -131,7 +134,8 @@ graph LR
 graph TB
     subgraph aks["AKS"]
         pod["Workload pod"]
-        sa["ServiceAccount — federated OIDC credential"]
+        sa["ServiceAccount — federated OIDC credential (exists, unused today)"]
+        ksec["Kubernetes Secret — value written by Terraform"]
     end
     ident["User-assigned managed identity"]
     oidc["AKS OIDC issuer"]
@@ -139,28 +143,33 @@ graph TB
         kv["Key Vault — purge protection on"]
         secrets["Generated secrets: PG password, Weaviate API key, Ingestion API key, MinIO keys"]
     end
-    csi["Secrets Store CSI driver"]
     tls1["ingress-nginx + cert-manager — Let's Encrypt TLS"]
-    tls2["AppGW WAF — TLS termination — optional"]
 
-    pod --> sa --> ident
-    oidc -.->|federates| sa
-    ident -->|RBAC: get secret| kv
+    pod --> sa
+    oidc -.->|federates, no workload consumes it yet| sa
+    sa -.-> ident
     kv --> secrets
-    csi -->|mounts secret| pod
-    csi -.->|reads| kv
-    tls1 -.->|or| tls2
+    secrets -->|Terraform reads at apply time, writes as a k8s Secret| ksec
+    ksec -->|secretKeyRef| pod
+    tls1 -->|terminates TLS in front of| pod
 ```
+
+**Truthfully, today:** secrets are read out of Key Vault by Terraform and
+written into the cluster as plain Kubernetes `Secret` objects
+(`kubernetes_secret` resources in `modules/apps`), which pods reference via
+`secretKeyRef` — the same mechanism the [Hetzner path](../getting-started/production.md)
+uses, not a Key Vault CSI mount. A federated OIDC credential (`modules/security`)
+now exists on the AKS OIDC issuer, but no workload's ServiceAccount consumes
+it yet — see the [state-file secret caveat](#7-enterprise-vnet-integration)
+for what that means for secret handling.
 
 **Required vs optional**
 
 | Component | Required / Optional | Notes |
 | --- | --- | --- |
 | Key Vault + purge protection | Required | Cannot be disabled once turned on; compliance baseline (see [§7](#7-enterprise-vnet-integration)) |
-| Workload identity (OIDC federation) | Required | No client secrets on pods; identity scoped per workload |
-| CSI secrets driver | Required | Mounts Key Vault secrets as files/env into pods |
-| TLS termination (nginx + cert-manager) | Required unless AppGW WAF chosen | Default path, `ingress_profile = "nginx"` |
-| AppGW WAF TLS termination | Optional | `ingress_profile = "appgw_waf"` — adds WAF rules, ~$300/mo delta (see [§8](#8-total-cost-of-ownership-tco)) |
+| Federated OIDC identity credential | Provisioned, not yet consumed | No workload authenticates through it today; secrets still flow via Terraform → Kubernetes `Secret` (above) |
+| TLS termination (ingress-nginx + cert-manager) | Required | The only supported ingress path; `ingress_profile = "nginx"` (default and only valid value — see [§2 Network](#network) above) |
 
 ### Data
 
@@ -210,16 +219,16 @@ graph TB
             core["kube-system"]
         end
         subgraph userpool["user pool — Standard_D4s_v5, autoscale 3-6"]
-            ing["ingress controller — nginx or AppGW"]
+            ing["ingress controller — nginx"]
             api["public-api Deployment — 2-6 replicas, HPA"]
             worker["ingestion-worker Deployment — N replicas"]
             weav["weaviate StatefulSet"]
             minio["minio StatefulSet"]
             mirror["minio-mirror CronJob — hourly"]
-            temporal["temporal-server Deployment"]
+            temporal["temporal-server Deployment — single replica"]
             tschema["temporal-schema-setup Job"]
             migrate["migrate Job — helm pre-upgrade hook"]
-            tei["tei Deployment — optional fallback"]
+            tei["tei Deployment — default embedding path"]
         end
     end
 
@@ -240,38 +249,58 @@ graph TB
 | `migrate` Job (helm hook, singleton) | Required | Applies SQL migrations before every upgrade |
 | PodDisruptionBudgets + NetworkPolicies | Required | Applied to every workload in `apps/` |
 | Private AKS cluster | Optional | `private_cluster_enabled` (default `false`) |
-| TEI Deployment (embedding fallback) | Optional | `embedding_profile = "tei"` |
-| Ingress: nginx vs AppGW WAF | Required (one of the two) | Choice via `ingress_profile` |
+| TEI Deployment (default embedding path) | Required unless `embedding_profile = "azure_openai"` | `embedding_profile = "tei"` is the default (see [AI](#ai) below) |
+| `temporal-server` replica count | Fixed at 1, always | Not an HA knob: Temporal's ringpop cluster membership isn't wired through the chart's NetworkPolicy, workflow state already lives durably in Postgres, and AKS reschedules the pod on node loss — a second replica would need ringpop ports opened with no durability benefit |
+| Ingress: nginx | Required, only supported value | `ingress_profile = "nginx"`; `appgw_waf` is rejected by validation (roadmap, [§10](#10-limitations-roadmap)) |
 
 ### AI
 
 ```mermaid
 graph LR
-    subgraph aoaig["Azure OpenAI resource"]
-        deploy["Deployment: text-embedding-3-small — S0, capacity=openai_capacity TPM"]
+    subgraph teig["TEI on AKS — default"]
+        teidep["Deployment: BAAI/bge-small-en-v1.5, dim=384"]
+    end
+    subgraph aoaig["Azure OpenAI resource — provisioned, inactive by default"]
+        deploy["Deployment: text-embedding-3-small — S0, capacity=openai_capacity TPM, dim=1536"]
     end
     api["public-api"]
     worker["ingestion-worker"]
-    tei["TEI Deployment on AKS — fallback"]
 
-    api -->|"openai_compatible provider, dim=1536"| deploy
-    worker -->|"openai_compatible provider, dim=1536"| deploy
-    api -.->|"if embedding_profile=tei"| tei
-    worker -.->|"if embedding_profile=tei"| tei
+    api -->|"default: embedding_profile=tei"| teidep
+    worker -->|"default: embedding_profile=tei"| teidep
+    api -.->|"embedding_profile=azure_openai — needs #311 / PR #314"| deploy
+    worker -.->|"embedding_profile=azure_openai — needs #311 / PR #314"| deploy
 ```
 
-Both services set `EMBEDDING_PROVIDER=openai_compatible`,
-`EMBEDDING_SERVICE_URL=https://<resource>.openai.azure.com/openai`,
-`EMBEDDING_MODEL_ID=<deployment name>`, `EMBEDDING_DIM=1536`. The API key comes
-from Key Vault via the CSI driver, never a tfvar.
+**Default today is `tei`** (self-hosted [Text Embeddings Inference](https://github.com/huggingface/text-embeddings-inference)
+on AKS, `BAAI/bge-small-en-v1.5`, `EMBEDDING_DIM=384`), not Azure OpenAI. The
+Azure OpenAI resource + `text-embedding-3-small` deployment is still
+provisioned by `modules/ai` every apply — so switching later is one tfvar,
+not a new `apply` from scratch — but the app cannot speak to it yet:
+`embedding_profile = "azure_openai"` needs the `openai_compatible` provider
+path ([#311](https://github.com/inherent-prime/inherent/issues/311),
+[PR #314](https://github.com/inherent-prime/inherent/pull/314), unmerged).
+Until that merges, setting `embedding_profile = "azure_openai"` deploys the
+Azure OpenAI resource but the app keeps speaking the TEI wire protocol and
+ignores `EMBEDDING_PROVIDER`/`EMBEDDING_API_KEY` — **do not** set it in
+production before #314 merges.
+
+**`EMBEDDING_DIM` is not cosmetic.** `tei` = `384`, `azure_openai` =
+`openai_embedding_dim` (`1536` by default). Weaviate's vector index is
+created at a fixed dimension on first ingest; switching `embedding_profile`
+on a workspace that has already ingested documents under the other profile's
+dimension does not re-embed anything — searches against the mismatched
+dimension fail or silently return nothing sensible. Treat an embedding
+profile switch like a schema migration: plan a full re-ingest, don't flip
+the tfvar on a live corpus.
 
 **Required vs optional**
 
 | Component | Required / Optional | Notes |
 | --- | --- | --- |
-| Azure OpenAI resource + embedding deployment | Required unless TEI fallback chosen | `embedding_profile = "azure_openai"` (default) |
-| TEI fallback | Optional | `embedding_profile = "tei"` — use until [PR #314](https://github.com/inherent-prime/inherent/pull/314) merges (see [§10](#10-limitations-roadmap)) |
-| `openai_capacity` (TPM units) | Tunable, not optional | Default `50`; raise to raise the embedding throughput ceiling |
+| TEI on AKS | Required unless `azure_openai` chosen | `embedding_profile = "tei"` (**default**) — self-hosted, no external quota/cost dependency |
+| Azure OpenAI resource + embedding deployment | Always provisioned; **inactive** until #314 merges | `embedding_profile = "azure_openai"` — do not select in production before then |
+| `openai_capacity` (TPM units) | Tunable, not optional | Default `50`; only matters once `azure_openai` is selectable — raises the embedding throughput ceiling |
 
 ## 3. Prerequisites
 
@@ -280,46 +309,63 @@ from Key Vault via the CSI driver, never a tfvar.
 | Item | Notes |
 | --- | --- |
 | Azure subscription | With Owner (or an equivalent custom RBAC set: Contributor + User Access Administrator + Key Vault Administrator) on the target resource groups |
-| Azure OpenAI access + quota | Request access if not yet granted on the subscription; confirm `text-embedding-3-small` quota in your target region before applying |
+| Azure OpenAI access + quota | `modules/ai` provisions the Azure OpenAI resource + `text-embedding-3-small` deployment unconditionally, even though the **default** `embedding_profile = "tei"` doesn't use it yet (see [§2 AI](#ai)) — request access if not yet granted on the subscription, and confirm quota in your target region before applying |
 | `terraform` >= 1.9, `az` CLI, `kubectl`, `helm` | Installed locally or in CI |
+| `jq`, `curl`, `openssl` | `scripts/deploy-azure.sh` uses all three (parsing `terraform output -json`, the health-gate poll, and generating the bootstrap API key) — its own preflight check fails loudly if any is missing |
 | A DNS zone or record you control | For `dns_zone_name` + `dns_record`, or an externally-managed `api_hostname` |
+| Private-endpoint mode: `deployer_ip_ranges` | When `enable_private_endpoints` is on (the default), Terraform itself needs to write to Key Vault/Storage from wherever you run `apply` — set `deployer_ip_ranges` to your operator/CI egress CIDRs (see [§7](#7-enterprise-vnet-integration)) |
 | ~30 minutes | End-to-end apply time for a fresh prod-HA stack |
+
+**Optional**
+
+| Item | Notes |
+| --- | --- |
+| `k6` | Only needed for `--loadtest` / `scripts/loadtest/k6-search.js` — [install instructions](https://k6.io/docs/get-started/installation/). A deploy without it fully succeeds; see [§5](#raising-the-ceiling) and [§10](#10-limitations-roadmap) |
 
 **NOT required**
 
 | Item | Why not |
 | --- | --- |
 | An existing VNet | Only needed for BYO-VNet mode (`existing_vnet_id`); default mode creates one |
-| GPU quota | Nothing in this stack requests GPU SKUs (embedding runs on Azure OpenAI or CPU TEI) |
+| GPU quota | Nothing in this stack requests GPU SKUs (embedding runs on CPU TEI by default, or Azure OpenAI once selectable) |
 | Docker installed locally | Terraform and `az`/`kubectl`/`helm` are the only local tools; images are pulled by AKS |
 | Any Hetzner account/token | Azure and Hetzner are independent deploy targets — see [Hetzner + Terraform](../getting-started/production.md) for that path |
 
 ## 4. One-Click Deploy
 
 `scripts/deploy-azure.sh` wraps the full path: preflight, state bootstrap,
-apply, health wait, workspace bootstrap, optional load test.
+apply, health wait, workspace bootstrap, optional load test. Run it from the
+repo root (it resolves `infra/azure` relative to its own location, not your
+`cwd`):
 
 ```bash
-cd infra/azure
-
 # First run: also creates the remote-state resource group/storage account
 ./scripts/deploy-azure.sh --bootstrap-state --yes
 
 # Subsequent runs: reuse existing state
 ./scripts/deploy-azure.sh --yes
 
-# With a post-deploy load test (20 QPS / 5m, see #9)
+# With a post-deploy load test (targeted at 20 QPS / 5m, see #9)
 ./scripts/deploy-azure.sh --yes --loadtest
 
 # Tear down
 ./scripts/deploy-azure.sh --destroy
 ```
 
+**Two-phase apply (every run, not just the first).** The script always runs
+`terraform apply -target=module.aks` before the full `apply` — the
+helm/kubernetes Terraform providers are configured from `module.aks`'s
+outputs (cluster endpoint, CA cert, OIDC issuer), which don't exist yet on a
+from-scratch deploy, so a single-pass full apply can't plan the chart/app
+resources. This targeted first apply is idempotent (a no-op diff on every
+later re-run) and follows the same `--var-file`/`--yes` gating as the full
+apply — without `--yes` you review and confirm a plan for each phase.
+
 | Flag | Effect |
 | --- | --- |
 | `--bootstrap-state` | Creates the resource group, storage account, and container for Terraform remote state, then emits `backend.hcl` |
 | `--yes` | Passes `-auto-approve` to `terraform apply` (omit to review the plan interactively) |
-| `--loadtest` | Runs `scripts/loadtest/k6-search.js` (20 QPS for 5m, p95 < 2s) against the deployed endpoint after health checks pass |
+| `--loadtest` | Runs `scripts/loadtest/k6-search.js` (targeted at 20 QPS for 5m, p95 < 2s) against the deployed endpoint after health checks pass. Requires `k6` — if it's missing, the deploy still succeeds but the script exits nonzero (you explicitly asked for a load test that didn't run); see the summary's WARN for why |
 | `--destroy` | Runs `terraform destroy` against the same state, after confirmation |
 | `--var-file <path>` | Terraform var-file to apply/destroy with (defaults to `terraform.tfvars`) |
 | `--skip-bootstrap-key` | Skip the post-deploy workspace + API key bootstrap step |
@@ -338,6 +384,13 @@ cp terraform.tfvars.example terraform.tfvars   # or envs/prod.tfvars.example
 cp backend.hcl.example backend.hcl             # edit: state RG, storage account, container
 
 terraform init -backend-config=backend.hcl
+
+# Phase 1/2: module.aks first -- its outputs configure the helm/kubernetes
+# providers that the full plan below needs (see the two-phase apply note
+# above). Idempotent -- safe to re-run on every subsequent deploy too.
+terraform apply -var-file=terraform.tfvars -target=module.aks
+
+# Phase 2/2: the full stack
 terraform plan  -var-file=terraform.tfvars
 terraform apply -var-file=terraform.tfvars
 
@@ -349,7 +402,7 @@ curl -s "https://$(terraform output -raw api_fqdn)/health"
 ```
 
 Use `envs/dev.tfvars.example` for a single-zone, HA-off, small-SKU dev
-profile, or `envs/prod.tfvars.example` for HA + DR + WAF ingress.
+profile, or `envs/prod.tfvars.example` for HA + DR + nginx ingress.
 
 ## 5. Tuning & Tweaking
 
@@ -360,17 +413,22 @@ profile, or `envs/prod.tfvars.example` for HA + DR + WAF ingress.
 | `resource_prefix` | `inherent` | Prefix on every resource name | Running more than one stack in the same subscription |
 | `environment` | `prod` | Tag value + naming suffix | Distinguish dev/staging/prod resource groups |
 | `tags` | `{}` | Azure resource tags | Cost allocation, ownership, compliance tagging |
-| `embedding_profile` | `azure_openai` | `azure_openai` or `tei` | Switch to CPU TEI fallback (no Azure OpenAI access yet) |
+| `embedding_profile` | `tei` | `tei` (self-hosted, default) or `azure_openai` | `azure_openai` needs [#311 / PR #314](#ai) — do not select it in production before that merges |
 | `storage_profile` | `minio` | Storage backend for documents | Only `minio` implemented; `azure_blob` is reserved (rejected by validation) — see [#329](https://github.com/inherent-prime/inherent/issues/329) |
-| `ingress_profile` | `nginx` | `nginx` or `appgw_waf` | Need a managed WAF in front of the API |
+| `ingress_profile` | `nginx` | Only `nginx` is deployable | `appgw_waf` is rejected by validation (roadmap, [epic #320](https://github.com/inherent-prime/inherent/issues/320)) |
 | `enable_ha` | `true` | PG zone-redundant, Redis Standard, multi-zone pools | Turn off only for dev/cost-sensitive non-prod |
 | `enable_dr` | `true` | GRS storage, mirror CronJob, geo-backups | Turn off if cross-region recovery isn't required |
 | `pg_geo_replica` | `false` | Standing PG replica in the DR region | Need near-zero-RPO PG failover instead of restore-based |
 | `existing_vnet_id` | `""` | BYO-VNet mode | Enterprise network integration — see [§7](#7-enterprise-vnet-integration) |
 | `existing_subnet_ids` | `{}` | Maps `aks`/`data`/`appgw` to existing subnet IDs | Required alongside `existing_vnet_id` |
 | `private_cluster_enabled` | `false` | AKS API server has no public endpoint | Compliance requires no public control-plane access |
-| `authorized_ip_ranges` | `[]` | CIDR allow-list on the AKS API server | Restrict `kubectl` access to known egress IPs |
+| `authorized_ip_ranges` | `[]` | CIDR allow-list on the AKS API server | **Empty means no additional restriction** — the API server is reachable from the whole internet (subject to whatever auth the API server itself enforces), not implicitly locked down. `envs/prod.tfvars.example` does not currently set this — treat it as a gap to fill in with your own operator/CI CIDRs before go-live, the same way you must replace the file's other `CHANGE ME` placeholders |
 | `enable_private_endpoints` | `true` | Private Link for PG/Cosmos/Redis/KV/Blob | Turn off only in isolated test subscriptions |
+| `deployer_ip_ranges` | `[]` | CIDR allow-list Key Vault/Storage firewalls open for Terraform itself | **Required alongside `enable_private_endpoints = true`** — otherwise `terraform apply` cannot reach Key Vault/Storage to write secrets/state from outside the VNet; see [§7](#7-enterprise-vnet-integration) |
+| `aks_sku_tier` | `"Standard"` | AKS control-plane SLA tier | `"Free"` removes the control-plane SLA and its ~$73/mo cost — fine for dev/non-prod, not recommended for prod (see [§8 TCO](#8-total-cost-of-ownership-tco)) |
+| `log_retention_days` | `30` | Log Analytics workspace retention | Raise for longer audit/incident-investigation windows (raises cost — [§8](#8-total-cost-of-ownership-tco)) |
+| `vnet_cidr` | `"10.20.0.0/16"` | Address space of the VNet Terraform creates | Change to avoid overlap when peering to an existing hub/spoke |
+| `pod_cidr` | — | AKS Azure CNI overlay pod address space | Change to avoid overlap with `vnet_cidr` or peered networks; also threaded into the chart's NetworkPolicy CIDR excepts |
 | `aks_system_vm_size` | `Standard_D2s_v5` | System node pool SKU | Rarely — system pool runs cluster add-ons only |
 | `aks_user_vm_size` | `Standard_D4s_v5` | App workload node SKU | Raise for CPU/memory-bound workers or TEI |
 | `aks_user_min_count` | `3` | Floor of the user pool autoscaler | Lower for dev; keep ≥3 for prod zone spread |
@@ -386,16 +444,17 @@ profile, or `envs/prod.tfvars.example` for HA + DR + WAF ingress.
 | `minio_disk_gb` | `128` | MinIO PVC size | Raise as document blob volume grows |
 | `inherent_version` | pinned release | App image tag | Upgrade the deployed version — never set to `latest` in prod |
 | `dns_zone_name` / `dns_record` (or `api_hostname`) | — | Public hostname for the API | Required: point this at your own domain |
-| `letsencrypt_email` | — | ACME registration contact | Required when `ingress_profile = "nginx"` |
-| `openai_embedding_model` | `text-embedding-3-small` | Embedding model deployed | Change only if standardizing on a different embedding model |
-| `openai_embedding_dim` | `1536` | Vector dimension | Must match the embedding model; changing it requires re-ingesting |
+| `letsencrypt_email` | — | ACME registration contact | Required (the only supported ingress path is `nginx` + cert-manager) |
+| `openai_embedding_model` | `text-embedding-3-small` | Embedding model deployed | Change only if standardizing on a different embedding model, once `azure_openai` is selectable |
+| `openai_embedding_dim` | `1536` | Vector dimension used when `embedding_profile = "azure_openai"` | Must match the embedding model; changing it (or switching profiles) requires re-ingesting — see [§2 AI](#ai) |
 | `openai_sku` | `S0` | Azure OpenAI pricing tier | Rarely — `S0` is the standard pay-as-you-go tier |
-| `openai_capacity` | `50` | Provisioned TPM units | Raise to raise the embedding throughput ceiling |
+| `openai_capacity` | `50` | Provisioned TPM units | Only matters once `azure_openai` is selectable — raise to raise the embedding throughput ceiling |
 
 ### Raising the ceiling
 
-The stack is load-test-validated at **20 QPS sustained** (`scripts/loadtest/k6-search.js`,
-p95 < 2s — see [§9](#9-dr-failure-response)). To push past that:
+The stack is **targeted** at **20 QPS sustained** (`scripts/loadtest/k6-search.js`,
+p95 < 2s) — validated per-deployment by running `--loadtest` yourself, not by
+anything in CI (see [§10](#10-limitations-roadmap) for why). To push past that:
 
 1. **`api_replicas_max`** — the HPA won't scale past this even if CPU/memory
    headroom exists. Raise it first.
@@ -411,7 +470,8 @@ p95 < 2s — see [§9](#9-dr-failure-response)). To push past that:
    ceiling; raise if ingestion backs up under sustained load, not search QPS.
 
 Always re-run `--loadtest` after raising any of these — there is no capacity
-baseline in this repo beyond the validated 20 QPS target (see [§10](#10-limitations-roadmap)).
+baseline in this repo beyond the 20 QPS target `scripts/loadtest/k6-search.js`
+is written against (see [§10](#10-limitations-roadmap)).
 
 ## 6. How to Modify the Terraform
 
@@ -477,22 +537,19 @@ Your subnets must have room for the AKS node pool's max size (`aks_user_max_coun
 + `aks_system_vm_size` pool) and must not overlap the CIDRs of anything else
 you peer to this VNet.
 
-### Worked example: switch to App Gateway WAF ingress
+### Roadmap: App Gateway WAF ingress
 
-```hcl
-# terraform.tfvars
-ingress_profile = "appgw_waf"
-```
-
-```bash
-terraform plan  -var-file=terraform.tfvars
-terraform apply -var-file=terraform.tfvars
-```
-
-This replaces the `nginx` + `cert-manager` ingress path with an
-`azurerm_application_gateway` in WAF_v2 mode. The public ingress IP changes —
-re-point `dns_record` at the new IP after apply (`terraform output`) before
-relying on the new endpoint. Adds roughly $300/mo over nginx (see [§8](#8-total-cost-of-ownership-tco)).
+`ingress_profile = "appgw_waf"` is **not deployable today** — Terraform's
+own validation rejects it ("not yet supported"). The `azurerm_application_gateway`
+and AGIC code paths exist in `modules/apps/ingress.tf` and `modules/aks`, but
+`main.tf` hardcodes the App Gateway id both modules need to `null`, so AGIC
+is never actually installed and nothing would route traffic to it even if
+the validation didn't reject the value first. `nginx` + cert-manager is the
+only ingress path you can apply. Follow-up work to finish the AGIC wiring is
+tracked under [epic #320](https://github.com/inherent-prime/inherent/issues/320);
+once it lands, switching will change the public ingress IP (`dns_record`
+would need re-pointing) and add roughly $300/mo over nginx (see
+[§8](#8-total-cost-of-ownership-tco), kept there as a roadmap cost note).
 
 ## 7. Enterprise VNet Integration
 
@@ -501,7 +558,8 @@ relying on the new endpoint. Adds roughly $300/mo over nginx (see [§8](#8-total
 | Bring your own VNet | `existing_vnet_id`, `existing_subnet_ids` | Terraform creates nothing at the network layer; it wires into what you provide |
 | Private AKS API server | `private_cluster_enabled` | No public control-plane endpoint; `kubectl` needs network line-of-sight (VPN/ExpressRoute/jumpbox) |
 | Private endpoints for all data services | `enable_private_endpoints` (default `true`) | PG, Cosmos, Redis, Key Vault, and Blob are reachable only from the VNet |
-| Restrict AKS API server access | `authorized_ip_ranges` | CIDR allow-list; combine with `private_cluster_enabled = false` for a public-but-restricted endpoint |
+| Terraform's own access when private endpoints are on | `deployer_ip_ranges` | **Required whenever `enable_private_endpoints = true`** (the default): Key Vault/Storage firewalls otherwise block `apply` itself from writing secrets/state if you run Terraform from outside the VNet. Set it to your operator/CI egress CIDRs; empty (`[]`) is only safe when Terraform runs from inside the VNet (e.g. a self-hosted runner) |
+| Restrict AKS API server access | `authorized_ip_ranges` | CIDR allow-list; empty means no additional restriction (see [§5](#5-tuning-tweaking)). Combine with `private_cluster_enabled = false` for a public-but-restricted endpoint |
 | Controlled egress | NAT gateway (network module) | All outbound AKS traffic (image pulls, Azure OpenAI calls) egresses through one set of static IPs — allow-list these on any downstream firewall |
 | VNet peering to existing hub/spoke | Not a Terraform variable | Peer the VNet Terraform creates (or the one you bring) to your hub after apply, via your existing peering process |
 
@@ -523,15 +581,25 @@ secrets before their retention window expires.
 
 **Compliance notes**
 
-- TLS everywhere: Redis via `rediss://` (port 6380), Postgres requires SSL,
-  Cosmos via `mongodb+srv`, ingress terminates TLS (Let's Encrypt or AppGW
-  WAF) — no plaintext data-plane traffic crosses the VNet boundary.
+- TLS on every PaaS connection and on public ingress: Redis via `rediss://`
+  (port 6380), Postgres requires SSL, Cosmos via `mongodb+srv`, Azure OpenAI
+  over HTTPS, and ingress terminates TLS (Let's Encrypt via cert-manager).
+  This does **not** extend to every in-cluster hop: pod-to-pod traffic
+  between the app and weaviate/minio/temporal is plain HTTP inside the AKS
+  pod network today, guarded by NetworkPolicy (default-deny plus explicit
+  allow rules) and the VNet boundary rather than by transport encryption.
+  In-cluster TLS for those hops is a tracked hardening follow-up, not yet
+  implemented.
 - Every datastore is private-endpoint-only by default; nothing but the
   ingress controller and the Ingestion API's ClusterIP surface is reachable
   from outside its subnet, and the Ingestion API itself is never on the
   ingress.
 - `authorized_ip_ranges` and `private_cluster_enabled` are independent knobs
   — use both for defense in depth on the AKS control plane.
+- The app connects to Postgres as the server admin role today (there is no
+  least-privilege application-scoped PG role yet) — a known limitation
+  tracked as a follow-up under [epic #320](https://github.com/inherent-prime/inherent/issues/320),
+  same as the AGIC and in-cluster TLS follow-ups above.
 
 ## 8. Total Cost of Ownership (TCO)
 
@@ -545,16 +613,20 @@ region.
 
 | Item | Est. monthly USD |
 | --- | --- |
-| AKS control plane (Free tier) | $0 |
+| AKS control plane (`aks_sku_tier = "Standard"` — `envs/dev.tfvars.example`'s own default) | $73 |
 | AKS nodes — 1× system + 1× user, `Standard_D2s_v5` | $140 |
 | Postgres Flexible — burstable, no HA | $60 |
 | Cosmos DB for MongoDB — smallest tier, no HA | $90 |
 | Azure Cache for Redis — Basic C0 | $16 |
 | Ingress (nginx + LB) | $25 |
-| Log Analytics — short retention | $30 |
+| Log Analytics — 14-day retention (`log_retention_days = 14` in the dev example) | $30 |
 | Storage (MinIO disk + Blob, LRS, no DR mirror) | $20 |
-| Azure OpenAI embeddings | $5 |
-| **Total** | **≈ $386/mo** |
+| Embeddings — self-hosted TEI on the AKS node above (`embedding_profile = "tei"`, the dev example's default) | $0 (no separate resource cost) |
+| **Total** | **≈ $454/mo** |
+
+Set `aks_sku_tier = "Free"` to drop the $73 control-plane line (no SLA —
+fine for a throwaway dev/eval stack, not recommended once anyone depends on
+uptime): **≈ $381/mo** with that override.
 
 ### Prod-HA profile (`envs/prod.tfvars.example` with `enable_dr = false`)
 
@@ -569,9 +641,9 @@ region.
 | Ingress — nginx + LB | $25 |
 | Log Analytics | $50–150 |
 | Storage/backup/egress | $50–100 |
-| Azure OpenAI embeddings | $5 (negligible at 20 QPS) |
-| **Total (nginx ingress)** | **≈ $1.55k–1.7k/mo** |
-| **Total (AppGW WAF ingress instead)** | **≈ $1.85k–2.0k/mo** (+$300 for `ingress_profile = "appgw_waf"`) |
+| Embeddings — self-hosted TEI on the AKS pools above (`embedding_profile = "tei"`, the prod example's default) | $0 (no separate resource cost; the Azure OpenAI resource is still provisioned per [§2 AI](#ai) but idle until #314 merges) |
+| **Total (nginx ingress — the only deployable path today)** | **≈ $1.55k–1.7k/mo** |
+| **Roadmap: AppGW WAF ingress** | **≈ $1.85k–2.0k/mo** (+$300 delta) — kept as a cost-planning reference only; `ingress_profile = "appgw_waf"` is rejected by validation until [epic #320](https://github.com/inherent-prime/inherent/issues/320)'s follow-up lands (see [§6](#6-how-to-modify-the-terraform)) |
 
 ### Prod-HA+DR profile (`envs/prod.tfvars.example`, default: `enable_dr = true`)
 
@@ -589,13 +661,15 @@ worth it if restore-based PG recovery (see [§9](#9-dr-failure-response)) doesn'
 
 | Lever | Effect |
 | --- | --- |
-| `ingress_profile`: `nginx` vs `appgw_waf` | ~$300/mo delta |
+| `aks_sku_tier`: `"Standard"` vs `"Free"` | $73/mo delta (control-plane SLA) |
+| `ingress_profile`: `nginx` (only deployable value) vs the roadmapped `appgw_waf` | ~$300/mo delta once AppGW WAF ships |
 | `aks_user_vm_size` / `aks_user_max_count` | Largest single cost driver at scale |
 | `cosmos_mongo_sku` | M30 → larger tiers scale non-linearly |
-| Log Analytics retention (monitoring module) | $50–150/mo swing on retention days alone |
+| `log_retention_days` (monitoring module) | $50–150/mo swing on retention days alone |
 | `enable_ha` | Removes PG standby + Cosmos HA replicas + multi-zone pools when off |
 | `enable_dr` | Removes GRS premium + geo-backup when off |
 | `pg_geo_replica` | +$250–300/mo when on |
+| `embedding_profile`: `tei` (default, self-hosted) vs `azure_openai` (not yet selectable) | TEI's cost is folded into the AKS node pool already sized above; `azure_openai` adds provisioned-TPM cost on top once selectable |
 
 ## 9. DR & Failure Response
 
@@ -619,9 +693,13 @@ see the runbook for the resolved detail.
 | Limitation | Detail | Tracking |
 | --- | --- | --- |
 | MinIO required, not native Blob | The app implements only `s3`-compatible and `local` storage backends; `storage_profile = "azure_blob"` is a reserved enum value rejected by validation | [#329](https://github.com/inherent-prime/inherent/issues/329) |
-| Embedding provider dependency | `embedding_profile = "azure_openai"` depends on the `openai_compatible` provider path; until that path is merged, use `embedding_profile = "tei"` (CPU TEI on AKS) as a fallback | [#311](https://github.com/inherent-prime/inherent/issues/311), [PR #314](https://github.com/inherent-prime/inherent/pull/314) |
-| No capacity baseline beyond 20 QPS | The repo has no load-test history above the validated `scripts/loadtest/k6-search.js` target (20 QPS, p95 < 2s). Run `--loadtest` (or the k6 script directly) against your own traffic shape before go-live, and again after any tuning change in [§5](#5-tuning-tweaking) | — |
+| `embedding_profile = "azure_openai"` not yet usable | Depends on the `openai_compatible` provider path; until it merges, `azure_openai` deploys the Azure OpenAI resource but the app still speaks TEI's wire protocol and ignores `EMBEDDING_PROVIDER`/`EMBEDDING_API_KEY`. `tei` (self-hosted, CPU) is the **default** and the only working profile today — see [§2 AI](#ai) | [#311](https://github.com/inherent-prime/inherent/issues/311), [PR #314](https://github.com/inherent-prime/inherent/pull/314) |
+| `ingress_profile = "appgw_waf"` not yet deployable | Rejected by validation; `nginx` + cert-manager is the only supported ingress path — see [§6](#6-how-to-modify-the-terraform) | [epic #320](https://github.com/inherent-prime/inherent/issues/320) |
+| No capacity baseline beyond the 20 QPS target | `scripts/loadtest/k6-search.js` is written against a 20 QPS / p95 < 2s target, but nothing in this repo validates a live deployment against it automatically — the CI workflow (`azure-terraform.yml`) is validate-only and never touches a real cluster, by design (see its own header comment). A deployment is "targeted at 20 QPS", not "load-test-validated at 20 QPS", until you run `--loadtest` (or the k6 script directly) against it yourself, and again after any tuning change in [§5](#5-tuning-tweaking) | — |
 | Single-region serving | Only one region serves traffic at a time; DR is restore-based (RPO ≤ 1h / RTO ≤ 4h), not active-active | See [Azure DR Runbook](azure-dr-runbook.md) |
+| No in-cluster TLS | weaviate/minio/temporal/api pod-to-pod traffic is plaintext, guarded by NetworkPolicy + the VNet boundary, not encryption — see [§7 compliance notes](#7-enterprise-vnet-integration) | — |
+| App connects to Postgres as the server admin | No least-privilege, application-scoped PG role exists yet | [epic #320](https://github.com/inherent-prime/inherent/issues/320) |
+| `TRUSTED_PROXIES` does exact-IP matching, not CIDR | The app's trusted-proxy check can't express the ingress controller's pod CIDR as a range; per-client rate limiting behind ingress is a known limitation until the app gains CIDR support | — |
 
 ## See Also
 

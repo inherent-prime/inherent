@@ -8,9 +8,10 @@ enable_dr      = true
 pg_geo_replica = false # geo-redundant backup already meets RPO/RTO; opt in for faster failover
 
 # Public ingress via ingress-nginx + cert-manager (Let's Encrypt) — cheapest default that
-# still terminates TLS at the edge. Swap to Application Gateway WAF_v2 for a managed WAF /
-# DDoS posture (higher cost, ~$325/mo vs ~$25/mo for the LB — see docs/deploy/azure.md TCO):
-#   ingress_profile = "appgw_waf"
+# still terminates TLS at the edge. Application Gateway WAF_v2 ("appgw_waf") is a tracked
+# roadmap option (#334) — variable validation rejects it until the AGIC wiring lands, so
+# "nginx" is the only deployable profile today (see docs/deploy/azure.md TCO for the cost
+# comparison once it ships).
 ingress_profile = "nginx"
 
 inherent_version = "0.6.0" # pinned release — never "latest" in prod

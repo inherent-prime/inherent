@@ -13,6 +13,14 @@
 //     already gates on is not ready to serve traffic.
 //   - 20 requests/s steady state: the QPS target set by epic #320.
 //
+// Rate limit headroom (#25): scripts/deploy-azure.sh seeds the bootstrap API
+// key with rate_limit=3000/min. 20 req/s steady state is 20*60 = 1200/min at
+// the floor, so 3000 leaves real headroom above what this script drives --
+// a 429 here means the deployment's actual capacity (not the seeded key's
+// limit) can't sustain 20 QPS. http_req_failed below counts a 429 as a
+// failure deliberately: this script measures whether the deployment can
+// serve the target load, not just whether the rate limiter itself works.
+//
 // Usage (env vars; scripts/deploy-azure.sh sets these for you):
 //   API_URL             https://<api_fqdn>            (required, no trailing slash)
 //   API_KEY              ink_...                        (required)

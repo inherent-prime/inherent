@@ -90,6 +90,9 @@ jobs:
       - name: helm lint charts/inherent
         run: helm lint charts/inherent
 
+      - name: helm lint charts/cluster-issuer
+        run: helm lint charts/cluster-issuer
+
       # shellcheck ships preinstalled on the ubuntu-latest runner image.
       - name: shellcheck scripts/deploy-azure.sh
         run: shellcheck scripts/deploy-azure.sh

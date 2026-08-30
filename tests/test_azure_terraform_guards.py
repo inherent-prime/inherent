@@ -47,6 +47,11 @@ CHART_DIR = REPO_ROOT / "charts" / "inherent"
 DEPLOY_SCRIPT = REPO_ROOT / "scripts" / "deploy-azure.sh"
 DOCS_AZURE = REPO_ROOT / "docs" / "deploy" / "azure.md"
 MKDOCS_YML = REPO_ROOT / "mkdocs.yml"
+PRODUCTION_MD = REPO_ROOT / "docs" / "deploy" / "production.md"
+DR_OUTPUTS_TF = MODULES_DIR / "dr" / "outputs.tf"
+APPS_OUTPUTS_TF = MODULES_DIR / "apps" / "outputs.tf"
+TEMPORAL_SCHEMA_JOB = CHART_DIR / "templates" / "temporal" / "schema-setup-job.yaml"
+PUBLIC_API_DEPLOYMENT = CHART_DIR / "templates" / "public-api" / "deployment.yaml"
 
 # Root variable names the build spec calls out as "generated in module, never
 # passed as a tfvar" (`.memory/azure-build-spec.md` "Secrets" section). Any
@@ -54,14 +59,16 @@ MKDOCS_YML = REPO_ROOT / "mkdocs.yml"
 # default -- that would mean a real password/key baked into a `variables.tf`
 # default, which is committed to git and shipped to every consumer of the
 # module.
-SECRET_NAME_RE = re.compile(r"(password|secret|_key$)", re.IGNORECASE)
+SECRET_NAME_RE = re.compile(
+    r"(password|secret|_key$|connection_string|_url$|token)", re.IGNORECASE
+)
 # `*_kv_secret` names are Key Vault SECRET NAME references (a lookup key, not
 # a credential -- see the "Cross-module interface" outputs, e.g.
 # `pg_password_kv_secret`), so they are exempt from the no-default rule.
 KV_SECRET_REF_RE = re.compile(r"_kv_secret$", re.IGNORECASE)
 
 
-def _skip_if_missing(path: Path) -> None:
+def _require(path: Path) -> None:
     # All workstreams have landed (#320) -- a missing file is a real break, not
     # not-yet-landed peer state. Failing (never skipping) is deliberate: the
     # deleted Hetzner e2e lane's skip path reported success with every
@@ -85,7 +92,7 @@ def test_every_referenced_module_directory_exists_with_tf_files() -> None:
     so this is the guard that catches a drifted module reference before any
     CI lane that DOES have terraform gets to it.
     """
-    _skip_if_missing(MAIN_TF)
+    _require(MAIN_TF)
     text = MAIN_TF.read_text()
     refs = re.findall(
         r'module\s+"([a-zA-Z0-9_-]+)"\s*\{[^}]*?source\s*=\s*"(\./modules/[a-zA-Z0-9_/-]+)"',
@@ -118,7 +125,7 @@ def test_every_referenced_module_directory_exists_with_tf_files() -> None:
 def test_versions_tf_pins_azurerm_major_4() -> None:
     """An unpinned or wrong-major azurerm provider can silently change
     resource schemas between CI runs -- pin the major version explicitly."""
-    _skip_if_missing(VERSIONS_TF)
+    _require(VERSIONS_TF)
     text = VERSIONS_TF.read_text()
     azurerm_block = re.search(
         r'azurerm\s*=\s*\{[^}]*?version\s*=\s*"([^"]+)"', text, re.DOTALL
@@ -135,7 +142,7 @@ def test_versions_tf_pins_azurerm_major_4() -> None:
 
 
 def test_versions_tf_requires_terraform_1_9_or_newer() -> None:
-    _skip_if_missing(VERSIONS_TF)
+    _require(VERSIONS_TF)
     text = VERSIONS_TF.read_text()
     match = re.search(r'required_version\s*=\s*"([^"]+)"', text)
     assert match is not None, (
@@ -215,7 +222,7 @@ def test_no_plaintext_default_for_secret_shaped_variables() -> None:
 
 
 def test_prod_tfvars_example_enables_ha_and_dr() -> None:
-    _skip_if_missing(PROD_TFVARS_EXAMPLE)
+    _require(PROD_TFVARS_EXAMPLE)
     text = PROD_TFVARS_EXAMPLE.read_text()
     assert re.search(r"^\s*enable_ha\s*=\s*true\s*$", text, re.MULTILINE), (
         f"{PROD_TFVARS_EXAMPLE.relative_to(REPO_ROOT)} must set "
@@ -228,7 +235,7 @@ def test_prod_tfvars_example_enables_ha_and_dr() -> None:
 
 
 def test_prod_tfvars_example_pins_inherent_version_not_latest() -> None:
-    _skip_if_missing(PROD_TFVARS_EXAMPLE)
+    _require(PROD_TFVARS_EXAMPLE)
     text = PROD_TFVARS_EXAMPLE.read_text()
     # Trailing `# comment` after the value is common style in this file
     # (see envs/prod.tfvars.example), so don't anchor to end-of-line.
@@ -360,33 +367,76 @@ def _chart_yaml_text() -> str | None:
     return "\n".join(parts) if parts else None
 
 
-def test_chart_pins_weaviate_1_27_0() -> None:
-    text = _chart_yaml_text()
-    assert text is not None, "charts/inherent is missing (#320)"
-    # The chart splits image coordinates (repository + tag keys), so pin both
-    # halves rather than a joined "repo:tag" literal that the chart never emits.
-    assert "semitechnologies/weaviate" in text, (
-        "expected the weaviate image repository semitechnologies/weaviate "
-        "somewhere in charts/inherent"
+def _values_yaml_text() -> str | None:
+    values = CHART_DIR / "values.yaml"
+    return values.read_text() if values.exists() else None
+
+
+def _top_level_block(text: str, key: str) -> str:
+    """Slice out one top-level `key:` mapping from values.yaml, up to (but
+    not including) the next un-indented `word:` line or EOF.
+
+    A tiny hand parser rather than a real YAML load (per the module
+    docstring's "no dependency beyond what's already vendored" spirit) --
+    just enough structure to stop a value that happens to appear under a
+    DIFFERENT top-level key (e.g. a stray `environment:` elsewhere) from
+    being mistaken for the one this test means to pin (#49/#50: a
+    whole-file substring/concat search can't tell those apart).
+    """
+    match = re.search(rf"^{re.escape(key)}:.*$", text, re.MULTILINE)
+    assert match is not None, (
+        f"expected a top-level `{key}:` key in "
+        f"{(CHART_DIR / 'values.yaml').relative_to(REPO_ROOT)}"
     )
-    assert re.search(r'tag:\s*"1\.27\.0"', text), (
-        "expected the weaviate image tag pinned to \"1.27.0\" in "
-        "charts/inherent (a floating tag can silently change the vector "
+    start = match.start()
+    next_key = re.search(r"^\S", text[match.end() :], re.MULTILINE)
+    end = match.end() + next_key.start() if next_key else len(text)
+    return text[start:end]
+
+
+def test_chart_pins_weaviate_1_27_0() -> None:
+    values_text = _values_yaml_text()
+    assert values_text is not None, "charts/inherent/values.yaml is missing (#320)"
+    weaviate_block = _top_level_block(values_text, "weaviate")
+    # The chart splits image coordinates (repository + tag keys), so pin both
+    # halves rather than a joined "repo:tag" literal that the chart never
+    # emits -- scoped to the weaviate: block so a repository/tag pin under a
+    # DIFFERENT component (e.g. minio's own image block) can't satisfy this.
+    assert "semitechnologies/weaviate" in weaviate_block, (
+        "expected the weaviate image repository semitechnologies/weaviate "
+        "in values.yaml's weaviate: block"
+    )
+    assert re.search(r'tag:\s*"1\.27\.0"', weaviate_block), (
+        "expected weaviate.image.tag pinned to \"1.27.0\" in values.yaml's "
+        "weaviate: block (a floating tag can silently change the vector "
         "index engine under an existing collection)"
     )
 
 
 def test_chart_sets_environment_production_for_api() -> None:
-    text = _chart_yaml_text()
-    assert text is not None, "charts/inherent is missing (#320)"
-    # The template wires ENVIRONMENT from values (name/value env-list style),
-    # so pin the values default AND the template wiring, not a literal
-    # "ENVIRONMENT: production" mapping the chart never emits.
-    assert re.search(r"environment:\s*production", text), (
+    values_text = _values_yaml_text()
+    assert values_text is not None, "charts/inherent/values.yaml is missing (#320)"
+    public_api_block = _top_level_block(values_text, "publicApi")
+    env_match = re.search(r"^\s*env:\s*$", public_api_block, re.MULTILINE)
+    assert env_match is not None, (
+        "expected a publicApi.env: subsection in values.yaml's publicApi: block"
+    )
+    env_block = public_api_block[env_match.start() :]
+    # Scoped to publicApi.env: specifically -- a bare `environment:` match
+    # anywhere in the file (or even anywhere under publicApi:, e.g. a future
+    # sibling key) is not the same claim as "the API's ENVIRONMENT env var
+    # defaults to production".
+    assert re.search(r"environment:\s*production", env_block), (
         "expected publicApi.env.environment to default to production in "
         "charts/inherent/values.yaml -- ENVIRONMENT=production is what turns "
         "on HSTS/JSON logs and disables /docs (docs/deploy/production.md)"
     )
+
+    text = _chart_yaml_text()
+    assert text is not None, "charts/inherent is missing (#320)"
+    # The template wires ENVIRONMENT from values (name/value env-list style);
+    # this half stays a whole-chart search since it's pinning template
+    # STRUCTURE (the env-var name is wired at all), not a values default.
     assert re.search(r"name:\s*ENVIRONMENT", text), (
         "expected the public-api deployment template to wire the ENVIRONMENT "
         "env var from values"
@@ -399,7 +449,7 @@ def test_chart_sets_environment_production_for_api() -> None:
 
 
 def test_azure_docs_page_exists() -> None:
-    _skip_if_missing(DOCS_AZURE)
+    _require(DOCS_AZURE)
 
 
 def test_mkdocs_nav_references_azure_docs() -> None:
@@ -418,7 +468,7 @@ def test_mkdocs_nav_references_azure_docs() -> None:
 
 
 def test_deploy_script_starts_with_strict_mode() -> None:
-    _skip_if_missing(DEPLOY_SCRIPT)
+    _require(DEPLOY_SCRIPT)
     text = DEPLOY_SCRIPT.read_text()
     assert "set -euo pipefail" in text, (
         f"{DEPLOY_SCRIPT.relative_to(REPO_ROOT)} must run under bash strict "
@@ -430,9 +480,11 @@ def test_deploy_script_starts_with_strict_mode() -> None:
 def test_deploy_script_shebang_and_no_unguarded_auto_approve() -> None:
     """`terraform apply -auto-approve` must only ever run behind the --yes
     gate. This is intentionally a simple substring pin (per the build spec):
-    the literal auto-approve invocation should appear exactly once in the
-    whole script, inside the function `run_apply` gates on `AUTO_YES`."""
-    _skip_if_missing(DEPLOY_SCRIPT)
+    every `apply ... -auto-approve` invocation in the script -- currently
+    the one literal occurrence inside `run_apply_phase()`, reused for both
+    halves of the two-phase apply (#29) -- must sit directly behind an
+    `if [[ "$AUTO_YES" -eq 1 ]]` check within a few lines above it."""
+    _require(DEPLOY_SCRIPT)
     lines = DEPLOY_SCRIPT.read_text().splitlines()
     assert lines[0].startswith("#!"), (
         f"{DEPLOY_SCRIPT.relative_to(REPO_ROOT)} must start with a shebang"
@@ -462,11 +514,15 @@ def test_deploy_script_shebang_and_no_unguarded_auto_approve() -> None:
 
 
 def test_deploy_script_shellcheck_clean() -> None:
-    """Executed only if shellcheck is on PATH in this environment -- the
-    build task calls for running it, but the guard suite must stay hermetic
-    per the module docstring, so a missing binary here is a skip, not a
-    failure that blocks an unrelated CI lane which never installs it."""
-    _skip_if_missing(DEPLOY_SCRIPT)
+    """Best-effort only: this local check skips when `shellcheck` isn't on
+    PATH, so a green run here is not proof the script is clean -- the
+    authoritative check is `.github/workflows/azure-terraform.yml`'s
+    `shellcheck scripts/deploy-azure.sh` step, which runs unconditionally
+    (`shellcheck` ships preinstalled on the `ubuntu-latest` runner image,
+    per that workflow's own comment) and fails the PR if it isn't. This test
+    exists only to catch issues locally, sooner, when the binary happens to
+    be installed."""
+    _require(DEPLOY_SCRIPT)
     shellcheck = _which("shellcheck")
     if shellcheck is None:
         pytest.skip("shellcheck not installed in this environment")
@@ -484,3 +540,144 @@ def test_deploy_script_shellcheck_clean() -> None:
 def _which(binary: str) -> str | None:
     result = subprocess.run(["which", binary], capture_output=True, text=True)
     return result.stdout.strip() or None
+
+
+# ---------------------------------------------------------------------------
+# (j) rate limiting is on by default for the API (#51).
+# ---------------------------------------------------------------------------
+
+
+def test_chart_enables_rate_limit_for_api() -> None:
+    values_text = _values_yaml_text()
+    assert values_text is not None, "charts/inherent/values.yaml is missing (#320)"
+    public_api_block = _top_level_block(values_text, "publicApi")
+    env_match = re.search(r"^\s*env:\s*$", public_api_block, re.MULTILINE)
+    assert env_match is not None, (
+        "expected a publicApi.env: subsection in values.yaml's publicApi: block"
+    )
+    env_block = public_api_block[env_match.start() :]
+    assert re.search(r"rateLimitEnabled:\s*true", env_block), (
+        "expected publicApi.env.rateLimitEnabled to default to true in "
+        "charts/inherent/values.yaml -- RATE_LIMIT_ENABLED=false ships an "
+        "unlimited production API by default"
+    )
+
+
+# ---------------------------------------------------------------------------
+# (k) docs/deploy/production.md no longer claims gcs/azure storage backends
+#     are implemented (#51) -- the false claim must be GONE, not just
+#     unasserted, and a corrected phrase must exist in its place.
+# ---------------------------------------------------------------------------
+
+
+def test_production_docs_no_longer_claims_gcs_azure_implemented() -> None:
+    _require(PRODUCTION_MD)
+    text = PRODUCTION_MD.read_text()
+    assert "gcs" in text and "azure" in text.lower(), (
+        f"expected {PRODUCTION_MD.relative_to(REPO_ROOT)} to still discuss "
+        "the gcs/azure storage-backend enum values at all -- if this "
+        "section was removed entirely, replace this test with whatever "
+        "page now documents storage_profile/STORAGE_BACKEND"
+    )
+    assert "neither has a client implementation" in text, (
+        f"expected {PRODUCTION_MD.relative_to(REPO_ROOT)} to state plainly "
+        "that gcs/azure are enum values with no client implementation -- "
+        "the corrected phrasing this test pins seems to have drifted"
+    )
+    assert "fails at runtime" in text, (
+        f"expected {PRODUCTION_MD.relative_to(REPO_ROOT)} to warn that "
+        "STORAGE_BACKEND=gcs/azure fails at runtime, not silently degrade"
+    )
+
+
+# ---------------------------------------------------------------------------
+# (l) cheap regression pins for specific review findings (#52).
+# ---------------------------------------------------------------------------
+
+
+def test_temporal_schema_setup_uses_v12_not_v96() -> None:
+    _require(TEMPORAL_SCHEMA_JOB)
+    text = TEMPORAL_SCHEMA_JOB.read_text()
+    assert "/v96/" not in text, (
+        f"{TEMPORAL_SCHEMA_JOB.relative_to(REPO_ROOT)} references the v96 "
+        "(PG 9.6-era) schema path, which temporalio/admin-tools:1.24.x no "
+        "longer ships -- update-schema fails immediately against it, and "
+        "this Job is a pre-install hook, so that failure blocks the whole "
+        "helm install (#52)"
+    )
+    assert "/v12/" in text, (
+        f"expected {TEMPORAL_SCHEMA_JOB.relative_to(REPO_ROOT)} to point "
+        "at the v12 schema path (the one temporalio/admin-tools:1.24.x "
+        "actually ships)"
+    )
+
+
+def test_apps_module_outputs_api_fqdn() -> None:
+    _require(APPS_OUTPUTS_TF)
+    text = APPS_OUTPUTS_TF.read_text()
+    assert re.search(r'output\s+"api_fqdn"\s*\{', text), (
+        f"expected an `output \"api_fqdn\"` block in "
+        f"{APPS_OUTPUTS_TF.relative_to(REPO_ROOT)} -- root outputs.tf and "
+        "scripts/deploy-azure.sh's readiness wait both read this directly"
+    )
+
+
+def test_deploy_script_pod_selector_matches_a_real_chart_label() -> None:
+    """The script's default POD_SELECTOR must name a label the chart's
+    public-api pods actually carry -- #7's regression was a selector that
+    matched nothing a default chart install ever creates. Pinned as a
+    literal substring in both files rather than a live cluster query, per
+    the module docstring's no-terraform-binary / no-live-cluster
+    constraint."""
+    _require(DEPLOY_SCRIPT)
+    _require(CHART_DIR)
+    script_text = DEPLOY_SCRIPT.read_text()
+    assert "component=public-api" in script_text, (
+        f"expected the literal label value 'component=public-api' "
+        f"somewhere in {DEPLOY_SCRIPT.relative_to(REPO_ROOT)} (POD_SELECTOR's "
+        "default)"
+    )
+    chart_text = _chart_yaml_text()
+    assert chart_text is not None
+    assert '(dict "component" "public-api")' in chart_text, (
+        'expected the chart to call inherent.selectorLabels with '
+        '(dict "component" "public-api") somewhere -- that call is what '
+        "actually stamps app.kubernetes.io/component=public-api onto the "
+        "public-api pods the script's POD_SELECTOR must match"
+    )
+
+
+def test_dr_summary_says_hourly_not_nightly() -> None:
+    _require(DR_OUTPUTS_TF)
+    text = DR_OUTPUTS_TF.read_text()
+    assert "nightly" not in text.lower(), (
+        f"{DR_OUTPUTS_TF.relative_to(REPO_ROOT)}'s dr_summary must not say "
+        "\"nightly\" for the MinIO mirror -- the actual CronJob schedule is "
+        "hourly (docs/deploy/azure-dr-runbook.md, CHANGELOG.md); a stale "
+        "\"nightly\" claim here is exactly the doc/reality drift #18 caught"
+    )
+    assert "hourly" in text.lower(), (
+        f"expected {DR_OUTPUTS_TF.relative_to(REPO_ROOT)}'s dr_summary to "
+        "describe the MinIO mirror cadence as hourly"
+    )
+
+
+def test_trusted_proxies_rendered_with_tojson() -> None:
+    _require(PUBLIC_API_DEPLOYMENT)
+    text = PUBLIC_API_DEPLOYMENT.read_text()
+    assert "toJson" in text, (
+        f"expected {PUBLIC_API_DEPLOYMENT.relative_to(REPO_ROOT)} to render "
+        "TRUSTED_PROXIES via `toJson` (a JSON list, matching the app's "
+        "settings.py contract) rather than a bare `| quote`d comma string"
+    )
+
+
+def test_embedding_profile_defaults_to_tei() -> None:
+    values_text = _values_yaml_text()
+    assert values_text is not None, "charts/inherent/values.yaml is missing (#320)"
+    embedding_block = _top_level_block(values_text, "embedding")
+    assert re.search(r'profile:\s*"?tei"?\s*(#.*)?$', embedding_block, re.MULTILINE), (
+        "expected embedding.profile to default to \"tei\" in "
+        "charts/inherent/values.yaml -- azure_openai is not usable until "
+        "#311/PR #314 merges (see docs/deploy/azure.md)"
+    )
