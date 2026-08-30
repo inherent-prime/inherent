@@ -1,0 +1,36 @@
+# Production preset: zone-redundant HA + cross-region DR, full sizing.
+# terraform apply -var-file=envs/prod.tfvars.example
+
+environment = "prod"
+
+enable_ha      = true
+enable_dr      = true
+pg_geo_replica = false # geo-redundant backup already meets RPO/RTO; opt in for faster failover
+
+# Public ingress via ingress-nginx + cert-manager (Let's Encrypt) — cheapest default that
+# still terminates TLS at the edge. Swap to Application Gateway WAF_v2 for a managed WAF /
+# DDoS posture (higher cost, ~$325/mo vs ~$25/mo for the LB — see docs/deploy/azure.md TCO):
+#   ingress_profile = "appgw_waf"
+ingress_profile = "nginx"
+
+inherent_version = "0.6.0" # pinned release — never "latest" in prod
+
+aks_system_vm_size = "Standard_D2s_v5"
+aks_user_vm_size   = "Standard_D4s_v5"
+aks_user_min_count = 3
+aks_user_max_count = 6
+api_replicas_min   = 2
+api_replicas_max   = 6
+worker_replicas    = 2
+
+pg_sku           = "GP_Standard_D2ds_v5"
+pg_storage_mb    = 65536
+cosmos_mongo_sku = "M30"
+redis_sku        = "Standard"
+redis_family     = "C"
+redis_capacity   = 1
+weaviate_disk_gb = 64
+minio_disk_gb    = 128
+
+embedding_profile = "azure_openai"
+storage_profile   = "minio"

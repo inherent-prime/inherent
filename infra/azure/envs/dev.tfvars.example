@@ -1,0 +1,33 @@
+# Dev/eval preset: single-zone, no DR, small SKUs — cheapest way to stand up the full
+# cloud-native stack (still AKS + managed data services, not the single-VM Hetzner path).
+# terraform apply -var-file=envs/dev.tfvars.example
+
+environment = "dev"
+
+enable_ha      = false
+enable_dr      = false
+pg_geo_replica = false
+
+ingress_profile = "nginx"
+
+inherent_version = "0.6.0"
+
+aks_system_vm_size = "Standard_D2s_v5"
+aks_user_vm_size   = "Standard_D2s_v5"
+aks_user_min_count = 1
+aks_user_max_count = 2
+api_replicas_min   = 1
+api_replicas_max   = 2
+worker_replicas    = 1
+
+pg_sku           = "B_Standard_B2s"
+pg_storage_mb    = 32768
+cosmos_mongo_sku = "M10"
+redis_sku        = "Basic"
+redis_family     = "C"
+redis_capacity   = 0
+weaviate_disk_gb = 16
+minio_disk_gb    = 32
+
+embedding_profile = "azure_openai"
+storage_profile   = "minio"

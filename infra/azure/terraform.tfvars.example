@@ -1,0 +1,61 @@
+# Copy to terraform.tfvars and edit, or use one of envs/prod.tfvars.example /
+# envs/dev.tfvars.example directly with `-var-file=envs/prod.tfvars.example`.
+# Every field below is optional — shown at its default. See docs/deploy/azure.md
+# "Tuning & tweaking" for the full knob reference (defaults, effect, scale ceilings).
+
+location    = "eastus2"
+location_dr = "centralus" # only used when enable_dr = true
+
+resource_prefix = "inherent"
+environment     = "prod"
+tags = {
+  team = "platform"
+}
+
+# Profile knobs
+deployment_profile = "production"
+embedding_profile  = "azure_openai" # or "tei" — self-hosted fallback on AKS
+storage_profile    = "minio"        # only supported value today, see issue #329
+ingress_profile     = "nginx"        # or "appgw_waf" for App Gateway WAF_v2
+
+# HA / DR — see envs/prod.tfvars.example and envs/dev.tfvars.example for the two
+# supported presets.
+enable_ha      = true
+enable_dr      = true
+pg_geo_replica = false
+
+# Enterprise BYO-VNet — leave existing_vnet_id empty to have modules/network create one.
+existing_vnet_id         = ""
+existing_subnet_ids      = {}
+private_cluster_enabled  = false
+authorized_ip_ranges     = [] # restrict this in production, e.g. ["203.0.113.0/24"]
+enable_private_endpoints = true
+
+# Sizing
+aks_system_vm_size = "Standard_D2s_v5"
+aks_user_vm_size   = "Standard_D4s_v5"
+aks_user_min_count = 3
+aks_user_max_count = 6
+api_replicas_min   = 2
+api_replicas_max   = 6
+worker_replicas    = 2
+pg_sku             = "GP_Standard_D2ds_v5"
+pg_storage_mb      = 65536
+cosmos_mongo_sku   = "M30"
+redis_sku          = "Standard"
+redis_family       = "C"
+redis_capacity     = 1
+weaviate_disk_gb   = 64
+minio_disk_gb      = 128
+
+# App
+inherent_version   = "0.6.0" # pin a real release — never "latest" in prod
+dns_zone_name       = ""      # e.g. "example.com" (Azure DNS zone), or leave empty and set api_hostname
+dns_record          = ""      # e.g. "api" -> api.example.com
+api_hostname        = ""      # e.g. "api.example.com" when DNS is managed outside Azure DNS
+letsencrypt_email   = "ops@example.com"
+
+openai_embedding_model = "text-embedding-3-small"
+openai_embedding_dim   = 1536
+openai_sku             = "S0"
+openai_capacity        = 50

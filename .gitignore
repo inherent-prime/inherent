@@ -18,7 +18,7 @@ htmlcov/
 dist/
 build/
 
-data/
+/data/
 uploads/
 playwright-report/
 test-results/
