@@ -213,6 +213,20 @@ class Settings(BaseSettings):
     # Port for Prometheus metrics server (worker mode only; standalone uses /metrics route)
     metrics_port: int = Field(9090, alias="METRICS_PORT")
 
+    # --- Redaction (#307) ---
+    # Extra self-hosted regex patterns for the redact_turns activity
+    # (src/temporal/activities/redact.py), applied IN ADDITION to the
+    # built-in detector set in src/services/redaction_patterns.py. Each
+    # string is compiled as its own regex and matches are replaced with
+    # "[redacted:custom]" -- lets a self-hoster catch an internal or
+    # provider-specific credential shape the built-in patterns don't know
+    # about without a code change. Empty by default (no extra patterns).
+    # NOTE for future slices: this block is deliberately append-only -- three
+    # other redaction-related settings land here later; keep new fields
+    # inside this delimited block rather than scattering them.
+    redaction_patterns_extra: list[str] = Field(default=[], alias="REDACTION_PATTERNS_EXTRA")
+    # --- End Redaction (#307) ---
+
     @property
     def resolved_mq_max_concurrent(self) -> int:
         """Effective MQ consume-loop concurrency bound.

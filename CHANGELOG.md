@@ -5,6 +5,32 @@ All notable changes to Inherent are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`redact_turns` Temporal activity: non-retryable, per-turn credential
+  redaction ahead of conversation ingestion (#307).** Conversations
+  captured from an assistant contain credentials by default — API keys
+  pasted for debugging, connection strings, bearer tokens, private keys —
+  and once embedded that material is in the vector store, in search
+  results, and in every agent context that retrieves it, with no remedy
+  after the fact. `services/inh-ingestion-svc/src/services/
+  redaction_patterns.py` adds a pattern-based detector registry (API-key
+  prefixes, JWTs, PEM private-key blocks, connection strings with embedded
+  credentials, and a high-entropy-token catch-all), extensible by
+  self-hosters via the new `REDACTION_PATTERNS_EXTRA` setting.
+  `src/temporal/activities/redact.py`'s `redact_turns` activity applies it
+  per turn: a turn whose own redaction pass raises is dropped (not the
+  whole batch) and audited to the new `redaction_audit` table (migration
+  `019_redaction_audit.sql`, `DatabaseService.record_redaction_failure`) —
+  by construction that audit row can never carry raw turn text, only
+  `turn_id`, which detector fired, and an error class/message. Two
+  independent non-retryable guards (`ApplicationError(non_retryable=True)`
+  plus the documented caller contract of `RetryPolicy(maximum_attempts=1)`)
+  keep a redaction failure from ever being retried, since retrying risks
+  storing the raw turn on a later attempt. Ships standalone and inert —
+  wired into no workflow yet, changing no existing pipeline's behaviour —
+  ahead of the conversation-ingestion workflow (#306) that will consume it.
+
 ### Changed
 
 - **Retrieval-eval golden corpus grown from 13 to 50 gated queries, closing
