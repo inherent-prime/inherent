@@ -46,6 +46,17 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Fixed
 
+- **Documents stored before #208 keep stale `text/markdown` content_type for
+  files like Dockerfile/Makefile/README/.gitignore/archive.tar.gz — backfilled
+  to `text/plain` to match the #208 fix (#288).** #208 changed the MCP fallback
+  for extensionless/unregistered-extension uploads from `text/markdown` to
+  `text/plain`, but only affected new uploads — existing documents retained the
+  wrong label, so a caller filtering `content_type = "text/markdown"` still got
+  Dockerfiles and tarballs. The correct type is now derived from the filename
+  for all affected documents via `scripts/backfill_stale_content_type.py`, which
+  syncs both Postgres and Weaviate in one pass. No re-indexing is required:
+  both types use the same extractor and chunking hint.
+
 - **Dead-letter rows left at `pending` for a document that later succeeded no
   longer read as broken, and can no longer replay a stale payload (#287).**
   #249 made a successful ingestion resolve that document's dead-letter rows,
