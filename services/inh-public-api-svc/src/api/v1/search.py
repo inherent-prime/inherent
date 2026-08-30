@@ -24,9 +24,8 @@ from src.services.auth import ResolvedAuth, resolve_workspace_search
 from src.services.database import get_database
 from src.services.eval_capture import (
     capture_enabled,
-    new_event_id,
+    capture_search_event,
     purge_expired_events,
-    record_query_event,
 )
 from src.services.quality_gate import evaluate as evaluate_quality
 from src.services.search import SearchService, get_search_service
@@ -395,18 +394,21 @@ async def search_documents(
         #
         # advertise the id only if the row is durable: no id means "not
         # captured", which a caller can act on, whereas a dangling id is
-        # indistinguishable from a good one until it 404s. record_query_event
+        # indistinguishable from a good one until it 404s. capture_search_event
         # never raises, so capture still cannot fail a search.
+        #
+        # capture_search_event (#241) is the SAME helper MCP's search_documents
+        # / search_memory call for their own single-workspace search — the
+        # mint-record-stamp sequence lives in exactly one place now, so a field
+        # added to capture in the future cannot land on REST without MCP.
         if capture_enabled(workspace_id):
-            event_id = new_event_id()
-            if await record_query_event(
-                event_id=event_id,
+            await capture_search_event(
+                transport="rest",
                 workspace_id=workspace_id,
                 user_id=auth.key_info.user_id,
                 request=request,
                 response=response,
-            ):
-                response.event_id = event_id
+            )
             # Retention purge is the slow half and nobody holds a handle to it,
             # so it stays write-behind.
             background_tasks.add_task(purge_expired_events, workspace_id)

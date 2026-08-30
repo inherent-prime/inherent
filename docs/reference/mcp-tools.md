@@ -108,10 +108,10 @@ parameters below.
 
 | Tool | HTTP | Parameters | Purpose | REST twin |
 | --- | --- | --- | --- | --- |
-| `search_documents` | ✅ | `query` (required); `workspace_id`, `limit` (10), `min_score` (0.0), `document_ids[]`, `search_mode` (`semantic`/`hybrid`/`keyword`), `alpha` (0.7) | Search chunks; with no `workspace_id`, fans out across every workspace the key is authorized for (its one bound workspace if scoped, otherwise every workspace its owner owns) | `POST /v1/search` |
-| `search_memory` | ❌ | same as `search_documents` | Memory-primitive alias — identical behavior | `POST /v1/search` |
-| `get_citations` | ❌ | same as `search_documents` | Search returning claim-level citation objects (spans, score, provenance, freshness) | `POST /v1/search` |
-| `report_feedback` | ❌ | `event_id`, `verdict` (`answered`/`partial`/`not_relevant`) required; `useful_chunk_ids[]`, `note` | Record a verdict on a captured search event; builds the workspace eval set | `POST /v1/evals/feedback` |
+| `search_documents` | ✅ | `query` (required); `workspace_id`, `limit` (10), `min_score` (0.0), `document_ids[]`, `search_mode` (`semantic`/`hybrid`/`keyword`), `alpha` (0.7) | Search chunks; with no `workspace_id`, fans out across every workspace the key is authorized for (its one bound workspace if scoped, otherwise every workspace its owner owns). A single-workspace call also mints an eval capture event and returns its id as `event_id` (#241) — pass it to `report_feedback` | `POST /v1/search` |
+| `search_memory` | ❌ | same as `search_documents` | Memory-primitive alias — identical behavior, including `event_id` capture | `POST /v1/search` |
+| `get_citations` | ❌ | same as `search_documents` | Search returning claim-level citation objects (spans, score, provenance, freshness). Retrieves through the same shared path as `search_documents`, but does NOT mint an eval capture event — capture is opt-in at that call site (#241 review), and get_citations has never returned an `event_id` an agent could give feedback against | `POST /v1/search` |
+| `report_feedback` | ❌ | `event_id`, `verdict` (`answered`/`partial`/`not_relevant`) required; `useful_chunk_ids[]`, `note` | Record a verdict on a captured search event (the `event_id` from `search_documents` / `search_memory`, or from `POST /v1/search`); builds the workspace eval set | `POST /v1/evals/feedback` |
 | `get_retrieval_health` | ✅ | `workspace_id` (required) | Workspace retrieval scorecard | `GET /v1/evals/scorecard` |
 
 ### Read (`read` permission)
@@ -180,3 +180,30 @@ reintroduced through the schema). Omit the field; do not pass
   actually covered — check it rather than assuming the prose summary means
   every workspace you own was searched, which is only true for a user-scoped
   key with no narrower request.
+- `search_documents` / `search_memory`'s structured payload also carries
+  `event_id` (#241) — the same handle `POST /v1/search`'s `SearchResponse`
+  returns, minted and recorded through the same shared capture path as REST.
+  It is `null` for a multi-workspace search (no single response to attribute
+  one event to, matching REST's own single-workspace-only capture scope) and
+  whenever eval capture is disabled for the workspace or the write failed.
+  Pass a non-null `event_id` to `report_feedback` to close the loop; see
+  [ADR 0003](../adr/0003-traffic-mined-retrieval-evals.md) for the flywheel
+  this feeds.
+- **Capture is opt-in at the shared retrieval call site, not implicit for
+  every caller of it (#241 review).** `search_documents` / `search_memory`
+  request capture explicitly; `get_citations` shares the identical retrieval
+  code path (`_run_search`) but does not, so it never mints an
+  `eval_query_events` row — an event get_citations could never surface an
+  `event_id` for, and that no agent could therefore ever attach feedback to,
+  would just double-count that query in MCP analytics.
+- **`quality_verdict` is always `NULL` on `transport='mcp'` captured rows.**
+  REST's `POST /v1/search` runs an adaptive retrieval quality gate and a
+  single bounded fallback retry before capturing (`quality_verdict` populated,
+  and the captured results/latency are the fallback's when one ran, see
+  `docs/developer/search-sequence.md`); MCP's `search_documents` /
+  `search_memory` call `SearchService.search` directly, with no quality gate
+  on that path at all. The two transports therefore capture different
+  *inputs* for the same query even though they write through the identical
+  `capture_search_event` helper and record field list. Segmenting eval
+  analytics by `quality_verdict` must account for this — every `mcp` row will
+  read as ungated, never as a fallback.

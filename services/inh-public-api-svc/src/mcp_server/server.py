@@ -118,6 +118,7 @@ from src.services.auth import describe_workspace_denial, get_authorized_workspac
 from src.services.compensation import mark_document_failed_with_retry
 from src.services.database import get_database
 from src.services.document_intake import intake_document
+from src.services.eval_capture import capture_enabled, capture_search_event, purge_expired_events
 from src.services.eval_feedback import EventNotFoundError, submit_feedback
 from src.services.eval_scorecard import build_scorecard
 from src.services.lineage import build_lineage
@@ -401,40 +402,84 @@ async def _get_workspace_ids(
 async def _run_search(
     key_info: APIKeyInfo,
     arguments: dict,
-) -> tuple[list, list[str], str | None]:
+    *,
+    capture: bool = False,
+) -> tuple[list, list[str], str | None, str | None]:
     """Shared retrieval used by search_documents/search_memory/get_citations.
 
     Builds the SearchRequest via the shared ``build_search_request`` helper (so
     it matches REST exactly, #14), fans out over the authorised workspaces, and
-    returns (results, workspaces_searched, error). ``results`` items are
-    ``(workspace_id, SearchResult)`` tuples sorted by score and truncated to the
-    requested limit. ``workspaces_searched`` is the ACTUAL set queried — not
-    the caller's ``workspace_id`` argument, which is often absent — so callers
-    can state real coverage instead of assuming "all workspaces" (#138
+    returns (results, workspaces_searched, error, event_id). ``results`` items
+    are ``(workspace_id, SearchResult)`` tuples sorted by score and truncated to
+    the requested limit. ``workspaces_searched`` is the ACTUAL set queried —
+    not the caller's ``workspace_id`` argument, which is often absent — so
+    callers can state real coverage instead of assuming "all workspaces" (#138
     follow-up: a workspace-scoped key silently narrows this to one, and the
     caller must be able to see that, not just guess it from an unqualified
     "across all workspaces" claim).
+
+    Evals capture (#241, and #241 review finding 1): capture is OPT-IN via the
+    ``capture`` keyword-only parameter, default ``False`` — it is never an
+    implicit side effect of calling this shared retrieval helper. Only when a
+    SINGLE-workspace search is run with ``capture=True`` does it mint an eval
+    capture event through ``capture_search_event`` — the exact same shared
+    helper ``src/api/v1/search.py`` calls for REST — so the two transports
+    capture through one code path instead of two independently-written ones
+    that could drift. ``_handle_search`` (search_documents / search_memory)
+    passes ``capture=True`` explicitly: report_feedback's schema promises an
+    event_id "from the search response you are judging", and that promise is
+    a search a caller can give feedback on. ``_handle_get_citations`` does
+    NOT set it — get_citations is a citation *view* over the same retrieval,
+    not a user-facing search result an agent judges, and it has never
+    returned an event_id, so a minted event would be an orphan no agent could
+    ever submit feedback against (before this fix, capture ran unconditionally
+    here and get_citations silently double-counted every MCP query in
+    analytics while depressing MCP feedback-rate metrics). A multi-workspace
+    fan-out never mints an event regardless of ``capture``, matching REST
+    (which only ever captures its own single-workspace branch): there is no
+    one response to attribute a multi-workspace event to. ``event_id`` is
+    ``None`` whenever capture wasn't requested, wasn't single-workspace,
+    capture is disabled, or the write failed — the caller decides
+    whether/how to surface it.
     """
     requested_workspace_id = arguments.get("workspace_id")
     query = arguments.get("query", "")
     if not query:
-        return [], [], "Error: Query is required"
+        return [], [], "Error: Query is required", None
 
     workspace_ids, error = await _get_workspace_ids(key_info, requested_workspace_id)
     if error:
-        return [], [], error
+        return [], [], error, None
 
     request = build_search_request(arguments)
     search_service: SearchService = await get_search_service()
 
     tagged: list[tuple[str, object]] = []
+    event_id: str | None = None
+    single_workspace = len(workspace_ids) == 1
     for workspace_id in workspace_ids:
         response = await search_service.search(workspace_id, key_info.user_id, request)
         for result in response.results:
             tagged.append((workspace_id, result))
 
+        if capture and single_workspace and capture_enabled(workspace_id):
+            event_id = await capture_search_event(
+                transport="mcp",
+                workspace_id=workspace_id,
+                user_id=key_info.user_id,
+                request=request,
+                response=response,
+            )
+            # Retention purge is the slow half of capture (#240) and MCP has
+            # no BackgroundTasks-style queue to defer it onto the way REST
+            # does — awaited here rather than fired-and-forgotten so there is
+            # no unmanaged task whose exceptions/lifecycle nothing owns.
+            # purge_expired_events never raises (best-effort by contract), so
+            # this cannot turn into a search failure.
+            await purge_expired_events(workspace_id)
+
     tagged.sort(key=_search_rank_key)
-    return tagged[: request.limit], workspace_ids, None
+    return tagged[: request.limit], workspace_ids, None, event_id
 
 
 def _coverage_note(workspace_ids: list[str]) -> str:
@@ -477,8 +522,17 @@ async def _handle_search(key_info: APIKeyInfo, arguments: dict) -> list[TextCont
     workspace is correct behavior, but claiming "across all workspaces" while
     only one was searched is a false affirmation an agent has no way to catch
     from prose alone. ``workspaces_searched`` gives it a programmatic check.
+
+    ``event_id`` (#241) is the capture handle ``report_feedback``'s schema
+    promises: "pass the event_id from the search response." It is ``None``
+    for a multi-workspace search or when capture is disabled/failed — the
+    same shape REST's ``SearchResponse.event_id`` already has, so an agent
+    reading either transport's payload sees the identical contract.
+    ``_run_search`` is called with ``capture=True`` explicitly (#241 review
+    finding 1) — this is the tool that makes capture's opt-in decision, not
+    a default any caller inherits silently.
     """
-    tagged, workspace_ids, error = await _run_search(key_info, arguments)
+    tagged, workspace_ids, error, event_id = await _run_search(key_info, arguments, capture=True)
     if error:
         return [TextContent(type="text", text=error)]
 
@@ -487,7 +541,12 @@ async def _handle_search(key_info: APIKeyInfo, arguments: dict) -> list[TextCont
     if not tagged:
         return _structured(
             f"No results found for: {query}{note}",
-            {"query": query, "results": [], "workspaces_searched": workspace_ids},
+            {
+                "query": query,
+                "results": [],
+                "workspaces_searched": workspace_ids,
+                "event_id": event_id,
+            },
         )
 
     summary = f"Found {len(tagged)} results for '{query}'{note}:\n\n"
@@ -514,7 +573,12 @@ async def _handle_search(key_info: APIKeyInfo, arguments: dict) -> list[TextCont
 
     return _structured(
         summary.rstrip(),
-        {"query": query, "results": structured_results, "workspaces_searched": workspace_ids},
+        {
+            "query": query,
+            "results": structured_results,
+            "workspaces_searched": workspace_ids,
+            "event_id": event_id,
+        },
     )
 
 
@@ -524,8 +588,21 @@ async def _handle_get_citations(key_info: APIKeyInfo, arguments: dict) -> list[T
     Carries ``workspaces_searched`` in the structured payload for the same
     reason ``_handle_search`` does (#138 follow-up): the caller must be able
     to verify actual coverage, not infer it from result count alone.
+
+    ``_run_search`` is called WITHOUT ``capture=True`` (#241 review finding 1):
+    get_citations is a citation *view* over the same retrieval, not a
+    user-facing search an agent can judge, and it has never returned an
+    ``event_id``. report_feedback is documented as judging a *search you got
+    back an event_id for* — minting one here that this tool never surfaces
+    would be an orphan `eval_query_events` row no agent could ever attach
+    feedback to, double-counting this query in MCP analytics for nothing.
+    (Before this fix, capture ran unconditionally inside ``_run_search`` and
+    every get_citations call silently did exactly that.) Returning an
+    ``event_id`` from get_citations at all remains a separate, undiscussed
+    product decision, not part of #241's scope (only search_documents /
+    search_memory's payload is in the issue's DoD).
     """
-    tagged, workspace_ids, error = await _run_search(key_info, arguments)
+    tagged, workspace_ids, error, _event_id = await _run_search(key_info, arguments)
     if error:
         return [TextContent(type="text", text=error)]
 
@@ -1179,8 +1256,9 @@ _TOOLS: dict[str, ToolDef] = {
     "search_documents": ToolDef(
         description="Search for relevant documents and chunks using semantic, hybrid, or "
         "keyword search. Omit workspace_id to search every workspace your key is authorized "
-        "for (a workspace-scoped key: exactly its bound workspace). Requires 'search' "
-        "permission.",
+        "for (a workspace-scoped key: exactly its bound workspace). A single-workspace search "
+        "returns an event_id in the structured result -- pass it to report_feedback afterwards. "
+        "Requires 'search' permission.",
         input_schema=_SEARCH_INPUT_SCHEMA,
         permission="search",
         handler=_handle_search,
@@ -1188,7 +1266,8 @@ _TOOLS: dict[str, ToolDef] = {
     "search_memory": ToolDef(
         description="Memory primitive: retrieve evidence chunks for a query (canonical "
         "agent search). Same parameters and behaviour as search_documents; returns "
-        "structured results with scores and provenance. Requires 'search' permission.",
+        "structured results with scores, provenance, and (for a single-workspace search) "
+        "an event_id for report_feedback. Requires 'search' permission.",
         input_schema=_SEARCH_INPUT_SCHEMA,
         permission="search",
         handler=_handle_search,
