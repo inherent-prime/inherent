@@ -1,0 +1,73 @@
+{{- if .Values.temporal.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: temporal
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inherent.labels" . | nindent 4 }}
+    {{- include "inherent.selectorLabels" (dict "component" "temporal") | nindent 4 }}
+spec:
+  # 1 replica by default; modules/apps sets this to 2 via `--set
+  # temporal.server.replicas=2` when enable_ha=true (root var). NOTE: this
+  # runs all Temporal services (frontend/history/matching/worker) in one
+  # process per replica — adequate redundancy at 20 QPS scale; splitting
+  # into per-service Deployments is the documented next scale ceiling (see
+  # docs/deploy/azure.md) if history/matching becomes the bottleneck.
+  replicas: {{ .Values.temporal.server.replicas }}
+  selector:
+    matchLabels:
+      {{- include "inherent.selectorLabels" (dict "component" "temporal") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "inherent.labels" . | nindent 8 }}
+        {{- include "inherent.selectorLabels" (dict "component" "temporal") | nindent 8 }}
+        {{- with .Values.serviceAccount.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "inherent.serviceAccountName" . }}
+      containers:
+        - name: temporal
+          image: "{{ .Values.temporal.server.image.repository }}:{{ .Values.temporal.server.image.tag }}"
+          ports:
+            - name: grpc
+              containerPort: 7233
+          env:
+            - name: DB
+              value: "postgres12"
+            - name: DB_PORT
+              value: {{ .Values.temporal.postgres.port | quote }}
+            - name: POSTGRES_SEEDS
+              value: {{ required "temporal.postgres.host is required" .Values.temporal.postgres.host | quote }}
+            - name: POSTGRES_USER
+              value: {{ required "temporal.postgres.user is required" .Values.temporal.postgres.user | quote }}
+            - name: POSTGRES_PWD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "temporal.postgres.passwordSecretRef.name is required" .Values.temporal.postgres.passwordSecretRef.name }}
+                  key: {{ .Values.temporal.postgres.passwordSecretRef.key }}
+            - name: DBNAME
+              value: {{ .Values.temporal.postgres.dbName | quote }}
+            - name: VISIBILITY_DBNAME
+              value: {{ .Values.temporal.postgres.visibilityDbName | quote }}
+            - name: DEFAULT_NAMESPACE
+              value: "default"
+            # Schema must already exist — this is the plain server image
+            # (not auto-setup); the schema-setup hook Job runs first.
+            - name: SKIP_SCHEMA_SETUP
+              value: "true"
+          resources:
+            {{- toYaml .Values.temporal.server.resources | nindent 12 }}
+          readinessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 30
+            periodSeconds: 15
+{{- end }}

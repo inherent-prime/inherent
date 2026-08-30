@@ -32,3 +32,8 @@ graphify-out/
 # MkDocs build output
 site/
 .memory/
+
+# Terraform working dirs (any root/module) — state and providers never belong in git.
+**/.terraform/
+*.tfstate
+*.tfstate.*

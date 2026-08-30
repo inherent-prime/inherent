@@ -1,0 +1,301 @@
+# charts/inherent — issue #323. Every knob below is commented; this file
+# doubles as reference docs (docs/deploy/azure.md links back here).
+#
+# Env var names/values are copied EXACTLY from docker-compose.yml /
+# docker-compose.release.yml — see .memory/azure-build-spec.md "Helm chart
+# env contract". Do not rename an env var here without updating that spec
+# and the app's settings.py source of truth.
+#
+# REQUIRED values (no safe default — templates use the `required` function,
+# so `helm template`/`install` FAILS instead of silently booting the public
+# API on dev localhost defaults, per the survey finding in the build spec):
+#   secrets.postgres.name / secrets.postgres.key
+#   secrets.weaviate.name / secrets.weaviate.key
+#   secrets.ingestion.name / secrets.ingestion.key
+#   embedding.serviceUrl, embedding.modelId (when embedding.profile=azure_openai)
+# All of the above are wired in by modules/apps (helm_release `set`/values
+# from TF module outputs), not hand-edited here in normal operation.
+
+image:
+  # GHCR registry hosting the two custom Inherent images (public-api-svc,
+  # ingestion-svc). Upstream OSS images (weaviate, minio, temporal, TEI) are
+  # pinned separately per-component below, matching docker-compose*.yml.
+  registry: ghcr.io/inherent-prime
+  # Pinned release tag. Root tfvar `inherent_version` feeds this via
+  # modules/apps' helm_release `set` — must NOT be "latest" in prod
+  # (guard test: envs/prod.tfvars.example inherent_version != "latest").
+  tag: "0.6.0"
+  pullPolicy: IfNotPresent
+
+# Informational only — modules/apps creates this namespace via
+# kubernetes_namespace and installs this chart's helm_release into it
+# (helm_release.namespace = "inherent"). Chart templates use
+# .Release.Namespace, not this value, so it must match at the call site.
+namespace: inherent
+
+serviceAccount:
+  create: true
+  name: inherent
+  # Workload identity (issue #323): modules/apps sets this from
+  # modules/security's workload_identity_client_id output so pods can auth
+  # to Key Vault / Blob via federated OIDC credential instead of secrets.
+  annotations: {}
+    # azure.workload.identity/client-id: "<uuid, set by modules/apps>"
+  # Required label for AKS's workload-identity webhook to inject the token.
+  podLabels:
+    azure.workload.identity/use: "true"
+
+# --- public-api (inh-public-api) ----------------------------------------
+publicApi:
+  enabled: true
+  containerPort: 8080
+  replicas:
+    min: 2 # api_replicas_min — HPA floor
+    max: 6 # api_replicas_max — HPA ceiling; raise to scale past ~20 QPS
+  autoscaling:
+    targetCPUUtilizationPercentage: 70
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits: { cpu: "1", memory: 1Gi }
+  podDisruptionBudget:
+    minAvailable: 1
+  probes:
+    liveness: { path: /health, initialDelaySeconds: 15, periodSeconds: 10, timeoutSeconds: 5, failureThreshold: 3 }
+    readiness: { path: /health/ready, initialDelaySeconds: 15, periodSeconds: 10, timeoutSeconds: 5, failureThreshold: 3 }
+  env:
+    # SERVICE_MODE=both runs API + MCP server in one process (compose parity).
+    serviceMode: both
+    mcpPort: 8001
+    # ENVIRONMENT=production — never "development" in this chart; that
+    # default is what let the public API boot on dev localhost defaults
+    # (survey finding this chart's `required` values guard against).
+    environment: production
+    rateLimitEnabled: true # RATE_LIMIT_ENABLED — multi-replica correctness needs REDIS_URL set (see secrets.redis below)
+    enableHsts: true # ENABLE_HSTS
+    logLevel: INFO
+    # TRUSTED_PROXIES — CIDR of the ingress controller's pod network, so the
+    # app trusts X-Forwarded-For from it. Environment-specific; modules/apps
+    # sets this from the AKS pod CIDR (Azure CNI overlay pod address space).
+    trustedProxies: ""
+    mongodbDbName: main # MONGODB_DB_NAME
+    s3Bucket: inherent-documents # AWS_S3_BUCKET
+    s3Region: us-east-1 # AWS_S3_REGION
+
+# --- ingestion worker (inh-ingestion) ------------------------------------
+ingestion:
+  enabled: true
+  apiPort: 8000
+  metricsPort: 9090
+  replicas: 2 # worker_replicas — Temporal + consumer-group fan-out makes >1 replica safe
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits: { cpu: "1", memory: 1Gi }
+  podDisruptionBudget:
+    minAvailable: 1
+  probe:
+    path: /health
+    initialDelaySeconds: 15
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+  env:
+    logLevel: INFO
+    mongodbDbName: main
+    s3Bucket: inherent-documents
+    mqBackend: redis
+    storageBackend: s3
+    temporal:
+      enabled: true
+      host: "temporal:7233" # TEMPORAL_HOST — in-namespace Service name (compose parity)
+      namespace: default # TEMPORAL_NAMESPACE
+      taskQueue: document-ingestion # TEMPORAL_TASK_QUEUE
+      auditNamespace: audit # TEMPORAL_AUDIT_NAMESPACE
+
+# --- migrate hook Job (ingestion image, SERVICE_MODE=migrate) -----------
+migrate:
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
+
+# --- weaviate (vector store) ---------------------------------------------
+weaviate:
+  enabled: true
+  image:
+    repository: semitechnologies/weaviate
+    tag: "1.27.0" # PINNED — do not float; see build spec "Helm chart env contract"
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits: { cpu: "2", memory: 4Gi }
+  persistence:
+    # Azure Disk CSI storage class. "managed-csi-premium" (Premium_LRS) is
+    # the AKS built-in class; it is NOT the same as Premium_ZRS. Set
+    # createZrsStorageClass=true to also render a custom StorageClass using
+    # the Premium_ZRS Azure Disk SKU (zone-redundant) and point
+    # storageClassName at it — needed for the enable_ha prod profile.
+    storageClassName: managed-csi-premium
+    createZrsStorageClass: false
+    zrsStorageClassName: managed-csi-premium-zrs
+    sizeGi: 64 # weaviate_disk_gb
+  auth:
+    # AUTHENTICATION_APIKEY_* — same shape as docker-compose.yml. Key comes
+    # from secrets.weaviate (required, see top of file).
+    users: inherent@local
+  # backup-azure module: DR snapshots to Blob (GRS). Gated on enable_dr.
+  backup:
+    enabled: false
+    container: weaviate-backups # BACKUP_AZURE_CONTAINER
+    connectionStringSecretRef:
+      name: "" # Secret holding AZURE_STORAGE_CONNECTION_STRING, set by modules/apps when dr.enabled
+      key: AZURE_STORAGE_CONNECTION_STRING
+
+# --- minio (S3-compatible object storage) ---------------------------------
+minio:
+  enabled: true
+  image:
+    repository: minio/minio
+    # Pinned MinIO release tag (compose uses no explicit minio service today
+    # — Azure prod profile is the first place MinIO runs as its own
+    # workload; pin per spec's "pinned minio/minio release tag").
+    tag: "RELEASE.2024-10-13T13-34-11Z"
+  # `mc` client image for the bucket-init Job and the mirror CronJob — pinned
+  # alongside the server image (same upstream release train).
+  mcImage:
+    repository: minio/mc
+    tag: "RELEASE.2024-10-08T09-37-26Z"
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits: { cpu: "1", memory: 2Gi }
+  persistence:
+    storageClassName: managed-csi-premium
+    sizeGi: 128 # minio_disk_gb
+  bucket: inherent-documents # AWS_S3_BUCKET — created by the bucket-init Job via `mc`
+  # Nightly mirror to Azure Blob (GRS) for DR. Gated on enable_dr.
+  #
+  # DEVIATION from build-spec wording ("nightly `mc mirror` minio→azure
+  # blob"): MinIO's `mc` client speaks the S3 API on both ends and cannot
+  # target Azure Blob directly (no S3-compatible endpoint on Blob storage).
+  # rclone natively supports both S3 (MinIO) and azureblob backends, so the
+  # mirror CronJob uses `rclone sync` instead — see
+  # templates/minio/mirror-cronjob.yaml for the full rationale.
+  mirror:
+    enabled: false
+    schedule: "5 * * * *" # hourly at :05 — object-storage RPO must meet the <=1h DR target (#325)
+    rcloneImage:
+      repository: rclone/rclone
+      tag: "1.67"
+    azureBlob:
+      container: "" # destination Blob container name (modules/data output), set by modules/apps when dr.enabled
+      connectionStringSecretRef:
+        name: ""
+        key: AZURE_STORAGE_CONNECTION_STRING
+
+# --- temporal (self-hosted workflow engine, against PG Flexible) ---------
+temporal:
+  enabled: true
+  server:
+    image:
+      repository: temporalio/server
+      tag: "1.24.2" # PINNED — NOT temporalio/auto-setup; schema/namespace setup is explicit (below), matching prod best practice over compose's auto-setup shortcut
+    # 2 replicas when enable_ha; 1 otherwise (dev/cost-floor profile).
+    replicas: 1
+    resources:
+      requests: { cpu: 250m, memory: 512Mi }
+      limits: { cpu: "1", memory: 1Gi }
+  adminTools:
+    image:
+      repository: temporalio/admin-tools
+      tag: "1.24.2-tctl-1.18.1-cli-1.0.0" # PINNED, matches docker-compose.yml temporal-init
+  namespaces:
+    # Registered by the namespace-register hook Job. "default" for
+    # document-ingestion workflows, "audit" for the audit-log worker
+    # (mirrors docker-compose.yml's temporal-init describe-before-register
+    # guard rails — see templates/temporal/namespace-register-job.yaml).
+    - default
+    - audit
+  retentionDays: 3 # matches docker-compose.yml's `--retention 3`
+  # Self-hosted temporalio/server (not auto-setup) needs its PG connection
+  # as discrete fields (host/user/password), not a DSN — separate from
+  # secrets.postgres (which holds public-api/ingestion's DATABASE_URL).
+  # Same PG Flexible Server, different databases (dbName / visibilityDbName)
+  # per build spec: "separate temporal + temporal_visibility databases".
+  postgres:
+    host: "" # REQUIRED — modules/apps sets this from modules/data's pg_fqdn
+    port: 5432
+    user: "" # REQUIRED — PG admin/app user with CREATE DATABASE rights (schema-setup Job creates temporal + temporal_visibility)
+    passwordSecretRef:
+      name: "" # REQUIRED
+      key: POSTGRES_PASSWORD
+    dbName: temporal
+    visibilityDbName: temporal_visibility
+
+# --- embeddings ------------------------------------------------------------
+embedding:
+  # "azure_openai" (default, cloud-native) | "tei" (self-hosted fallback,
+  # non-default — see modules/ai and #311/PR #314 dependency note).
+  profile: azure_openai
+  # EMBEDDING_SERVICE_URL — REQUIRED when profile=azure_openai. Set by
+  # modules/apps from modules/ai's `openai_endpoint` output. The app's
+  # openai_compatible provider (PR #314) appends "/v1/embeddings" itself.
+  serviceUrl: ""
+  # EMBEDDING_MODEL_ID — REQUIRED when profile=azure_openai (Azure OpenAI
+  # deployment name, from modules/ai's embedding_deployment_name output).
+  # For profile=tei this is the HF model id served by the TEI sidecar.
+  modelId: ""
+  dim: 1536 # EMBEDDING_DIM — must match the deployed model (text-embedding-3-small=1536)
+  tei:
+    image:
+      repository: ghcr.io/huggingface/text-embeddings-inference
+      tag: cpu-1.6
+    modelId: BAAI/bge-small-en-v1.5
+    resources:
+      requests: { cpu: "1", memory: 2Gi }
+      limits: { cpu: "2", memory: 4Gi }
+
+# --- secrets (created OUTSIDE this chart, by modules/apps kubernetes_secret
+# resources sourced from Key Vault via TF) ---------------------------------
+# This chart only ever references Secret *names* + *keys* via secretKeyRef —
+# it never creates or inlines secret values itself.
+secrets:
+  postgres:
+    name: "" # REQUIRED — Secret name holding DATABASE_URL
+    key: DATABASE_URL
+  mongodb:
+    name: "" # Secret name holding MONGODB_URI (Cosmos vCore mongodb+srv connection string)
+    key: MONGODB_URI
+  weaviate:
+    name: "" # REQUIRED — Secret name holding WEAVIATE_API_KEY
+    key: WEAVIATE_API_KEY
+  redis:
+    name: "" # Secret name holding REDIS_URL (rediss://:<key>@<host>:6380/0 — Azure Cache TLS)
+    key: REDIS_URL
+  s3:
+    name: "" # Secret name holding MinIO root credentials, consumed as AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY
+    accessKeyField: MINIO_ROOT_USER
+    secretKeyField: MINIO_ROOT_PASSWORD
+  ingestion:
+    name: "" # REQUIRED — Secret name holding INGESTION_API_KEY
+    key: INGESTION_API_KEY
+  embeddingApiKey:
+    name: "" # Secret name holding EMBEDDING_API_KEY (Azure OpenAI primary key, from modules/ai's key_kv_secret)
+    key: EMBEDDING_API_KEY
+
+# --- NetworkPolicies -------------------------------------------------------
+networkPolicy:
+  enabled: true
+  ingressControllerNamespace: ingress-nginx
+  dnsNamespace: kube-system
+  # Egress CIDRs allowed for pods that must reach external Azure PaaS
+  # (PG Flexible, Cosmos vCore, Azure Cache for Redis, Azure OpenAI, Key
+  # Vault CSI). Default is open (these services aren't in the cluster's pod
+  # CIDR so this doesn't grant intra-cluster access); tighten to the
+  # data/private-endpoint subnet CIDR in enterprise/BYO-VNet mode
+  # (existing_subnet_ids.data from the network module).
+  externalCidrs:
+    - 0.0.0.0/0
+
+dr:
+  # Convenience flag mirrored from root var `enable_dr`, used only to gate
+  # weaviate.backup / minio.mirror defaults documented above when this
+  # chart is rendered standalone (`helm template --set dr.enabled=true`).
+  # modules/apps sets weaviate.backup.enabled / minio.mirror.enabled
+  # directly from enable_dr, so this flag has no template logic of its own.
+  enabled: false

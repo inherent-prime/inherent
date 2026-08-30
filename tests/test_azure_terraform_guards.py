@@ -20,14 +20,11 @@ Two constraints shape every test here:
    pure text/regex pin over the `.tf`/`.yaml`/`.md` source, or a subprocess
    call to a tool assumed present in this environment (Python's own `yaml`
    parser) -- never terraform itself.
-2. **Peer files may not exist yet.** `infra/azure/*.tf`, `charts/inherent/`,
-   and the `docs/deploy/` pages are owned by other agents working the same
-   build spec in parallel, and may land in later commits than this test
-   file. Pins against those paths are written against the SPEC (the spec
-   fixes their paths and names as part of the cross-agent contract), so a
-   test failing only because a peer file does not exist YET is a legitimate,
-   temporary state -- distinct from a test failing because a peer file that
-   DOES exist violates the contract.
+2. **Missing files fail, never skip.** The whole Azure surface ships as one
+   unit (#320): `infra/azure/*.tf`, `charts/inherent/`, the deploy script,
+   the workflow, and the `docs/deploy/` pages. A missing path is a real
+   regression, and skipping on it is exactly the false-pass shape that sank
+   the Hetzner e2e lane -- so every existence check asserts.
 """
 
 from __future__ import annotations
@@ -65,12 +62,14 @@ KV_SECRET_REF_RE = re.compile(r"_kv_secret$", re.IGNORECASE)
 
 
 def _skip_if_missing(path: Path) -> None:
-    if not path.exists():
-        pytest.skip(
-            f"{path.relative_to(REPO_ROOT)} does not exist yet -- owned by "
-            "another agent per .memory/azure-build-spec.md; re-run once it "
-            "lands."
-        )
+    # All workstreams have landed (#320) -- a missing file is a real break, not
+    # not-yet-landed peer state. Failing (never skipping) is deliberate: the
+    # deleted Hetzner e2e lane's skip path reported success with every
+    # meaningful step skipped (docs/testing.md:199-235).
+    assert path.exists(), (
+        f"{path.relative_to(REPO_ROOT)} is missing -- required by the Azure "
+        "deployment surface (#320)"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -104,13 +103,11 @@ def test_every_referenced_module_directory_exists_with_tf_files() -> None:
             f"{module_dir.relative_to(REPO_ROOT)} does not exist"
         )
         tf_files = list(module_dir.glob("*.tf"))
-        if not tf_files:
-            pytest.skip(
-                f"module {name!r}'s directory "
-                f"{module_dir.relative_to(REPO_ROOT)} exists but has no .tf "
-                "files yet -- owned by another agent per "
-                ".memory/azure-build-spec.md; re-run once it lands"
-            )
+        assert tf_files, (
+            f"module {name!r}'s directory "
+            f"{module_dir.relative_to(REPO_ROOT)} exists but has no .tf "
+            "files -- every module main.tf references must be real (#320)"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -180,11 +177,7 @@ def test_no_plaintext_default_for_secret_shaped_variables() -> None:
     credentials, and are exempt (see KV_SECRET_REF_RE above).
     """
     files = _iter_variables_tf()
-    if not files:
-        pytest.skip(
-            "no infra/azure/**/variables.tf found yet -- owned by another "
-            "agent per .memory/azure-build-spec.md"
-        )
+    assert files, "no infra/azure/**/variables.tf found -- the terraform surface is missing (#320)"
 
     offenders: list[str] = []
     for path in files:
@@ -263,11 +256,7 @@ def test_data_module_pins_redis_noeviction() -> None:
     policy that can silently drop stream entries under memory pressure is a
     silent data-loss bug, not a performance tuning knob."""
     data_module = MODULES_DIR / "data"
-    if not data_module.is_dir():
-        pytest.skip(
-            "infra/azure/modules/data does not exist yet -- owned by "
-            "another agent per .memory/azure-build-spec.md"
-        )
+    assert data_module.is_dir(), "infra/azure/modules/data is missing (#320)"
     tf_files = list(data_module.glob("*.tf"))
     assert tf_files, f"{data_module.relative_to(REPO_ROOT)} has no .tf files"
     combined = "\n".join(f.read_text() for f in tf_files)
@@ -373,28 +362,34 @@ def _chart_yaml_text() -> str | None:
 
 def test_chart_pins_weaviate_1_27_0() -> None:
     text = _chart_yaml_text()
-    if text is None:
-        pytest.skip(
-            "charts/inherent does not exist yet -- owned by another agent "
-            "per .memory/azure-build-spec.md"
-        )
-    assert "semitechnologies/weaviate:1.27.0" in text, (
-        "expected the weaviate image pinned to "
-        "semitechnologies/weaviate:1.27.0 somewhere in charts/inherent "
-        "(values.yaml or a template)"
+    assert text is not None, "charts/inherent is missing (#320)"
+    # The chart splits image coordinates (repository + tag keys), so pin both
+    # halves rather than a joined "repo:tag" literal that the chart never emits.
+    assert "semitechnologies/weaviate" in text, (
+        "expected the weaviate image repository semitechnologies/weaviate "
+        "somewhere in charts/inherent"
+    )
+    assert re.search(r'tag:\s*"1\.27\.0"', text), (
+        "expected the weaviate image tag pinned to \"1.27.0\" in "
+        "charts/inherent (a floating tag can silently change the vector "
+        "index engine under an existing collection)"
     )
 
 
 def test_chart_sets_environment_production_for_api() -> None:
     text = _chart_yaml_text()
-    if text is None:
-        pytest.skip(
-            "charts/inherent does not exist yet -- owned by another agent "
-            "per .memory/azure-build-spec.md"
-        )
-    assert re.search(r"ENVIRONMENT\s*:\s*[\"']?production[\"']?", text), (
-        "expected ENVIRONMENT=production set for the public-api workload "
-        "somewhere in charts/inherent (values.yaml or a template)"
+    assert text is not None, "charts/inherent is missing (#320)"
+    # The template wires ENVIRONMENT from values (name/value env-list style),
+    # so pin the values default AND the template wiring, not a literal
+    # "ENVIRONMENT: production" mapping the chart never emits.
+    assert re.search(r"environment:\s*production", text), (
+        "expected publicApi.env.environment to default to production in "
+        "charts/inherent/values.yaml -- ENVIRONMENT=production is what turns "
+        "on HSTS/JSON logs and disables /docs (docs/deploy/production.md)"
+    )
+    assert re.search(r"name:\s*ENVIRONMENT", text), (
+        "expected the public-api deployment template to wire the ENVIRONMENT "
+        "env var from values"
     )
 
 

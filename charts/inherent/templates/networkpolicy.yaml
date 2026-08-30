@@ -1,0 +1,338 @@
+{{- if .Values.networkPolicy.enabled }}
+# Zero-trust NetworkPolicy set for the "inherent" namespace — issue #323.
+# default-deny covers BOTH directions (Ingress and Egress); every other
+# policy below is an explicit allow, matching the enumerated list in
+# .memory/azure-build-spec.md: ingress-controller→public-api,
+# public-api→{weaviate,minio} (not temporal — the API doesn't call
+# Temporal; not postgres/cosmos/redis — those are external, allowed via the
+# external-egress policy below, not pod-to-pod), ingestion→{weaviate,minio,
+# temporal,tei}, all→kube-dns.
+#
+# See build spec: "Never expose: PG, Mongo(Cosmos), Redis, Weaviate, MinIO,
+# Temporal. Only ingress → public-api :8080." — enforced here on the
+# ingress side; egress to the external managed PaaS services is unavoidable
+# for public-api/ingestion/temporal and is scoped via
+# networkPolicy.externalCidrs (tighten to the data subnet CIDR for
+# enterprise/BYO-VNet mode instead of the 0.0.0.0/0 default).
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inherent.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+# DNS is the one thing every pod needs regardless of role.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inherent.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.dnsNamespace }}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# ingress-controller -> public-api:8080
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-controller-to-public-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inherent.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "inherent.selectorLabels" (dict "component" "public-api") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressControllerNamespace }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.publicApi.containerPort }}
+---
+# public-api -> {weaviate, minio}. Egress side (on public-api) ...
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-public-api-egress-to-datastores
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inherent.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "inherent.selectorLabels" (dict "component" "public-api") | nindent 6 }}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "inherent.selectorLabels" (dict "component" "weaviate") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 50051
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "inherent.selectorLabels" (dict "component" "minio") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 9000
+---
+# ... and ingress side (on weaviate/minio, from public-api AND ingestion —
+# folded into one policy per target since both source roles need the same
+# ports; see the ingestion->{weaviate,minio,temporal,tei} rule below for the
+# ingestion side of this same traffic).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-weaviate-ingress-from-app
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inherent.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "inherent.selectorLabels" (dict "component" "weaviate") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: In
+                values: ["public-api", "ingestion"]
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 50051
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-minio-ingress-from-app
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inherent.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "inherent.selectorLabels" (dict "component" "minio") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: In
+                # public-api, ingestion, plus the hook Jobs that legitimately
+                # talk to minio over the S3 API (bucket-init, hourly mirror).
+                values: ["public-api", "ingestion", "minio-bucket-init", "minio-mirror"]
+      ports:
+        - protocol: TCP
+          port: 9000
+---
+# ingestion -> {weaviate, minio, temporal, tei}. Egress side (on ingestion).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingestion-egress-to-datastores
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inherent.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "inherent.selectorLabels" (dict "component" "ingestion") | nindent 6 }}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "inherent.selectorLabels" (dict "component" "weaviate") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 50051
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "inherent.selectorLabels" (dict "component" "minio") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 9000
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "inherent.selectorLabels" (dict "component" "temporal") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 7233
+    {{- if eq .Values.embedding.profile "tei" }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "inherent.selectorLabels" (dict "component" "tei") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 80
+    {{- end }}
+---
+# ... ingress side (on temporal, from ingestion + the namespace-register hook
+# Job, which also speaks the frontend gRPC port).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-temporal-ingress-from-app
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inherent.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "inherent.selectorLabels" (dict "component" "temporal") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: In
+                values: ["ingestion", "temporal-namespace-register"]
+      ports:
+        - protocol: TCP
+          port: 7233
+{{- if eq .Values.embedding.profile "tei" }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-tei-ingress-from-ingestion
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inherent.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "inherent.selectorLabels" (dict "component" "tei") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "inherent.selectorLabels" (dict "component" "ingestion") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 80
+{{- end }}
+---
+# Egress FROM the hook Jobs that reach an in-namespace pod directly (their
+# Ingress-side allow is already granted above on the target pod — these are
+# the matching Egress-side allow on the Job pod itself, both directions are
+# required under a default-deny-egress posture).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-minio-init-jobs-egress-to-minio
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inherent.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: ["minio-bucket-init", "minio-mirror"]
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "inherent.selectorLabels" (dict "component" "minio") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 9000
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-namespace-register-egress-to-temporal
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inherent.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "inherent.selectorLabels" (dict "component" "temporal-namespace-register") | nindent 6 }}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "inherent.selectorLabels" (dict "component" "temporal") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 7233
+---
+# Egress to external Azure managed services (PG Flexible, Cosmos vCore,
+# Azure Cache for Redis, Azure OpenAI, Key Vault CSI, and — for the DR hook
+# Jobs/weaviate backup — Azure Blob). Scoped to the specific
+# components that actually need it, not "all pods" — weaviate/minio/temporal
+# server pods themselves stay off this list (they only need what the rules
+# above already grant), except weaviate when backup-azure is enabled.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-external-egress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inherent.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values:
+          - public-api
+          - ingestion
+          - migrate
+          - temporal
+          - temporal-schema-setup
+          {{- if .Values.minio.mirror.enabled }}
+          - minio-mirror
+          {{- end }}
+          {{- if .Values.weaviate.backup.enabled }}
+          - weaviate
+          {{- end }}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        {{- range .Values.networkPolicy.externalCidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+{{- end }}

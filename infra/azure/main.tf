@@ -157,9 +157,17 @@ module "ai" {
   openai_capacity        = var.openai_capacity
 }
 
-# --- App workloads (modules/apps — not yet built in this checkout; empty modules/apps/
-# directory, so terraform validate fails on every argument below until it lands. Wired
-# against the spec's documented interface + the real outputs of every module it consumes. --
+# --- App workloads (modules/apps, issue #323) ------------------------------------------------
+# Wired against modules/apps/variables.tf as built: the apps module consumes raw sensitive
+# passthroughs from data/security/ai (single source of secret truth — see the "Secret
+# generation ownership" note in modules/apps/secrets.tf) rather than Key Vault secret names.
+
+locals {
+  # One public hostname, from either input style: explicit api_hostname wins; else the
+  # Azure DNS pair. envs/*.tfvars.example show both. Validation lives here (not in a
+  # variable block, which cannot see other variables).
+  api_hostname = var.api_hostname != "" ? var.api_hostname : "${var.dns_record}.${var.dns_zone_name}"
+}
 
 module "apps" {
   source = "./modules/apps"
@@ -170,44 +178,47 @@ module "apps" {
   environment         = var.environment
   tags                = var.tags
 
-  inherent_version  = var.inherent_version
-  ingress_profile   = var.ingress_profile
-  appgw_subnet_id   = module.network.subnet_ids["appgw"]
-  dns_zone_name     = var.dns_zone_name
-  dns_record        = var.dns_record
-  api_hostname      = var.api_hostname
-  letsencrypt_email = var.letsencrypt_email
+  key_vault_id = module.security.key_vault_id
 
+  # Data layer (modules/data) — hostnames + raw connection strings (sensitive).
+  pg_fqdn                           = module.data.pg_fqdn
+  pg_admin_user                     = module.data.pg_admin_user
+  pg_password_kv_secret             = module.data.pg_password_kv_secret
+  postgres_app_connection_string    = module.data.postgres_app_connection_string
+  cosmos_connection_string          = module.data.cosmos_connection_string
+  redis_connection_string           = module.data.redis_connection_string
+  storage_account_connection_string = module.data.storage_account_primary_connection_string
+
+  # Security layer (modules/security) — generated credentials (sensitive).
+  weaviate_api_key            = module.security.weaviate_api_key
+  ingestion_api_key           = module.security.ingestion_api_key
+  minio_root_user             = module.security.minio_root_user
+  minio_root_password         = module.security.minio_root_password
+  workload_identity_client_id = module.security.workload_identity_client_id
+
+  # AI layer (modules/ai, issue #324) — Azure OpenAI embeddings (#311 / PR #314 contract).
+  openai_endpoint                  = module.ai.openai_endpoint
+  openai_embedding_deployment_name = module.ai.embedding_deployment_name
+  openai_key                       = module.ai.openai_key
+  openai_embedding_dim             = module.ai.dim
+
+  aks_pod_cidr = module.aks.pod_cidr
+
+  embedding_profile = var.embedding_profile
+  ingress_profile   = var.ingress_profile
+  enable_ha         = var.enable_ha
+  enable_dr         = var.enable_dr
+
+  inherent_version = var.inherent_version
   api_replicas_min = var.api_replicas_min
   api_replicas_max = var.api_replicas_max
   worker_replicas  = var.worker_replicas
   weaviate_disk_gb = var.weaviate_disk_gb
   minio_disk_gb    = var.minio_disk_gb
-  storage_profile  = var.storage_profile
 
-  # Cluster wiring — aks module's real output names.
-  aks_cluster_name    = module.aks.cluster_name
-  aks_oidc_issuer_url = module.aks.oidc_issuer_url
-
-  key_vault_uri                 = module.security.key_vault_uri
-  workload_identity_client_id   = module.security.workload_identity_client_id
-  weaviate_api_key_kv_secret    = module.security.weaviate_api_key_kv_secret
-  ingestion_api_key_kv_secret   = module.security.ingestion_api_key_kv_secret
-  minio_root_user_kv_secret     = module.security.minio_root_user_kv_secret
-  minio_root_password_kv_secret = module.security.minio_root_password_kv_secret
-  app_api_key_seed_kv_secret    = module.security.app_api_key_seed_kv_secret
-
-  postgres_app_url_kv_secret         = module.data.postgres_app_url_kv_secret
-  cosmos_connection_string_kv_secret = module.data.cosmos_connection_string_kv_secret
-  redis_url_kv_secret                = module.data.redis_url_kv_secret
-  db_names                           = module.data.db_names
-  storage_account_name               = module.data.storage_account_name
-  backup_container_names             = module.data.backup_container_names
-
-  openai_endpoint           = module.ai.openai_endpoint
-  embedding_deployment_name = module.ai.embedding_deployment_name
-  embedding_key_kv_secret   = module.ai.key_kv_secret
-  embedding_dim             = module.ai.dim
+  api_hostname      = local.api_hostname
+  letsencrypt_email = var.letsencrypt_email
+  appgw_subnet_id   = module.network.subnet_ids["appgw"]
 
   # Helm/kubernetes providers (providers.tf) already read module.aks via try() — this
   # depends_on makes the ordering explicit in the graph, not just the provider config.

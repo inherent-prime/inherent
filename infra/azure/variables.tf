@@ -38,16 +38,6 @@ variable "tags" {
 
 # --- Profile knobs ---------------------------------------------------------------------
 
-variable "deployment_profile" {
-  description = "\"production\" = full AKS + managed data services (this root's main path). \"dev\" = same modules at small/single-zone SKUs (see envs/dev.tfvars.example) — not a different code path, just smaller enable_ha/enable_dr/sizing inputs."
-  type        = string
-  default     = "production"
-
-  validation {
-    condition     = contains(["production", "dev"], var.deployment_profile)
-    error_message = "deployment_profile must be \"production\" or \"dev\"."
-  }
-}
 
 variable "embedding_profile" {
   description = "\"azure_openai\" (default, depends on #311/PR #314) = azurerm_cognitive_account OpenAI deployment. \"tei\" = TEI CPU Deployment on AKS, self-hosted fallback."
@@ -60,8 +50,12 @@ variable "embedding_profile" {
   }
 }
 
+# Reserved knob: only "minio" is implementable until the native Azure Blob backend lands
+# (#329) — the validation below is the whole point of declaring it today, so operators get
+# a clear rejection instead of a silent no-op if they set "azure_blob" early.
+# tflint-ignore: terraform_unused_declarations
 variable "storage_profile" {
-  description = "Object storage backend. Only \"minio\" (MinIO StatefulSet on AKS + nightly mc-mirror to Blob) is implemented today — the app's storage abstraction is s3-compatible + local only. Native Azure Blob backend is tracked as a separate roadmap item, issue #329."
+  description = "Object storage backend. Only \"minio\" (MinIO StatefulSet on AKS + hourly mirror to Blob) is implemented today — the app's storage abstraction is s3-compatible + local only. Native Azure Blob backend is tracked as a separate roadmap item, issue #329."
   type        = string
   default     = "minio"
 

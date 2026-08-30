@@ -179,7 +179,7 @@ graph TB
         redisnode["Redis Streams — MQ + rate limiting"]
     end
     subgraph storeg["Storage Account — GRS when enable_dr"]
-        blob["Blob: MinIO nightly mirror + Weaviate backups"]
+        blob["Blob: MinIO hourly mirror + Weaviate backups"]
     end
     pe["Private endpoints — data subnet"]
 
@@ -215,7 +215,7 @@ graph TB
             worker["ingestion-worker Deployment — N replicas"]
             weav["weaviate StatefulSet"]
             minio["minio StatefulSet"]
-            mirror["minio-mirror CronJob — nightly"]
+            mirror["minio-mirror CronJob — hourly"]
             temporal["temporal-server Deployment"]
             tschema["temporal-schema-setup Job"]
             migrate["migrate Job — helm pre-upgrade hook"]
@@ -228,7 +228,7 @@ graph TB
     worker --> temporal
     temporal --> tschema
     migrate -.->|runs before| api
-    mirror -.->|nightly| minio
+    mirror -.->|hourly| minio
 ```
 
 **Required vs optional**
@@ -360,7 +360,6 @@ profile, or `envs/prod.tfvars.example` for HA + DR + WAF ingress.
 | `resource_prefix` | `inherent` | Prefix on every resource name | Running more than one stack in the same subscription |
 | `environment` | `prod` | Tag value + naming suffix | Distinguish dev/staging/prod resource groups |
 | `tags` | `{}` | Azure resource tags | Cost allocation, ownership, compliance tagging |
-| `deployment_profile` | `production` | Selects `dev` or `production` variable presets | Non-prod experimentation |
 | `embedding_profile` | `azure_openai` | `azure_openai` or `tei` | Switch to CPU TEI fallback (no Azure OpenAI access yet) |
 | `storage_profile` | `minio` | Storage backend for documents | Only `minio` implemented; `azure_blob` is reserved (rejected by validation) — see [#329](https://github.com/inherent-prime/inherent/issues/329) |
 | `ingress_profile` | `nginx` | `nginx` or `appgw_waf` | Need a managed WAF in front of the API |
@@ -610,9 +609,10 @@ pods). Region loss and accidental data deletion are restore-based and require
 running the runbook. Full failure-mode table, exact restore commands, and the
 quarterly DR-drill checklist: **[Azure DR Runbook](azure-dr-runbook.md)**.
 
-Object storage's actual DR floor is bounded by the `minio-mirror` CronJob
-schedule (nightly by default) — tighten the schedule if you need object
-storage RPO under 24h; see the runbook for the resolved detail.
+Object storage's DR floor is bounded by the `minio-mirror` CronJob
+schedule — hourly by default, which keeps object-storage RPO within the
+system's ≤ 1 h target. Tighten it further if you need a smaller window;
+see the runbook for the resolved detail.
 
 ## 10. Limitations & Roadmap
 

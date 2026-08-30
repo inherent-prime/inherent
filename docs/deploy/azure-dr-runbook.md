@@ -27,12 +27,13 @@ at least once so the commands below are proven against your own environment.
 | MinIO / document blobs | Region loss | **Up to 24 hours by default** — bounded by the `minio-mirror` CronJob schedule, not the 1h system target | ≤ 2 hours (re-mirror time scales with data volume) | Re-mirror from the GRS Blob replica in the DR region |
 | Temporal (workflow state) | Zone/region loss | Follows Postgres (state lives in the `temporal`/`temporal_visibility` databases) | Schema re-setup Job + Postgres restore time | `temporalio/admin-tools` schema-setup Job re-run against restored Postgres |
 
-**Object storage is the actual floor on system-wide RPO.** The documented
-system target is RPO ≤ 1h / RTO ≤ 4h, but MinIO's nightly `mc mirror`
-CronJob means an object blob written since the last mirror run is not yet
-in the DR-region Blob replica. If your recovery point objective requires
-document blobs newer than 24 hours, tighten the mirror CronJob's schedule
-(`apps` module) before you need this runbook, not during a region-loss event.
+**Object storage is the floor on system-wide RPO.** The system target is
+RPO ≤ 1h / RTO ≤ 4h, and the MinIO mirror CronJob runs hourly to stay
+inside it — an object blob written since the last mirror run is not yet in
+the DR-region Blob replica, so the worst case is ~1 h of object loss. If
+you need a smaller window, tighten the mirror CronJob's schedule (chart
+value `minio.mirror.schedule`) before you need this runbook, not during a
+region-loss event.
 
 ## Region-Loss Restore Procedure
 

@@ -1,0 +1,106 @@
+{{- if .Values.weaviate.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: weaviate
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inherent.labels" . | nindent 4 }}
+    {{- include "inherent.selectorLabels" (dict "component" "weaviate") | nindent 4 }}
+spec:
+  # Single node — matches docker-compose.yml's CLUSTER_HOSTNAME=node1
+  # single-instance topology. Weaviate multi-node clustering is not wired up
+  # by this chart (documented limitation, see docs/deploy/azure.md); scale
+  # via weaviate_disk_gb / resources, not replica count.
+  serviceName: weaviate
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "inherent.selectorLabels" (dict "component" "weaviate") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "inherent.labels" . | nindent 8 }}
+        {{- include "inherent.selectorLabels" (dict "component" "weaviate") | nindent 8 }}
+        {{- with .Values.serviceAccount.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "inherent.serviceAccountName" . }}
+      containers:
+        - name: weaviate
+          image: "{{ .Values.weaviate.image.repository }}:{{ .Values.weaviate.image.tag }}"
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: grpc
+              containerPort: 50051
+          env:
+            - name: QUERY_DEFAULTS_LIMIT
+              value: "25"
+            # API-key auth (compose parity) — the vector store holding every
+            # tenant's chunks is never anonymous.
+            - name: AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED
+              value: "false"
+            - name: AUTHENTICATION_APIKEY_ENABLED
+              value: "true"
+            - name: AUTHENTICATION_APIKEY_ALLOWED_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "secrets.weaviate.name is required (WEAVIATE_API_KEY)" .Values.secrets.weaviate.name }}
+                  key: {{ .Values.secrets.weaviate.key }}
+            - name: AUTHENTICATION_APIKEY_USERS
+              value: {{ .Values.weaviate.auth.users | quote }}
+            - name: AUTHORIZATION_ADMINLIST_ENABLED
+              value: "true"
+            - name: AUTHORIZATION_ADMINLIST_USERS
+              value: {{ .Values.weaviate.auth.users | quote }}
+            - name: PERSISTENCE_DATA_PATH
+              value: "/var/lib/weaviate"
+            - name: DEFAULT_VECTORIZER_MODULE
+              value: "none"
+            - name: CLUSTER_HOSTNAME
+              value: "node1"
+            {{- if .Values.weaviate.backup.enabled }}
+            # DR: backup-azure module writes snapshots to Blob (GRS). Gated
+            # on enable_dr — see modules/dr's dr_summary for RPO/mechanism.
+            - name: ENABLE_MODULES
+              value: "backup-azure"
+            - name: BACKUP_AZURE_CONTAINER
+              value: {{ .Values.weaviate.backup.container | quote }}
+            - name: AZURE_STORAGE_CONNECTION_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "weaviate.backup.connectionStringSecretRef.name is required when weaviate.backup.enabled=true" .Values.weaviate.backup.connectionStringSecretRef.name }}
+                  key: {{ .Values.weaviate.backup.connectionStringSecretRef.key }}
+            {{- else }}
+            - name: ENABLE_MODULES
+              value: ""
+            {{- end }}
+          volumeMounts:
+            - name: weaviate-data
+              mountPath: /var/lib/weaviate
+          resources:
+            {{- toYaml .Values.weaviate.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /v1/.well-known/ready
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /v1/.well-known/live
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 15
+  volumeClaimTemplates:
+    - metadata:
+        name: weaviate-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: {{ .Values.weaviate.persistence.createZrsStorageClass | ternary .Values.weaviate.persistence.zrsStorageClassName .Values.weaviate.persistence.storageClassName }}
+        resources:
+          requests:
+            storage: {{ .Values.weaviate.persistence.sizeGi }}Gi
+{{- end }}

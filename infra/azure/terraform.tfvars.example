@@ -13,7 +13,6 @@ tags = {
 }
 
 # Profile knobs
-deployment_profile = "production"
 embedding_profile  = "azure_openai" # or "tei" — self-hosted fallback on AKS
 storage_profile    = "minio"        # only supported value today, see issue #329
 ingress_profile     = "nginx"        # or "appgw_waf" for App Gateway WAF_v2

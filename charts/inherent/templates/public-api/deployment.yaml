@@ -1,0 +1,142 @@
+{{- if .Values.publicApi.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inh-public-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inherent.labels" . | nindent 4 }}
+    {{- include "inherent.selectorLabels" (dict "component" "public-api") | nindent 4 }}
+spec:
+  # Baseline replica count; the HPA (hpa.yaml) takes over scaling once
+  # installed — this is only the initial/floor value on a fresh install.
+  replicas: {{ .Values.publicApi.replicas.min }}
+  selector:
+    matchLabels:
+      {{- include "inherent.selectorLabels" (dict "component" "public-api") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "inherent.labels" . | nindent 8 }}
+        {{- include "inherent.selectorLabels" (dict "component" "public-api") | nindent 8 }}
+        {{- with .Values.serviceAccount.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "inherent.serviceAccountName" . }}
+      containers:
+        - name: public-api
+          image: "{{ .Values.image.registry }}/public-api-svc:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.publicApi.containerPort }}
+            - name: mcp
+              containerPort: {{ .Values.publicApi.env.mcpPort }}
+          env:
+            - name: SERVICE_MODE
+              value: {{ .Values.publicApi.env.serviceMode | quote }}
+            - name: PORT
+              value: {{ .Values.publicApi.containerPort | quote }}
+            - name: MCP_PORT
+              value: {{ .Values.publicApi.env.mcpPort | quote }}
+            - name: ENVIRONMENT
+              value: {{ .Values.publicApi.env.environment | quote }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "secrets.postgres.name is required (DATABASE_URL) -- see values.yaml top-of-file REQUIRED values note" .Values.secrets.postgres.name }}
+                  key: {{ .Values.secrets.postgres.key }}
+            {{- if .Values.secrets.mongodb.name }}
+            - name: MONGODB_URI
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.mongodb.name }}
+                  key: {{ .Values.secrets.mongodb.key }}
+            {{- end }}
+            - name: MONGODB_DB_NAME
+              value: {{ .Values.publicApi.env.mongodbDbName | quote }}
+            - name: WEAVIATE_URL
+              value: "http://weaviate:8080"
+            - name: WEAVIATE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "secrets.weaviate.name is required (WEAVIATE_API_KEY) -- see values.yaml top-of-file REQUIRED values note" .Values.secrets.weaviate.name }}
+                  key: {{ .Values.secrets.weaviate.key }}
+            {{- if .Values.secrets.redis.name }}
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.redis.name }}
+                  key: {{ .Values.secrets.redis.key }}
+            - name: MQ_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.redis.name }}
+                  key: {{ .Values.secrets.redis.key }}
+            {{- end }}
+            - name: AWS_S3_ENDPOINT
+              value: "http://minio:9000"
+            {{- if .Values.secrets.s3.name }}
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.s3.name }}
+                  key: {{ .Values.secrets.s3.accessKeyField }}
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.s3.name }}
+                  key: {{ .Values.secrets.s3.secretKeyField }}
+            {{- end }}
+            - name: AWS_S3_BUCKET
+              value: {{ .Values.publicApi.env.s3Bucket | quote }}
+            - name: AWS_S3_REGION
+              value: {{ .Values.publicApi.env.s3Region | quote }}
+            {{- if eq .Values.embedding.profile "azure_openai" }}
+            - name: EMBEDDING_PROVIDER
+              value: "openai_compatible"
+            - name: EMBEDDING_SERVICE_URL
+              value: {{ required "embedding.serviceUrl is required when embedding.profile=azure_openai -- see values.yaml top-of-file REQUIRED values note" .Values.embedding.serviceUrl | quote }}
+            {{- if .Values.secrets.embeddingApiKey.name }}
+            - name: EMBEDDING_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.embeddingApiKey.name }}
+                  key: {{ .Values.secrets.embeddingApiKey.key }}
+            {{- end }}
+            - name: EMBEDDING_MODEL_ID
+              value: {{ required "embedding.modelId is required when embedding.profile=azure_openai -- see values.yaml top-of-file REQUIRED values note" .Values.embedding.modelId | quote }}
+            {{- else }}
+            - name: EMBEDDING_SERVICE_URL
+              value: "http://text-embeddings-inference:80"
+            {{- end }}
+            - name: EMBEDDING_DIM
+              value: {{ .Values.embedding.dim | quote }}
+            - name: RATE_LIMIT_ENABLED
+              value: {{ .Values.publicApi.env.rateLimitEnabled | quote }}
+            - name: TRUSTED_PROXIES
+              value: {{ .Values.publicApi.env.trustedProxies | quote }}
+            - name: ENABLE_HSTS
+              value: {{ .Values.publicApi.env.enableHsts | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.publicApi.env.logLevel | quote }}
+          resources:
+            {{- toYaml .Values.publicApi.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.publicApi.probes.liveness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.publicApi.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.publicApi.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.publicApi.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.publicApi.probes.liveness.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.publicApi.probes.readiness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.publicApi.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.publicApi.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.publicApi.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.publicApi.probes.readiness.failureThreshold }}
+{{- end }}
