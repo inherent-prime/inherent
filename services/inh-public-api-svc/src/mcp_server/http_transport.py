@@ -48,12 +48,27 @@ the flag off, this module's behavior -- including every 401's
 ``tests/unit/test_oauth_config_gate.py``. See ``src/services/auth.py``'s
 "OAuth 2.1 resource-server support" section for the ``Principal`` /
 ``TokenValidationError`` / challenge-building pieces this module wires in.
+
+Per-identity entitlements and quotas (#309)
+--------------------------------------------
+Between the permission/scope check and ``tool.handler`` dispatch in both
+``call_tool`` and ``_call_tool_oauth``, ``quotas.check_quota`` is given the
+same ``Principal`` #295 already resolved and answers "has this identity got
+budget left". A denial short-circuits BEFORE the handler runs, in the same
+``isError=True`` ``CallToolResult`` shape (``structuredContent.error_class``)
+every other rejection on this transport already uses -- see
+``_quota_exceeded_result`` and ``FAILURE_CLASS_QUOTA_EXCEEDED`` below, and
+``src/mcp_server/quotas.py`` for the enforcement logic, its fail-open (infra
+failure) vs. fail-closed (genuine exhaustion) split, and why an identity
+with no entitlements configured touches neither the rate limiter nor the
+database (default-open, unchanged behavior for every caller today).
 """
 
 from __future__ import annotations
 
 import copy
 from contextvars import ContextVar
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, status
 from mcp.server import Server
@@ -63,6 +78,7 @@ from starlette.requests import Request
 from starlette.types import Receive, Scope, Send
 
 from src.config import settings
+from src.mcp_server.quotas import QuotaDenial, check_quota, publish_usage_event
 from src.mcp_server.server import _TOOLS, ToolDef
 from src.models.api_key import APIKeyInfo
 from src.services.auth import (
@@ -71,8 +87,10 @@ from src.services.auth import (
     TokenValidationError,
     build_www_authenticate,
     get_api_key_info,
+    get_authorized_workspace_ids,
     verify_oauth_token,
 )
+from src.services.database import get_database
 from src.utils import get_logger
 
 logger = get_logger(__name__)
@@ -116,6 +134,10 @@ FAILURE_CLASS_UNKNOWN_TOOL = "unknown_tool"
 FAILURE_CLASS_NOT_FOUND = "not_found"
 FAILURE_CLASS_INTERNAL = "internal_error"
 FAILURE_CLASS_TOOL_ERROR = "tool_error"
+# A principal is over one of its per-identity entitlements/quotas (#309) --
+# see quotas.py's module docstring for the fail-open/fail-closed split this
+# class is only ever emitted on the fail-CLOSED (genuine exhaustion) side of.
+FAILURE_CLASS_QUOTA_EXCEEDED = "quota_exceeded"
 
 
 def _strip_api_key(schema: dict) -> dict:
@@ -202,6 +224,56 @@ def _error_result(text: str, failure_class: str) -> CallToolResult:
     )
 
 
+def _quota_exceeded_result(denial: QuotaDenial) -> CallToolResult:
+    """``isError=True`` result for a per-identity quota rejection (#309).
+
+    Deliberately the SAME shape ``_call_tool_oauth``'s ``insufficient_scope``
+    result already uses (design constraint #3: "Follow whatever error shape
+    http_transport.py already uses; do not invent a second one") --
+    ``isError=True`` at HTTP 200 (see ``_call_tool_oauth``'s docstring for
+    why no other HTTP status is reachable from inside ``tools/call``: the
+    same ``StreamableHTTPSessionManager(json_response=True)`` constraint
+    applies here, not just to OAuth scope denial), a human-readable
+    ``content`` message, and a branchable ``structuredContent`` naming the
+    limit, its value, when it resets (``None``/omitted for ``max_documents``,
+    which has no time window -- see ``QuotaDenial``'s docstring), and the
+    operator's upgrade URL when configured -- everything #309's "Behaviour on
+    exhaustion" section asks for.
+    """
+    message = f"Error: '{denial.limit_name}' limit exceeded (limit: {denial.limit})"
+    if denial.reset_at is not None:
+        reset_iso = datetime.fromtimestamp(denial.reset_at, tz=timezone.utc).isoformat()
+        message += f"; resets at {reset_iso}"
+    if denial.upgrade_url:
+        message += f". Raise this limit: {denial.upgrade_url}"
+
+    structured: dict = {
+        "error_class": FAILURE_CLASS_QUOTA_EXCEEDED,
+        "limit": denial.limit_name,
+        "limit_value": denial.limit,
+        "reset_at": denial.reset_at,
+    }
+    if denial.upgrade_url:
+        structured["upgrade_url"] = denial.upgrade_url
+
+    return CallToolResult(
+        content=[TextContent(type="text", text=message)],
+        structuredContent=structured,
+        isError=True,
+    )
+
+
+async def _workspace_ids_for_quota(key_info: APIKeyInfo) -> list[str]:
+    """Lazily resolve the workspace set an API-key ``max_documents`` check
+    should count against -- a small async helper (rather than inlining the
+    two awaits at the ``check_quota`` call site) so it can be handed to
+    ``check_quota`` as a zero-arg callable and only ever actually run when a
+    ``max_documents`` limit is configured (see ``quotas._check_max_documents``'s
+    docstring for why that laziness matters for the default-open path)."""
+    database = await get_database()
+    return await get_authorized_workspace_ids(key_info, database)
+
+
 def create_http_mcp_server() -> Server:
     """Build the Streamable HTTP MCP server (#220).
 
@@ -276,11 +348,30 @@ def create_http_mcp_server() -> Server:
                 FAILURE_CLASS_AUTHORIZATION,
             )
 
+        # Per-identity entitlement/quota enforcement (#309), keyed off the
+        # SAME Principal seam #295 introduced -- runs after permission (an
+        # unauthorized call was never going anywhere near budget) and before
+        # dispatch (a quota-exceeded call must never reach tool.handler).
+        # See quotas.py's module docstring for the fail-open/fail-closed
+        # split and why this costs an unlimited (default) principal nothing.
+        principal = Principal.from_api_key(key_info)
+        denial = await check_quota(
+            principal,
+            name,
+            tool.permission,
+            workspace_ids_for_max_documents=lambda: _workspace_ids_for_quota(key_info),
+        )
+        if denial is not None:
+            publish_usage_event(principal, name, allowed=False)
+            return _quota_exceeded_result(denial)
+
         try:
             content = await tool.handler(key_info, arguments)
         except Exception as exc:  # noqa: BLE001 - must not crash the transport
             logger.error("MCP HTTP tool error", tool=name, error=str(exc))
             return _error_result(f"Error: {exc}", FAILURE_CLASS_INTERNAL)
+
+        publish_usage_event(principal, name, allowed=True)
 
         if content and isinstance(content[0], TextContent) and content[0].text.startswith("Error:"):
             return _error_result(content[0].text, _classify_handler_error(content[0].text))
@@ -364,6 +455,21 @@ async def _call_tool_oauth(name: str, principal: Principal) -> CallToolResult:
             },
             isError=True,
         )
+
+    # Per-identity quota enforcement (#309) applies to the OAuth principal
+    # exactly as it does to an API-key one -- both are the same `Principal`
+    # seam. No `workspace_ids_for_max_documents` provider is available here:
+    # OAuth callers have no workspace resolution yet (see this function's own
+    # docstring on why it stops before `tool.handler`), so a configured
+    # `max_documents` limit fails OPEN with a loud log for this path rather
+    # than silently never firing (see `quotas._check_max_documents`). The
+    # other three limits (calls_per_minute/calls_per_month/writes_per_day)
+    # need no workspace context and are fully enforced here, ready for the
+    # day OAuth execution itself lands without further changes to this call.
+    denial = await check_quota(principal, name, tool.permission)
+    if denial is not None:
+        publish_usage_event(principal, name, allowed=False)
+        return _quota_exceeded_result(denial)
 
     return _error_result(
         "Error: OAuth-authenticated tool execution is not yet available -- "
