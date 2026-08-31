@@ -28,6 +28,7 @@ from inh_contracts.embedding import (
 )
 from inh_contracts.events import (
     CONTRACT_VERSION,
+    ConversationTurnMessage,
     DocumentCompletionMessage,
     DocumentUploadMessage,
     StorageBackend,
@@ -58,6 +59,7 @@ __all__ = [
     "CONTRACT_VERSION",
     "DocumentUploadMessage",
     "DocumentCompletionMessage",
+    "ConversationTurnMessage",
     "StorageBackend",
     "get_workspace_collection_name",
     "get_user_tenant_name",

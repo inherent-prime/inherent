@@ -7,6 +7,45 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Added
 
+- **Conversation ingestion: `/v1/conversations` API + signal-driven
+  `ConversationMemoryWorkflow` (#306).** A conversation is append-only and
+  grows, which `POST /v1/documents` cannot serve without either flooding the
+  embedding pipeline with per-turn documents or re-chunking/re-embedding the
+  whole history on every turn. `inh-public-api-svc` adds
+  `POST /v1/conversations/{external_id}/turns` (202, batch append, idempotent
+  per `turn_id`), `GET /v1/conversations/{external_id}` (turn/chunk counts,
+  last flush time), and `DELETE /v1/conversations/{external_id}` (cascades
+  chunks + vectors, reusing `delete_document_everywhere` unmodified) —
+  `src/api/v1/conversations.py` / `src/services/conversation_intake.py` /
+  `src/models/conversation.py`. POST publishes ONE MQ message PER TURN to the
+  new `core.conversation.turn.v1` topic (`ConversationTurnMessage`,
+  `inh_contracts.events`, mirroring `DocumentUploadMessage`) — public-api
+  still never talks to Temporal directly.
+  `inh-ingestion-svc`'s new `ConversationMemoryWorkflow`
+  (`src/temporal/workflows/conversation_memory.py`) is signaled via
+  `signal_with_start` with `WorkflowIDConflictPolicy.USE_EXISTING` (not
+  `TERMINATE_EXISTING` like the document path — a later turn must add itself
+  to the running conversation, never kill and restart it), buffers turns, and
+  flushes on a size-or-idle debounce (`wait_condition`, both configurable) —
+  the embedding-pipeline protection this issue exists for. Each flush runs
+  `redact_turns` (#307) → `chunk_conversation` (new, turn-aware: never splits
+  across a turn boundary, stamps `turn_index`/`role`/`ts`/`client` per chunk)
+  → `store_in_postgresql`/`store_in_weaviate` with a new `append=True` mode
+  (`StoreDocumentInput.append`, threaded through
+  `DatabaseService.store_processed_document` and the Weaviate store path) →
+  `update_workspace_stats`. `append=True` is additive growth (skip the
+  destructive full-replace delete; grow `chunk_count`/`text_length`/
+  `size_bytes` instead of overwriting them) so previously-flushed turns
+  survive every later flush; `append=False` (the default) is byte-identical
+  to `DocumentIngestionWorkflow`'s existing behavior. `continue_as_new` fires
+  every 500 turns; 24h with no new turns finalizes the conversation and
+  publishes `core.document.processed.v1`. `chunk_conversation` reads turn
+  text ONLY from `redact_turns`'s output, never the workflow's raw
+  pre-redaction buffer — the flush pipeline ordering is a security property,
+  not just an ordering convenience. Migration `020_conversation_documents.sql`
+  adds `document_type`/`external_id` (+ a partial unique index on
+  `(workspace_id, external_id)`) to `processed_documents`, which had neither
+  before this.
 - **`redact_turns` Temporal activity: non-retryable, per-turn credential
   redaction ahead of conversation ingestion (#307).** Conversations
   captured from an assistant contain credentials by default — API keys

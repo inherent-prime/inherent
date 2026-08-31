@@ -22,6 +22,7 @@ from sqlalchemy import (
     UniqueConstraint,
     create_engine,
     func,
+    select,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -247,6 +248,16 @@ class DatabaseService:
             # "unclaimed OR existing claim's start time <= mine" makes the
             # claim monotonic in START order, not commit order.
             Column("active_run_claimed_at", DateTime(timezone=True), nullable=True),
+            # Conversation ingestion (#306, migration 020). document_type
+            # defaults to 'file' so every pre-existing row (and every write
+            # from DocumentIngestionWorkflow, which never sets it) is
+            # unaffected. external_id is the caller-supplied conversation
+            # identifier from POST /v1/conversations/{external_id}/turns;
+            # NULL for ordinary file documents. See migration 020's comment
+            # for why content_type/storage_path/size_bytes are NOT relaxed
+            # for conversations -- they get synthetic-but-real values instead.
+            Column("document_type", String(20), nullable=False, default="file"),
+            Column("external_id", String(255), nullable=True),
             Index("idx_processed_documents_workspace_id", "workspace_id"),
             Index("idx_processed_documents_user_id", "user_id"),
             Index("idx_processed_documents_tenant_id", "tenant_id"),
@@ -870,6 +881,11 @@ class DatabaseService:
         processing_time_ms: int,
         workflow_run_id: str,
         tenant_id: int | None = None,
+        *,
+        append: bool = False,
+        document_type: str = "file",
+        external_id: str | None = None,
+        metadata: dict | None = None,
     ) -> int | None:
         """Store processed document and its chunks with proper FK relationship.
 
@@ -886,6 +902,25 @@ class DatabaseService:
                 activity), the write is skipped entirely rather than
                 clobbering the newer run's content.
             tenant_id: Optional tenant_id for multi-tenancy
+            append: When False (default -- DocumentIngestionWorkflow's
+                behavior, byte-identical to before #306), this is a
+                DESTRUCTIVE full-replace: existing chunks for this document
+                are deleted and chunk_count/text_length are OVERWRITTEN with
+                this call's values. When True (ConversationMemoryWorkflow's
+                ~90s flush), existing chunks are left untouched and
+                chunk_count/text_length/size_bytes are INCREMENTED by this
+                call's values instead -- see StoreDocumentInput.append's
+                docstring for why a fork here would silently destroy
+                previously-flushed conversation history.
+            document_type: 'file' (default) or 'conversation' (migration 020).
+            external_id: Caller-supplied conversation identifier GET/DELETE
+                /v1/conversations/{external_id} resolve against. None for
+                ordinary file documents.
+            metadata: Optional document-level metadata (JSONB) to persist
+                verbatim, e.g. ConversationMemoryWorkflow's
+                {"turn_count": ..., "last_flushed_at": ...}. None (default)
+                leaves the column untouched on update, and NULL on insert --
+                no existing caller passes this, so behavior is unchanged.
 
         Returns:
             ID of the stored document record, or None if the write was
@@ -899,6 +934,33 @@ class DatabaseService:
             try:
                 now = datetime.now(UTC)
 
+                insert_values: dict = {
+                    "document_id": message.document_id,
+                    "workspace_id": message.workspace_id,
+                    "user_id": message.user_id,
+                    "tenant_id": tenant_id,
+                    "filename": message.filename,
+                    "original_filename": message.original_filename,
+                    "content_type": message.content_type,
+                    "size_bytes": message.size_bytes,
+                    "storage_backend": message.storage_backend,
+                    "storage_path": message.storage_path,
+                    "storage_bucket": message.storage_bucket,
+                    "storage_url": message.storage_url,
+                    "status": DocumentStatus.PROCESSED.value,
+                    "chunk_count": len(chunks),
+                    "text_length": text_length,
+                    "processing_time_ms": processing_time_ms,
+                    "active_run_id": workflow_run_id,
+                    "created_at": now,
+                    "updated_at": now,
+                    "processed_at": now,
+                    "document_type": document_type,
+                    "external_id": external_id,
+                }
+                if metadata is not None:
+                    insert_values["metadata"] = metadata
+
                 # Upsert document record. The WHERE on the conflict branch is
                 # the fencing check (#110): apply the update only if this
                 # document is unclaimed (active_run_id IS NULL -- true for a
@@ -908,42 +970,46 @@ class DatabaseService:
                 # affect zero rows instead of applying it, and unconditionally
                 # re-asserting active_run_id in SET reinforces this run's own
                 # claim for any later write in the same run (e.g. a retry).
-                stmt = pg_insert(self.processed_documents).values(
-                    document_id=message.document_id,
-                    workspace_id=message.workspace_id,
-                    user_id=message.user_id,
-                    tenant_id=tenant_id,
-                    filename=message.filename,
-                    original_filename=message.original_filename,
-                    content_type=message.content_type,
-                    size_bytes=message.size_bytes,
-                    storage_backend=message.storage_backend,
-                    storage_path=message.storage_path,
-                    storage_bucket=message.storage_bucket,
-                    storage_url=message.storage_url,
-                    status=DocumentStatus.PROCESSED.value,
-                    chunk_count=len(chunks),
-                    text_length=text_length,
-                    processing_time_ms=processing_time_ms,
-                    active_run_id=workflow_run_id,
-                    created_at=now,
-                    updated_at=now,
-                    processed_at=now,
-                )
+                stmt = pg_insert(self.processed_documents).values(**insert_values)
+
+                # append (#306): grow instead of overwrite. SQLAlchemy column
+                # arithmetic (Column + literal) compiles to
+                # "chunk_count = processed_documents.chunk_count + :n" in the
+                # UPDATE, which is what makes this safe against the SAME row
+                # being appended to repeatedly -- each flush adds only what
+                # THIS flush wrote, on top of whatever was already there.
+                update_set: dict = {
+                    "status": DocumentStatus.PROCESSED.value,
+                    "chunk_count": (
+                        self.processed_documents.c.chunk_count + len(chunks)
+                        if append
+                        else len(chunks)
+                    ),
+                    "text_length": (
+                        self.processed_documents.c.text_length + text_length
+                        if append
+                        else text_length
+                    ),
+                    "size_bytes": (
+                        self.processed_documents.c.size_bytes + message.size_bytes
+                        if append
+                        else message.size_bytes
+                    ),
+                    "processing_time_ms": processing_time_ms,
+                    "tenant_id": tenant_id,
+                    "active_run_id": workflow_run_id,
+                    "updated_at": now,
+                    "processed_at": now,
+                    "error_message": None,
+                    "document_type": document_type,
+                    "external_id": external_id,
+                }
+                if metadata is not None:
+                    update_set["metadata"] = metadata
 
                 stmt = stmt.on_conflict_do_update(  # type: ignore[assignment]
                     index_elements=["document_id"],
-                    set_={
-                        "status": DocumentStatus.PROCESSED.value,
-                        "chunk_count": len(chunks),
-                        "text_length": text_length,
-                        "processing_time_ms": processing_time_ms,
-                        "tenant_id": tenant_id,
-                        "active_run_id": workflow_run_id,
-                        "updated_at": now,
-                        "processed_at": now,
-                        "error_message": None,
-                    },
+                    set_=update_set,
                     where=(
                         self.processed_documents.c.active_run_id.is_(None)
                         | (self.processed_documents.c.active_run_id == workflow_run_id)
@@ -968,12 +1034,18 @@ class DatabaseService:
                 # .scalar_one() again on the same Result (single-use cursor).
                 doc_id: int = row[0]  # type: ignore[assignment]
 
-                # Delete existing chunks for this document (for re-processing)
-                session.execute(
-                    self.document_chunks.delete().where(
-                        self.document_chunks.c.processed_document_id == doc_id
+                # append (#306): skip the destructive delete entirely -- a
+                # previous flush's chunks must survive this one. This is the
+                # crux of the fix the issue's contradiction ("reuse activities
+                # unmodified" vs "the store activities are destructive
+                # full-replace") resolves: extend, don't fork.
+                if not append:
+                    # Delete existing chunks for this document (for re-processing)
+                    session.execute(
+                        self.document_chunks.delete().where(
+                            self.document_chunks.c.processed_document_id == doc_id
+                        )
                     )
-                )
 
                 # Insert new chunks with foreign key and tenant_id
                 if chunks:
@@ -1041,6 +1113,37 @@ class DatabaseService:
                     exc_info=True,
                 )
                 raise
+
+    async def get_document_chunk_count(self, document_id: str) -> int:
+        """Return the current `chunk_count` for `document_id`, or 0 if the
+        document has no row yet (#306).
+
+        Used by `chunk_conversation` to compute the GLOBAL, continuing
+        `chunk_index` offset for the next flush's chunks BEFORE any chunk is
+        produced -- see that activity's module docstring ("Chunk indexing
+        (append mode)") for why the read must happen there, once, rather than
+        being recomputed independently inside `store_in_postgresql`/
+        `store_in_weaviate` (which would race under `asyncio.gather`).
+
+        Deliberately reads the denormalized `chunk_count` counter column
+        (already the source of truth `store_processed_document`'s `append`
+        path increments) rather than `SELECT MAX(chunk_index) FROM
+        document_chunks` -- one indexed point lookup instead of a per-call
+        table scan, and the two can never disagree because `append` is the
+        only writer of both.
+        """
+        if not self.engine:
+            raise RuntimeError("Database not connected")
+
+        with self.get_session() as session:
+            row = session.execute(
+                select(self.processed_documents.c.chunk_count).where(
+                    self.processed_documents.c.document_id == document_id
+                )
+            ).first()
+            if row is None or row[0] is None:
+                return 0
+            return int(row[0])
 
     async def create_pending_document(
         self,

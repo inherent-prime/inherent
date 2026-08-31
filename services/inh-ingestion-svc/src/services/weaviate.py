@@ -315,6 +315,16 @@ class WeaviateService:
             # ("only rows-strategy chunks") is a legitimate, cheap use this
             # field should keep supporting once #196 wires it through.
             Property(name="chunking_strategy", data_type=DataType.TEXT, index_searchable=False),
+            # Conversation turn attribution (#306): promoted from
+            # chunk.metadata by store_chunks_with_tenant below, same
+            # promote-from-metadata pattern as content_risk/chunking_strategy
+            # above. Absent (never set) on an ordinary document chunk -- only
+            # chunk_conversation's staged chunks carry these keys.
+            Property(name="turn_index", data_type=DataType.INT),
+            Property(name="turn_id", data_type=DataType.TEXT, index_searchable=False),
+            Property(name="role", data_type=DataType.TEXT, index_searchable=False),
+            Property(name="turn_ts", data_type=DataType.TEXT, index_searchable=False),
+            Property(name="client", data_type=DataType.TEXT, index_searchable=False),
         ]
 
     def _reconcile_collection_properties(self, collection_name: str) -> None:
@@ -629,6 +639,18 @@ class WeaviateService:
 
         Returns:
             Number of chunks stored
+
+        append mode (#306): this method never deletes -- it only ever writes
+        the ``chunks`` it is given. The caller (``store_in_weaviate``,
+        activities/store.py) is what decides whether to delete existing
+        objects for this document FIRST (full-replace, the default) or skip
+        that delete entirely (``StoreDocumentInput.append=True``,
+        ConversationMemoryWorkflow's flush) -- see that activity's own
+        comment. ``chunks`` already carries GLOBAL, non-colliding
+        ``chunk_index`` values in append mode (assigned once by
+        ``chunk_conversation``, continuing from the document's current
+        chunk_count), so this method needs no append-awareness of its own to
+        stay correct either way.
         """
         if not self.client:
             raise RuntimeError("Weaviate not connected")
@@ -701,6 +723,20 @@ class WeaviateService:
                         "content_risk_reasons": content_risk_reasons,
                         "chunking_strategy": chunking_strategy,
                     }
+
+                    # Conversation turn attribution (#306): promote from
+                    # chunk.metadata, same pattern as content_risk above --
+                    # ONLY set for a chunk that actually came from
+                    # chunk_conversation (metadata carries "turn_id"). An
+                    # ordinary document chunk never gets these properties set
+                    # at all, so it reads as "not a conversation chunk"
+                    # rather than a misleading turn_index=0/role="".
+                    if chunk_meta.get("turn_id") is not None:
+                        properties["turn_index"] = chunk_meta.get("turn_index")
+                        properties["turn_id"] = chunk_meta.get("turn_id")
+                        properties["role"] = chunk_meta.get("role")
+                        properties["turn_ts"] = chunk_meta.get("turn_ts") or ""
+                        properties["client"] = chunk_meta.get("client") or ""
 
                     # Generate deterministic UUID
                     chunk_uuid = uuid.uuid5(

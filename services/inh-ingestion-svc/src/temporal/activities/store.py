@@ -43,6 +43,19 @@ def _risk_metadata(chunk_dict: dict) -> dict | None:
     if strategy:
         metadata["chunking_strategy"] = strategy
 
+    # Conversation turn attribution (#306): chunk_conversation stamps these
+    # onto every staged chunk dict; an ordinary document chunk from chunk_text
+    # simply never carries the "turn_id" key, so this block is a no-op for
+    # every non-conversation document. Keyed on "turn_id" presence (not
+    # "role", which could theoretically collide with a future document-level
+    # field) as the single signal "this chunk came from chunk_conversation".
+    if chunk_dict.get("turn_id") is not None:
+        metadata["turn_index"] = chunk_dict.get("turn_index")
+        metadata["turn_id"] = chunk_dict.get("turn_id")
+        metadata["role"] = chunk_dict.get("role")
+        metadata["turn_ts"] = chunk_dict.get("turn_ts")
+        metadata["client"] = chunk_dict.get("client")
+
     return metadata or None
 
 
@@ -111,6 +124,13 @@ async def store_in_postgresql(input: StoreDocumentInput) -> StoreDocumentOutput:
             processing_time_ms=input.processing_time_ms,
             workflow_run_id=input.workflow_run_id,
             tenant_id=input.tenant_id,
+            # #306: append/document_type/external_id/metadata all default to
+            # DocumentIngestionWorkflow's pre-#306 values (False/"file"/None/
+            # None), so this call is byte-identical for every existing caller.
+            append=input.append,
+            document_type=input.document_type,
+            external_id=input.external_id,
+            metadata=input.metadata,
         )
 
         duration_ms = int((time.monotonic() - start) * 1000)
@@ -350,18 +370,26 @@ async def store_in_weaviate(input: StoreDocumentInput) -> StoreDocumentOutput:
         # (deterministic UUIDs only overwrite matching indexes). Use the
         # graceful variant so a Weaviate hiccup during delete doesn't
         # hard-fail the activity; we log and proceed to the write.
-        deleted_ok, deleted_count = await weaviate_service.delete_document_chunks_graceful(
-            workspace_id=input.workspace_id,
-            document_id=input.document_id,
-            user_id=input.user_id,
-        )
-        if not deleted_ok:
-            logger.warning(
-                "Could not delete existing Weaviate chunks before reindex (non-fatal)",
-                document_id=input.document_id,
+        #
+        # append (#306): SKIP the delete entirely -- a previous flush's
+        # objects must survive this one (same "extend, don't fork" reasoning
+        # as store_processed_document's append path). chunk_conversation
+        # already assigned this flush's chunk_index values continuing from
+        # the document's current chunk_count, so there is no index collision
+        # to worry about even without the delete.
+        if not input.append:
+            deleted_ok, deleted_count = await weaviate_service.delete_document_chunks_graceful(
                 workspace_id=input.workspace_id,
+                document_id=input.document_id,
                 user_id=input.user_id,
             )
+            if not deleted_ok:
+                logger.warning(
+                    "Could not delete existing Weaviate chunks before reindex (non-fatal)",
+                    document_id=input.document_id,
+                    workspace_id=input.workspace_id,
+                    user_id=input.user_id,
+                )
 
         await weaviate_service.store_chunks_with_tenant(
             chunks=chunks,
