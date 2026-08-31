@@ -27,6 +27,14 @@ from src.services.auth import (
 from src.services.database import get_database
 from src.services.search import build_search_request
 
+# A hardcoded ingested_at is a calendar time bomb: FRESHNESS_MAX_AGE_DAYS (90)
+# turned a fixed 2026-06-01 fixture stale on 2026-08-30, failing this test on
+# every branch (#341). A recent, computed timestamp keeps the "fresh document"
+# premise true on any run date.
+_RECENT_INGESTED_AT = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=30)).strftime(
+    "%Y-%m-%dT00:00:00Z"
+)
+
 
 @pytest.fixture
 def read_key() -> APIKeyInfo:
@@ -68,7 +76,7 @@ def lineage_chunk() -> DocumentChunk:
         metadata={
             "source_uri": "s3://bucket/report.pdf",
             "content_hash": "abc123",
-            "ingested_at": "2026-06-01T00:00:00Z",
+            "ingested_at": _RECENT_INGESTED_AT,
         },
     )
 
@@ -110,7 +118,7 @@ class TestLineageEndpoint:
         assert body["document_name"] == "report.pdf"
         assert body["source_uri"] == "s3://bucket/report.pdf"
         assert body["content_hash"] == "abc123"
-        assert body["ingested_at"].startswith("2026-06-01")
+        assert body["ingested_at"].startswith(_RECENT_INGESTED_AT[:10])
         assert body["is_stale"] is False
         assert body["chunk_id"] == "chunk-1"
 
