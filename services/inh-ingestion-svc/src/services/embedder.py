@@ -55,7 +55,6 @@ import threading
 from collections.abc import Callable
 
 import structlog
-from inh_contracts.embedding.retry import embed_batch_with_retry
 from inh_contracts.embedding import (
     EmbeddingIdentity,
     EmbeddingProvider,
@@ -64,6 +63,7 @@ from inh_contracts.embedding import (
     embed_texts_batched,
     redact_url,
 )
+from inh_contracts.embedding.retry import embed_batch_with_retry
 
 from src.config.settings import Settings
 from src.services.embedding_defaults import (

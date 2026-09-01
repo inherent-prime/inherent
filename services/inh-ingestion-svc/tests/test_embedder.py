@@ -437,9 +437,7 @@ async def test_embed_texts_with_progress_reports_progress_per_batch(monkeypatch)
     def fake_post(inputs):
         return [[0.0] * emb._embedding_dim() for _ in inputs]
 
-    monkeypatch.setattr(
-        emb, "embed_batch_with_retry", lambda _p, inputs, **_kw: fake_post(inputs)
-    )
+    monkeypatch.setattr(emb, "embed_batch_with_retry", lambda _p, inputs, **_kw: fake_post(inputs))
 
     progress: list[tuple[int, int]] = []
     out = await emb.embed_texts_with_progress(
@@ -470,9 +468,7 @@ async def test_embed_texts_with_progress_offloads_each_batch_to_a_thread(monkeyp
     def fake_post(inputs):
         return [[0.0] * emb._embedding_dim() for _ in inputs]
 
-    monkeypatch.setattr(
-        emb, "embed_batch_with_retry", lambda _p, inputs, **_kw: fake_post(inputs)
-    )
+    monkeypatch.setattr(emb, "embed_batch_with_retry", lambda _p, inputs, **_kw: fake_post(inputs))
     monkeypatch.setattr(emb.asyncio, "to_thread", spying_to_thread)
 
     out = await emb.embed_texts_with_progress([f"chunk-{i}" for i in range(25)])

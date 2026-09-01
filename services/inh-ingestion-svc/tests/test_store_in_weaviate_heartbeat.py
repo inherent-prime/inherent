@@ -87,7 +87,9 @@ async def test_progress_is_reported_during_a_long_store(monkeypatch):
 
     monkeypatch.setenv("EMBEDDING_BATCH_SIZE", "5")
     monkeypatch.setenv("EMBEDDING_MAX_CONCURRENCY", "1")  # deterministic order
-    monkeypatch.setattr(emb, "_post_embed", lambda inputs: [[0.0, 0.1] for _ in inputs])
+    monkeypatch.setattr(
+        emb, "embed_batch_with_retry", lambda _p, inputs, **_kw: [[0.0, 0.1] for _ in inputs]
+    )
 
     svc, chunks = _wired_service(23)  # 23 chunks / batch 5 -> 5 batches
 
@@ -119,7 +121,9 @@ async def test_no_heartbeat_outside_an_activity(monkeypatch):
     from src.services import embedder as emb
 
     monkeypatch.setenv("EMBEDDING_BATCH_SIZE", "5")
-    monkeypatch.setattr(emb, "_post_embed", lambda inputs: [[0.0] for _ in inputs])
+    monkeypatch.setattr(
+        emb, "embed_batch_with_retry", lambda _p, inputs, **_kw: [[0.0] for _ in inputs]
+    )
 
     svc, chunks = _wired_service(7)
     count = await svc.store_chunks_with_tenant(
@@ -153,7 +157,9 @@ async def test_wedged_store_stops_without_finishing_all_batches(monkeypatch):
                 _time.sleep(0.01)
         return [[0.0] for _ in inputs]
 
-    monkeypatch.setattr(emb, "_post_embed", wedged_post)
+    monkeypatch.setattr(
+        emb, "embed_batch_with_retry", lambda _p, inputs, **_kw: wedged_post(inputs)
+    )
 
     # 50 chunks: if cancellation did not actually stop dispatch, this test
     # would hang (or, with the old code, silently burn CPU embedding all 50
@@ -200,7 +206,9 @@ async def test_large_document_completes_when_nothing_else_fails(monkeypatch):
 
     monkeypatch.setenv("EMBEDDING_BATCH_SIZE", "32")
     monkeypatch.setenv("EMBEDDING_MAX_CONCURRENCY", "4")
-    monkeypatch.setattr(emb, "_post_embed", lambda inputs: [[0.0] for _ in inputs])
+    monkeypatch.setattr(
+        emb, "embed_batch_with_retry", lambda _p, inputs, **_kw: [[0.0] for _ in inputs]
+    )
 
     n = 3000  # well past what used to force the 900s cap (535 chunks, #228)
     svc, chunks = _wired_service(n)
@@ -246,7 +254,11 @@ async def test_large_document_fails_loudly_on_a_genuine_error(monkeypatch):
             raise httpx.HTTPStatusError("tei internal error", request=req, response=resp)
         return [[0.0] for _ in inputs]
 
-    monkeypatch.setattr(emb, "_post_embed", failing_after_many_batches)
+    monkeypatch.setattr(
+        emb,
+        "embed_batch_with_retry",
+        lambda _p, inputs, **_kw: failing_after_many_batches(inputs),
+    )
 
     svc, chunks = _wired_service(3000)  # ~94 batches at size 32; fails at batch 21
 

@@ -96,8 +96,8 @@ async def test_embedding_is_offloaded_to_thread(service):
     loop itself (so it can heartbeat real per-batch progress) and offloads
     each batch's blocking HTTP call individually -- so the offload
     assertion now lives at the ``embedder`` module's ``asyncio.to_thread``
-    call, one per batch, each wrapping ``_post_embed_with_retry`` rather
-    than the whole-document ``embed_texts``.
+    call, one per batch, each wrapping ``embed_batch_with_retry`` (the
+    shared #311 helper) rather than the whole-document ``embed_texts``.
     """
     import src.services.embedder as emb
 
@@ -115,4 +115,8 @@ async def test_embedding_is_offloaded_to_thread(service):
             content_type="text/plain",
         )
     to_thread.assert_awaited_once()
-    assert to_thread.await_args.args[0].__name__ == "_post_embed_with_retry"
+    # Post-#311 the per-batch blocking call is the shared
+    # inh_contracts.embedding.retry.embed_batch_with_retry, not this service's
+    # deleted _post_embed_with_retry. Same property under test (#19): the
+    # blocking HTTP call must be thread-offloaded, once per batch.
+    assert to_thread.await_args.args[0].__name__ == "embed_batch_with_retry"
