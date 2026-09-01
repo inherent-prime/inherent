@@ -152,7 +152,9 @@ class ConversationTurnMessage(BaseModel):
     turn_id: str = Field(..., description="Idempotency key for this turn")
     role: Literal["user", "assistant"] = Field(..., description="Who produced this turn")
     text: str = Field(..., min_length=1, description="Raw (pre-redaction) turn text")
-    ts: str = Field(..., description="ISO 8601 timestamp the turn was produced at (client-supplied)")
+    ts: str = Field(
+        ..., description="ISO 8601 timestamp the turn was produced at (client-supplied)"
+    )
     client: str | None = Field(
         None, description="Caller-supplied client/application label, e.g. 'agent-cli'"
     )
