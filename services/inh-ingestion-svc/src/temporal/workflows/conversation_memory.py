@@ -88,6 +88,8 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
+    from inh_contracts.conversation import CONVERSATION_CONTENT_TYPE
+
     from src.temporal.activities.cleanup import cleanup_staging
     from src.temporal.activities.completion import publish_completion
     from src.temporal.activities.conversation_chunk import chunk_conversation
@@ -113,7 +115,14 @@ with workflow.unsafe.imports_passed_through():
 # NULL/CHECK constraints (migration 001) for a document that has no actual
 # uploaded file -- see migration 020's comment for why these constraints are
 # deliberately NOT relaxed instead.
-CONVERSATION_CONTENT_TYPE = "application/x-inherent-conversation"
+#
+# CONVERSATION_CONTENT_TYPE is imported from `inh_contracts.conversation`, not
+# defined here: inh-public-api-svc READS the same value off Weaviate chunks and
+# the document row (conversations are exempt from the ingested_at staleness
+# rule -- see SearchService._compute_is_stale), so the two services must not
+# each carry their own copy of the literal. Re-exported under this module's
+# name so existing `from ...conversation_memory import CONVERSATION_CONTENT_TYPE`
+# call sites keep working.
 CONVERSATION_STORAGE_BACKEND = "local"
 
 # Bound on ConversationMemoryWorkflow._seen_turn_ids -- "a bounded set[str]"

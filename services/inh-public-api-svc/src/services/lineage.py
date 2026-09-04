@@ -9,7 +9,9 @@ document row and its chunks — with no new business logic:
   ``storage_url`` for source_uri).
 - freshness: ``ingested_at`` is parsed and ``is_stale`` is computed with the
   SAME logic the search path uses (:meth:`SearchService._compute_is_stale`), so
-  lineage and search always agree on staleness.
+  lineage and search always agree on staleness — including the conversation
+  exemption (a conversation grows by appending chunks, so an old
+  ``ingested_at`` on its earlier chunks is expected, not stale).
 
 The same builder backs BOTH the REST ``GET /v1/documents/{id}/lineage`` endpoint
 and the MCP ``explain_lineage`` tool, so the two surfaces never drift.
@@ -64,7 +66,17 @@ def build_lineage(
         return doc_meta.get(key)
 
     ingested_at = SearchService._parse_ingested_at(_meta_get("ingested_at"))
-    is_stale = SearchService._compute_is_stale(ingested_at)
+    # The chunk's own content_type when it carries one, else the document
+    # row's (`processed_documents.content_type`, surfaced as `mime_type`).
+    # Only used to spot a conversation, which is exempt from the age-based
+    # staleness rule (#306 follow-up) — see _compute_is_stale's docstring.
+    chunk_content_type = _meta_get("content_type")
+    is_stale = SearchService._compute_is_stale(
+        ingested_at,
+        content_type=(
+            chunk_content_type if isinstance(chunk_content_type, str) else document.mime_type
+        ),
+    )
     source_uri = _meta_get("source_uri") or (document.metadata or {}).get("storage_url")
     content_hash = _meta_get("content_hash")
 

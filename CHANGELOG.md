@@ -5,6 +5,29 @@ All notable changes to Inherent are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Conversations are exempt from the `is_stale` freshness rule (#306
+  follow-up).** `is_stale` (#42) compares a chunk's `ingested_at` against
+  `FRESHNESS_MAX_AGE_DAYS`, a rule written for documents whose chunks are all
+  re-stamped together — a re-upload or refresh resets every chunk at once, so
+  an old timestamp really does mean "nothing re-ingested since". A
+  conversation does not have that shape: `ConversationMemoryWorkflow` appends
+  each flush's NEW chunks (`append=True`) and leaves earlier flushes' chunks
+  untouched by design, so an active conversation's opening turns would age
+  past the threshold and read `is_stale=true` while nothing about them is
+  stale — with no re-upload or refresh path to clear the flag. The shared
+  `SearchService._compute_is_stale` now takes optional `content_type` /
+  `document_type` signals and resolves a conversation chunk to
+  `is_stale=False` at any age, on BOTH read paths (`POST /v1/search` and
+  `GET /v1/documents/{id}/lineage`, which already shared this method). The
+  search query selects the chunk's `content_type` property so the signal
+  reaches it. File documents are unchanged: a caller passing neither signal
+  gets the pre-existing behavior exactly. `CONVERSATION_CONTENT_TYPE` moved to
+  the shared `inh_contracts.conversation` module (alongside the
+  `document_type` values) so the writing service (`inh-ingestion-svc`) and the
+  reading service (`inh-public-api-svc`) cannot drift.
+
 ### Added
 
 - **Conversation ingestion: `/v1/conversations` API + signal-driven

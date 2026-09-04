@@ -98,6 +98,15 @@ some credential shapes with no recognizable prefix and low apparent entropy
 can pass through unredacted, so do not represent this as a complete
 guarantee to end users.
 
+Conversation chunks are **exempt from the `is_stale` freshness rule** that
+applies to documents. Each flush appends only its own new chunks and leaves
+earlier ones untouched, so a live conversation's opening turns keep their
+original `ingested_at` — ageing them out would flag a perfectly current
+conversation as stale, and there is no re-upload or refresh path to clear it.
+`is_stale` is therefore always `false` on a conversation chunk, in both
+`POST /v1/search` results and `GET /v1/documents/{id}/lineage`, whatever its
+age. See [Keeping content current](../keeping-content-current.md).
+
 ### Chunks
 
 | Method | Path | Permission | Purpose |
