@@ -218,3 +218,70 @@ def test_down_volumes_without_tty_requires_yes(inherent_home, runner, monkeypatc
     result = runner.invoke(app, ["down", "--volumes"])
     assert result.exit_code == 1
     assert "--yes" in result.output
+
+
+def test_status_reports_the_engine_version_from_health_ready(
+    inherent_home, runner, monkeypatch
+) -> None:
+    """`/health` is liveness-only: reading `version` off it left the field null."""
+    load_or_create_compose_env()
+    monkeypatch.setattr("inh_cli.stack.preflight_docker", lambda: None)
+    monkeypatch.setattr("inh_cli.stack.compose_ps", lambda **_: PS_PAYLOAD)
+    monkeypatch.setattr("inh_cli.stack.stack_is_running", lambda *_: True)
+
+    # Shapes the real service returns for each path.
+    payloads = {
+        "/health": {"status": "healthy", "service": "inh-public-api-svc"},
+        "/health/ready": {
+            "status": "healthy",
+            "version": "0.7.0",
+            "service": "inh-public-api-svc",
+            "checks": {},
+        },
+    }
+    monkeypatch.setattr(
+        "inh_cli.stack._health_payload", lambda path="/health": (200, payloads[path])
+    )
+
+    result = runner.invoke(app, ["--json", "status"])
+
+    assert result.exit_code == 0, result.output
+    api = json.loads(result.stdout)["services"][0]
+    assert api["engine_version"] == "0.7.0"
+    assert api["api_health"] == "healthy"
+
+
+def test_up_names_the_missing_engine_version(inherent_home, runner, monkeypatch) -> None:
+    """`up` defaults the image tag to the CLI version, which may not be published."""
+    from inh_cli.client import ClientError
+
+    def fake_run(args, **kwargs):
+        raise ClientError(
+            "public-api-svc Error manifest unknown: manifest unknown",
+            exit_code=1,
+        )
+
+    monkeypatch.setattr("inh_cli.stack.preflight_docker", lambda: None)
+    monkeypatch.setattr("inh_cli.stack.run_compose", fake_run)
+
+    result = runner.invoke(app, ["up"])
+
+    assert result.exit_code == 1
+    assert "No engine images published for version" in result.output
+    assert "--engine-version" in result.output
+
+
+def test_up_does_not_rewrite_unrelated_compose_failures(inherent_home, runner, monkeypatch) -> None:
+    from inh_cli.client import ClientError
+
+    def fake_run(args, **kwargs):
+        raise ClientError("port is already allocated", exit_code=1)
+
+    monkeypatch.setattr("inh_cli.stack.preflight_docker", lambda: None)
+    monkeypatch.setattr("inh_cli.stack.run_compose", fake_run)
+
+    result = runner.invoke(app, ["up"])
+
+    assert result.exit_code == 1
+    assert "port is already allocated" in result.output
+    assert "No engine images published" not in result.output

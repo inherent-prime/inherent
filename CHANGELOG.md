@@ -46,6 +46,24 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Fixed
 
+- **A `403` from the API is no longer reported as a rejected key (#281).**
+  The CLI collapsed `401` and `403` into "API key rejected", so a
+  workspace-scope error told users to rotate a working key instead of passing
+  `--workspace`. The server's problem+json detail is now shown as-is.
+- **Table output no longer parses document content as Rich markup (#281).**
+  A search snippet containing `[bold]` or `[/]` had those spans silently
+  deleted, and a malformed tag raised `MarkupError`.
+- **`inherent docs show` prints one field per row (#281).** Eleven columns on
+  a single row elided every value at normal terminal widths.
+- **`inherent status --json` reports a real `engine_version` (#280).** It read
+  `/health`, which carries only `status` and `service`; the version lives on
+  `/health/ready`.
+- **`inherent up` names the engine version when its images are missing
+  (#280).** The default tag is the CLI's own version, so an unpublished
+  engine failed with a raw registry manifest error.
+- **`inherent connect` leaves no backup when nothing changes (#283).** A
+  re-run against the same stack wrote a fresh timestamped backup every time,
+  each holding a plaintext API key.
 - **Dead-letter rows left at `pending` for a document that later succeeded no
   longer read as broken, and can no longer replay a stale payload (#287).**
   #249 made a successful ingestion resolve that document's dead-letter rows,

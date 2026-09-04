@@ -76,7 +76,10 @@ def request(
 
     if response.status_code in tuple(allow_statuses):
         return response
-    if response.status_code in (401, 403):
+    # 401 only. A 403 means the key is valid but not authorized for what was
+    # asked -- almost always the wrong workspace -- and the server says so in
+    # problem+json. Collapsing it here told users to rotate a working key.
+    if response.status_code == 401:
         raise ClientError("API key rejected. Check INHERENT_API_KEY or reconnect this CLI.")
     if response.status_code == 400:
         text = _body_text(response)

@@ -10,7 +10,7 @@ from typing import Annotated, Any
 import typer
 
 from inh_cli.client import ClientError, call
-from inh_cli.output import TableSpec, render
+from inh_cli.output import TableSpec, render, render_fields
 
 docs_app = typer.Typer(help="Upload, list, inspect, and delete documents.")
 
@@ -97,7 +97,7 @@ def docs_show(
     if _json_mode(ctx, json_flag):
         print(json.dumps(payload, separators=(",", ":")))
         return
-    render(payload, json_mode=False, table=TableSpec(tuple(payload.keys())))
+    render_fields(payload, json_mode=False)
     if payload.get("status") == "failed":
         reason = payload.get("error_message") or (payload.get("metadata") or {}).get(
             "error_message"

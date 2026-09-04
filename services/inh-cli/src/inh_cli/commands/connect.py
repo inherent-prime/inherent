@@ -188,15 +188,20 @@ def connect(
         if not typer.confirm("Replace the existing inherent MCP entry?"):
             raise typer.Exit(1)
 
-    if path.exists():
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        backup = path.with_name(f"{path.name}.bak-{stamp}")
-        backup.write_bytes(original_bytes)
-        backup.chmod(0o600)
-        sys.stderr.write(f"Backup: {backup}\n")
+    # A re-run with the same stack is a no-op. Rewriting anyway left a new
+    # timestamped backup on every invocation, each holding a plaintext API key.
+    if servers.get("inherent") == block:
+        sys.stderr.write(f"{path} already points at this stack; left unchanged.\n")
+    else:
+        if path.exists():
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            backup = path.with_name(f"{path.name}.bak-{stamp}")
+            backup.write_bytes(original_bytes)
+            backup.chmod(0o600)
+            sys.stderr.write(f"Backup: {backup}\n")
 
-    servers["inherent"] = block
-    _atomic_write(path, existing)
+        servers["inherent"] = block
+        _atomic_write(path, existing)
     if _verify_mcp(resolved.url, resolved.api_key):
         sys.stdout.write("connected — try asking your agent: 'search my inherent docs for …'\n")
     else:

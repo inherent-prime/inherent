@@ -150,3 +150,25 @@ def test_missing_directory_message(api_env, inherent_home, runner, tmp_path, mon
     assert "not found" in result.output
     assert "--print" in result.output
     assert not missing.exists()
+
+
+def test_rerun_against_the_same_stack_writes_no_new_backup(
+    api_env, inherent_home, runner, tmp_path, monkeypatch
+) -> None:
+    """Every run used to leave another backup, each holding a plaintext key."""
+    monkeypatch.setattr("inh_cli.commands.connect._verify_mcp", lambda *_: True)
+    config = tmp_path / ".claude.json"
+    config.write_text("{}")
+
+    first = runner.invoke(app, ["connect", "claude", "--config-path", str(config)])
+    assert first.exit_code == 0, first.output
+    after_first = sorted(p.name for p in tmp_path.glob(".claude.json.bak-*"))
+
+    second = runner.invoke(app, ["connect", "claude", "--config-path", str(config)])
+
+    assert second.exit_code == 0, second.output
+    assert sorted(p.name for p in tmp_path.glob(".claude.json.bak-*")) == after_first
+    assert "already points at this stack" in second.output
+    # The entry is still there and still correct.
+    entry = json.loads(config.read_text())["mcpServers"]["inherent"]
+    assert entry["url"].endswith("/mcp")

@@ -91,6 +91,33 @@ def _print_banner(
     )
 
 
+# Compose surfaces a missing tag as a registry manifest error naming the digest,
+# not the tag we asked for. `up` defaults INHERENT_VERSION to the CLI's own
+# version, so a CLI published ahead of its engine images fails here first.
+_MISSING_IMAGE_MARKERS = (
+    "manifest unknown",
+    "not found: manifest",
+    "manifest for",
+    "pull access denied",
+    "denied",
+)
+
+
+def _up_failure(error: ClientError, version: str, *, explicit: bool) -> ClientError:
+    """Explain a failed `up`, naming the image tag when that is the cause."""
+
+    message = str(error)
+    if not any(marker in message.lower() for marker in _MISSING_IMAGE_MARKERS):
+        return error
+    chosen = "--engine-version" if explicit else "this CLI's version"
+    return ClientError(
+        f"No engine images published for version {version} (taken from {chosen}). "
+        f"Pick a published release with `inherent up --engine-version <version>`.\n\n"
+        f"{message}",
+        exit_code=1,
+    )
+
+
 def up(
     engine_version: Annotated[
         str | None,
@@ -117,11 +144,14 @@ def up(
     if registry:
         child_env["INHERENT_REGISTRY"] = registry
 
-    if detach:
-        compose_args = ["up", "-d", "--wait"]
-        run_compose(compose_args, env_file=env_path, env=child_env)
-    else:
-        run_compose(["up"], env_file=env_path, env=child_env, capture=False)
+    try:
+        if detach:
+            compose_args = ["up", "-d", "--wait"]
+            run_compose(compose_args, env_file=env_path, env=child_env)
+        else:
+            run_compose(["up"], env_file=env_path, env=child_env, capture=False)
+    except ClientError as error:
+        raise _up_failure(error, version, explicit=engine_version is not None) from error
 
     api_key = values["INHERENT_API_KEY"]
     workspace_id = values["INHERENT_WORKSPACE_ID"]
@@ -213,7 +243,10 @@ def status(
     if not stack_is_running(rows):
         raise ClientError("Stack is not running. Run `inherent up` first.", exit_code=2)
 
-    _, health = _health_payload("/health")
+    # /health is a liveness probe: {"status", "service"} and nothing else.
+    # /health/ready is the one carrying `version` and per-component `checks`,
+    # so reading `version` off /health left status --json permanently null.
+    _, health = _health_payload("/health/ready")
     merged = []
     for row in rows:
         service = row.get("Service") or row.get("Name") or ""

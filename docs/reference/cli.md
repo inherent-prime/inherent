@@ -20,6 +20,13 @@ success, `1` error, `2` stack not running / not configured.
 Global `--workspace` sets `X-Workspace-Id`. `inherent --version` is the CLI
 version. Pin engine images with `inherent up --engine-version X.Y.Z`.
 
+`up` defaults the engine image tag to the CLI's own version, so a CLI
+published ahead of its engine images fails on the image pull. When that
+happens `up` names the version it tried and points at `--engine-version`.
+
+A `403` is a scope error, not a bad key: the message names the workspace the
+key may not reach. Pass `--workspace <id>` rather than rotating the key.
+
 ## Stack lifecycle
 
 Requires Docker Engine and Compose v2 (`docker compose`).

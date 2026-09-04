@@ -221,3 +221,33 @@ def test_no_config_exits_2(inherent_home, runner) -> None:
     result = runner.invoke(app, ["docs", "list"])
     assert result.exit_code == 2
     assert "No local stack found" in result.output
+
+
+def test_docs_show_prints_full_values_not_an_elided_row(
+    api_env, inherent_home, runner, monkeypatch
+) -> None:
+    """11 columns on one row elide every value at normal terminal widths."""
+    document = {
+        "id": "e01b3b18-bcc1-4933-8bda-d4b0e37625c1",
+        "name": "review-doc.md",
+        "workspace_id": "ws_review",
+        "source_type": "s3",
+        "mime_type": "application/octet-stream",
+        "size_bytes": 87,
+        "chunk_count": 1,
+        "status": "processed",
+        "created_at": "2026-09-04T05:47:12Z",
+        "updated_at": "2026-09-04T05:47:19Z",
+        "metadata": None,
+    }
+    monkeypatch.setattr(
+        client_mod,
+        "_transport",
+        _transport(lambda request: httpx.Response(200, json=document, request=request)),
+    )
+
+    result = runner.invoke(app, ["docs", "show", document["id"]], env={"COLUMNS": "100"})
+
+    assert result.exit_code == 0, result.output
+    for value in (document["id"], "review-doc.md", "ws_review", "processed"):
+        assert value in result.stdout, f"{value!r} was truncated away"
