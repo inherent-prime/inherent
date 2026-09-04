@@ -22,8 +22,15 @@ jobs:
         env:
           BASE_REF: ${{ github.base_ref }}
         run: |
-          git fetch origin "$BASE_REF"
-          git diff --name-only "origin/$BASE_REF...HEAD" > changed.txt
+          # Diff against `FETCH_HEAD`, not `origin/$BASE_REF`: nothing
+          # guarantees that remote-tracking ref exists in this checkout, and a
+          # missing or stale one hands the gates below a wrong file list.
+          # `GITHUB_REPOSITORY` is always the BASE repo on a `pull_request`
+          # event, so the canonical upstream URL is correct for fork and
+          # non-fork contributors alike.
+          UPSTREAM="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch "$UPSTREAM" "$BASE_REF"
+          git diff --name-only "FETCH_HEAD...HEAD" > changed.txt
           echo "Changed files:" && cat changed.txt
       # The two corpus paths excluded below are machine-generated: the
       # `eval-baseline-ratchet` job in integration.yml rewrites them on every
