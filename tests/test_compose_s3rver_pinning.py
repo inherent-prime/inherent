@@ -2,21 +2,31 @@
 
 Why this suite exists
 ---------------------
-`s3rver` runs on a bare ``node:20-alpine`` and installs itself from npm on
-every container start. Two properties of that arrangement broke the
-PR-blocking `E2E smoke` lane:
+`s3rver` used to run on a bare ``node:20-alpine`` with
+``command: npx s3rver ...``, which downloads the package from npm on EVERY
+container start. Health probes begin the moment the container starts, so that
+install raced a ``interval: 10s x retries: 5`` = 50s budget. ``up --wait``
+tore the whole stack down mid-download and failed the required `E2E smoke`
+gate on four unrelated branches in one morning.
 
-- **No ``start_period``.** Docker began health probes immediately, so the npm
-  download raced a ``interval: 10s x retries: 5`` budget. The stack was torn
-  down ~40s in with ``container inherent-oss-s3rver is unhealthy``, on four
-  unrelated branches in one morning.
-- **No version pin.** ``npx s3rver`` resolved whatever npm served that day, so
-  the S3 implementation under every integration and E2E run could change with
-  no commit -- the same class of drift as the image lockfile pinning in #225.
+The two compose files fix it differently, because they have different
+constraints:
 
-No runtime test can catch either: a passing stack proves only that npm was
-fast enough and that day's version worked. Both properties live in the compose
-definition, so they are pinned there.
+- ``docker-compose.yml`` (dev + CI) **builds** ``docker/s3rver``, so the npm
+  install happens at build time. ``up --build --wait`` finishes the build
+  before starting a container, so no probe can fire while npm is working: a
+  slow registry costs build time instead of turning the lane red.
+- ``docker-compose.release.yml`` **cannot build** -- a pip-installed
+  ``inherent up`` runs it with no build context -- so it keeps the ``npx``
+  form and instead gets a wide start-up budget.
+
+Both must pin an exact version either way: a floating ``s3rver`` meant the S3
+implementation under every integration and E2E run could change with no
+commit, the same class of drift as the image lockfile pinning in #225.
+
+No runtime test can catch any of this: a passing stack proves only that npm
+was fast enough that day and that day's version worked. The properties live
+in the build and compose definitions, so they are pinned there.
 """
 
 from __future__ import annotations
@@ -27,13 +37,17 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-COMPOSE_FILES = ("docker-compose.yml", "docker-compose.release.yml")
+DEV_COMPOSE = REPO_ROOT / "docker-compose.yml"
+RELEASE_COMPOSE = REPO_ROOT / "docker-compose.release.yml"
+S3RVER_DOCKERFILE = REPO_ROOT / "docker" / "s3rver" / "Dockerfile"
 
-# The install has to finish before a probe failure can tear the stack down.
-# Measured >130s on a cold npm cache, so the total budget -- start_period plus
-# retries x interval -- must clear that with room. text-embeddings-inference
-# uses the same 90s + 12 x 10s for the same reason.
-MINIMUM_TOTAL_BUDGET_SECONDS = 180
+# The release compose still installs at container start, so its probe must not
+# be able to tear the stack down before that can finish. `start_period` plus
+# `retries x interval` is the real budget; text-embeddings-inference uses the
+# same 90s + 12 x 10s for its own slow first start.
+MINIMUM_RELEASE_BUDGET_SECONDS = 180
+
+VERSION_PIN = re.compile(r"\bs3rver@\d+\.\d+\.\d+\b")
 
 
 def _s3rver_block(compose: Path) -> str:
@@ -43,45 +57,80 @@ def _s3rver_block(compose: Path) -> str:
     return match.group("body")
 
 
-@pytest.fixture(params=COMPOSE_FILES)
-def s3rver(request) -> str:
-    compose = REPO_ROOT / request.param
-    assert compose.is_file(), f"{request.param} is missing"
-    return _s3rver_block(compose)
+def _field(block: str, name: str) -> str | None:
+    match = re.search(rf"^    {name}: (?P<value>.+)$", block, re.MULTILINE)
+    return match.group("value") if match else None
 
 
-def test_s3rver_version_is_pinned(s3rver: str) -> None:
-    """A bare `npx s3rver` silently re-resolves on every start."""
-    command = re.search(r"^    command: (?P<value>.+)$", s3rver, re.MULTILINE)
-    assert command, "s3rver has no command"
-    value = command.group("value")
-    assert re.search(r"\bs3rver@\d+\.\d+\.\d+\b", value), (
-        f"s3rver must be pinned to an exact version, got: {value}"
-    )
-
-
-def test_s3rver_npx_never_prompts(s3rver: str) -> None:
-    """Without --yes, npx can block on an install confirmation and time out."""
-    command = re.search(r"^    command: (?P<value>.+)$", s3rver, re.MULTILINE)
-    assert command
-    assert "--yes" in command.group("value")
-
-
-def _seconds(s3rver: str, field: str) -> int:
-    match = re.search(rf"^      {field}: (?P<value>\d+)s$", s3rver, re.MULTILINE)
+def _seconds(block: str, field: str) -> int:
+    match = re.search(rf"^      {field}: (?P<value>\d+)s$", block, re.MULTILINE)
     assert match, f"s3rver healthcheck has no {field}; see #353"
     return int(match.group("value"))
 
 
-def test_s3rver_healthcheck_budgets_the_install(s3rver: str) -> None:
-    """Probes must not tear the stack down while npm is still downloading."""
-    start_period = _seconds(s3rver, "start_period")
-    interval = _seconds(s3rver, "interval")
-    retries = re.search(r"^      retries: (?P<value>\d+)$", s3rver, re.MULTILINE)
-    assert retries, "s3rver healthcheck has no retries"
+# --- dev / CI: the install must happen at build time -------------------------
 
-    total = start_period + interval * int(retries.group("value"))
-    assert total >= MINIMUM_TOTAL_BUDGET_SECONDS, (
-        f"s3rver has only {total}s before it is declared unhealthy; "
-        f"the npm install alone measured >130s (#353)"
+
+def test_dev_compose_builds_s3rver_instead_of_downloading_at_startup() -> None:
+    """`up --build` finishes the build before a probe can fire."""
+    block = _s3rver_block(DEV_COMPOSE)
+    assert "build:" in block, (
+        "docker-compose.yml must build s3rver; an `npx` at container start "
+        "races the healthcheck and tears the stack down (#353)"
     )
+    # The command itself, not the block: the comments above it legitimately
+    # mention npx while explaining why this service no longer uses it.
+    command = _field(block, "command")
+    assert command is None or "npx" not in command, (
+        "the dev stack must not install s3rver at container start"
+    )
+
+
+def test_s3rver_image_pins_an_exact_version() -> None:
+    """A floating version changes the S3 implementation with no commit."""
+    assert S3RVER_DOCKERFILE.is_file(), f"{S3RVER_DOCKERFILE} is missing"
+    content = S3RVER_DOCKERFILE.read_text(encoding="utf-8")
+    assert re.search(r"^ARG S3RVER_VERSION=\d+\.\d+\.\d+$", content, re.MULTILINE), (
+        "docker/s3rver/Dockerfile must pin S3RVER_VERSION to an exact version"
+    )
+    assert "npm install -g" in content
+
+
+# --- release: no build context, so the budget has to absorb the install ------
+
+
+def test_release_compose_pins_the_s3rver_version() -> None:
+    """The release compose has no build context, but must still pin."""
+    command = _field(_s3rver_block(RELEASE_COMPOSE), "command")
+    assert command, "release s3rver has no command"
+    assert VERSION_PIN.search(command), (
+        f"s3rver must be pinned to an exact version, got: {command}"
+    )
+
+
+def test_release_compose_npx_never_prompts() -> None:
+    """Without --yes, npx can block on an install confirmation and time out."""
+    command = _field(_s3rver_block(RELEASE_COMPOSE), "command")
+    assert command and "--yes" in command
+
+
+def test_release_healthcheck_budgets_the_install() -> None:
+    """Probes must not tear the stack down while npm is still downloading."""
+    block = _s3rver_block(RELEASE_COMPOSE)
+    retries = re.search(r"^      retries: (?P<value>\d+)$", block, re.MULTILINE)
+    assert retries, "release s3rver healthcheck has no retries"
+
+    total = _seconds(block, "start_period") + _seconds(block, "interval") * int(
+        retries.group("value")
+    )
+    assert total >= MINIMUM_RELEASE_BUDGET_SECONDS, (
+        f"s3rver has only {total}s before it is declared unhealthy; the npm "
+        f"install it still does at container start measured 423s on a cold "
+        f"cache (#353)"
+    )
+
+
+@pytest.mark.parametrize("compose", [DEV_COMPOSE, RELEASE_COMPOSE], ids=lambda p: p.name)
+def test_s3rver_keeps_its_healthcheck(compose: Path) -> None:
+    """Both stacks still gate dependents on s3rver actually serving."""
+    assert "healthcheck:" in _s3rver_block(compose)

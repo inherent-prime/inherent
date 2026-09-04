@@ -133,33 +133,30 @@ services:
       - inherent-oss
 
   s3rver:
-    image: node:20-alpine
+    # Built, not `npx`-at-startup (#353). The old bare node:20-alpine ran
+    # `npx s3rver ...`, downloading from npm on every container start while
+    # health probes were already counting -- `up --wait` tore the stack down
+    # mid-download. `up --build` finishes the build before starting a
+    # container, so a slow registry now costs build time instead of failing
+    # the lane. The release compose cannot do this (no build context on a
+    # pip-installed `inherent up`) and keeps the npx form with a wide budget.
+    build:
+      context: docker/s3rver
     container_name: inherent-oss-s3rver
     restart: unless-stopped
     ports:
       - "19000:9000"
-    # Pinned + --yes (#353): a bare `npx s3rver` resolves whatever npm serves
-    # that day, so the S3 implementation under every E2E run could change with
-    # no commit. Same class of drift as the image lockfile pinning in #225.
-    command: npx --yes s3rver@3.7.1 -d /data -a 0.0.0.0 -p 9000 --no-vhost-buckets --configure-bucket inherent-documents
+    command: ["-d", "/data", "-a", "0.0.0.0", "-p", "9000", "--no-vhost-buckets", "--configure-bucket", "inherent-documents"]
     volumes:
       - s3_data:/data
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:9000"]
       interval: 10s
       timeout: 5s
-      # Same budget as text-embeddings-inference above, and for the same
-      # reason: this container does network work before it can serve. It
-      # installs s3rver from npm on every start, and the old 10s x 5 = 50s
-      # left no room for it -- `up --wait` tore the whole stack down
-      # mid-download on four unrelated branches in one morning (#353).
-      # 90s + 12 x 10s = 210s, vs. the <50s the install historically took on
-      # CI runners. This is a budget, not a cure: the install time is
-      # unbounded (measured 423s on a cold local cache), so #353 tracks
-      # baking s3rver into a published image and dropping the runtime
-      # download entirely.
-      retries: 12
-      start_period: 90s
+      # s3rver is already installed in the image, so this only has to cover
+      # process start -- no npm download races the probe here.
+      retries: 5
+      start_period: 15s
     networks:
       - inherent-oss
 
