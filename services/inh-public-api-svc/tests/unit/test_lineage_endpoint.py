@@ -26,6 +26,11 @@ from src.services.auth import (
 )
 from src.services.database import get_database
 from src.services.search import build_search_request
+from tests.unit.freshness_fixtures import (
+    FRESH_INGESTED_AT,
+    STALE_INGESTED_AT,
+    as_response_iso,
+)
 
 
 @pytest.fixture
@@ -58,8 +63,8 @@ def lineage_doc() -> Document:
     )
 
 
-@pytest.fixture
-def lineage_chunk() -> DocumentChunk:
+def _chunk(ingested_at: str) -> DocumentChunk:
+    """A lineage chunk whose only variable is how old it is."""
     return DocumentChunk(
         id="chunk-1",
         document_id="doc-1",
@@ -68,9 +73,14 @@ def lineage_chunk() -> DocumentChunk:
         metadata={
             "source_uri": "s3://bucket/report.pdf",
             "content_hash": "abc123",
-            "ingested_at": "2026-06-01T00:00:00Z",
+            "ingested_at": ingested_at,
         },
     )
+
+
+@pytest.fixture
+def lineage_chunk() -> DocumentChunk:
+    return _chunk(FRESH_INGESTED_AT)
 
 
 @pytest.fixture
@@ -110,9 +120,23 @@ class TestLineageEndpoint:
         assert body["document_name"] == "report.pdf"
         assert body["source_uri"] == "s3://bucket/report.pdf"
         assert body["content_hash"] == "abc123"
-        assert body["ingested_at"].startswith("2026-06-01")
+        assert body["ingested_at"] == as_response_iso(FRESH_INGESTED_AT)
         assert body["is_stale"] is False
         assert body["chunk_id"] == "chunk-1"
+
+    async def test_flags_a_chunk_older_than_the_freshness_window(self, client, mock_db):
+        """The other side of the boundary (#351).
+
+        Without this, `is_stale` is only ever asserted False, so a fixture that
+        drifts across the window inverts the meaning of the test above instead
+        of failing something. Here the fixture is deliberately past the window.
+        """
+        mock_db.get_document_chunks = AsyncMock(return_value=[_chunk(STALE_INGESTED_AT)])
+        resp = await client.get("/v1/documents/doc-1/lineage", headers={"X-API-Key": "k"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ingested_at"] == as_response_iso(STALE_INGESTED_AT)
+        assert body["is_stale"] is True
 
     async def test_404_when_document_missing(self, client, mock_db):
         mock_db.get_document = AsyncMock(return_value=None)
