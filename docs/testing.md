@@ -233,7 +233,7 @@ provides a laptop Terraform path, and the published-image smoke check in
 - **Local `act`:** see infra README § Local simulation and
   [audit/act-hetzner-e2e-weaviate-401.md](audit/act-hetzner-e2e-weaviate-401.md).
 
-See [infra/README.md](https://github.com/inherent-prime/inherent/blob/main/infra/README.md#ci-e2e) and
+See [infra/hetzner/README.md](https://github.com/inherent-prime/inherent/blob/main/infra/hetzner/README.md#ci-e2e) and
 [releasing](maintainers/releasing.md#cutting-an-image-release).
 
 ## Markers

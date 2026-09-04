@@ -7,6 +7,12 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Changed
 
+- **`infra/` is now segregated per cloud provider: `infra/hetzner/` and
+  `infra/azure/` (#338, #355).** The Hetzner Terraform root moved from the
+  flat `infra/` directory into `infra/hetzner/` unchanged — remote state
+  keys are unaffected (they live in `backend.hcl`, not the path) — and
+  `infra/README.md` became a per-provider index. Operator commands change
+  from `cd infra` to `cd infra/hetzner`.
 - **Retrieval-eval golden corpus grown from 13 to 50 gated queries, closing
   the eval gate's ~7.7pp blind spot (#265).** #236 correctly derived the
   gate's per-metric tolerance as `max(EVAL_GATE_TOLERANCE,
