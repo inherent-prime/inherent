@@ -24,7 +24,7 @@ jobs:
   # Docs-only / agent-notes-only PRs (README, docs/, AGENTS.md, .memory/, ...)
   # cannot break the service matrix below, so they should not pay its cost
   # (Postgres service container + lint/format/typecheck/security/test/coverage
-  # x3 services). A workflow-level `paths-ignore` would be the obvious fix, but
+  # x4 packages). A workflow-level `paths-ignore` would be the obvious fix, but
   # `service-checks`/`root-tests` are not themselves the registered required
   # check -- "Required tests before merge" is -- and skipping this workflow at
   # the trigger level would leave THAT check unregistered and the PR stuck

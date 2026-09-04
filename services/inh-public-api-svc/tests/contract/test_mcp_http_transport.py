@@ -3,7 +3,7 @@
 Covers the acceptance criteria on the HTTP surface mounted at ``POST /mcp``
 inside this service's existing FastAPI app (``src/mcp_server/http_transport.py``):
 
-- **Schema**: exactly the 10 documented tools are advertised; the 3 the issue
+- **Schema**: exactly the documented tools are advertised; the 3 the issue
   excludes (``verify_claim`` / ``search_memory`` / ``get_citations``) --
   plus ``report_feedback``, excluded by the same "10, not 13" intent -- are
   absent from HTTP but UNCHANGED on stdio. No HTTP schema mentions
@@ -51,8 +51,9 @@ from src.models.api_key import APIKeyInfo
 
 pytestmark = [pytest.mark.contract]
 
-# The issue's "10, not 13" acceptance list, verbatim.
+# The original issue list plus the later whoami tool (#278).
 HTTP_EXPOSED_TOOLS = {
+    "whoami",
     "search_documents",
     "list_documents",
     "get_document",

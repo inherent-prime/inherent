@@ -1,8 +1,7 @@
 # Repo-root pre-commit config — canonical for the whole monorepo (M7 #20).
 #
-# Covers shared file hygiene plus per-service Ruff + Black (and mypy/Bandit for
-# the public API). Each Python hook is scoped to its service directory so a
-# change in one service does not trigger another service's toolchain.
+# Covers shared file hygiene plus package-scoped quality checks. Each Python
+# hook is scoped to its package so a change does not trigger unrelated tooling.
 #
 # Install once:
 #   uv --project services/inh-public-api-svc run pre-commit install

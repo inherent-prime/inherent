@@ -150,8 +150,10 @@ services.
 
 Inherent has **no key-management REST API** today — application keys are stored
 as an SHA-256 hash in the PostgreSQL `api_keys` table plus a workspace record in
-MongoDB. The `bootstrap.sh` script creates both. Run it with your own values
-instead of the seeded defaults:
+MongoDB. The release stack's one-shot `bootstrap` service creates one principal
+from `INHERENT_API_KEY`, `INHERENT_WORKSPACE_ID`, and `INHERENT_USER_ID`; it
+must complete before the public API starts. Set deployment-specific values.
+For a checkout-based deployment, `bootstrap.sh` creates the same two records:
 
 ```bash
 API_KEY=ink_<your-strong-key> WORKSPACE_ID=<your-workspace> \

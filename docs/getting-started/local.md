@@ -30,6 +30,11 @@ Inherent services:
 - PostgreSQL, MongoDB, Weaviate, Valkey, s3rver, Temporal, and the embedding
   sidecar
 
+The checkout-free release stack also runs one-shot `postgres-init` and
+`bootstrap` containers before the public API. `bootstrap` seeds one workspace
+and API key from environment variables. The contributor `make dev` path keeps
+using `scripts/dev/bootstrap.sh` so tenancy tests can seed a second fixture.
+
 The Makefile wraps the common commands so you do not need to memorize the
 underlying `docker compose` and `uv` calls.
 

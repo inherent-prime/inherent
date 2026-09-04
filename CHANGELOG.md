@@ -46,6 +46,20 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Fixed
 
+- **`s3rver` is version-pinned and given a start-up budget (#353).** It
+  installs itself from npm on every container start against a `10s x 5 = 50s`
+  healthcheck; a slow registry pushed it past that and `up --wait` tore the
+  whole stack down, failing the required `E2E smoke` gate on unrelated
+  branches. Now pinned to `s3rver@3.7.1` with the same `90s + 12 x 10s`
+  budget `text-embeddings-inference` uses.
+- **`inh-public-api-svc` reports its installed package version instead of a
+  hardcoded `0.2.0` (#278).** The literal had drifted from `pyproject.toml`, so
+  `/health/ready`, the OpenAPI document, and the new `whoami` surfaces all
+  published a stale number.
+- **`BOOTSTRAP_ACTION=create` now ensures the key's workspace exists (#277).**
+  It previously skipped MongoDB entirely, so a key created against a new
+  workspace id reported `workspace_ids: []` from `whoami` and failed every
+  request with `403`. An existing workspace is never renamed.
 - **A `403` from the API is no longer reported as a rejected key (#281).**
   The CLI collapsed `401` and `403` into "API key rejected", so a
   workspace-scope error told users to rotate a working key instead of passing
@@ -81,7 +95,28 @@ All notable changes to Inherent are documented here. The format follows
   reads the same `DEAD_LETTER_UNRESOLVED_STATUSES` constant as the resolve, so
   the two cannot drift apart and silently reopen the replay hole.
 
+### Security
+
+- **The OpenAPI schema is no longer served outside development (#279).**
+  `docs_url` and `redoc_url` were already gated, but the unauthenticated
+  `/openapi.json` still listed every route — including the flag-gated
+  `/v1/admin/*` surface, whose 404-not-403 design exists precisely so its
+  existence is not confirmable.
+
 ### Added
+
+- **Installable `inherent` CLI groundwork with shared config, HTTP, and
+  agent-safe JSON output contracts (#276).**
+- **Checkout-free release bootstrap service that idempotently seeds one local
+  workspace and API key before the public API starts (#277).** `BOOTSTRAP_ACTION`
+  selects `seed` (start-up), `create` (mint an extra key, creating its
+  workspace only if absent and never renaming one), or `revoke` (by key prefix; refuses an ambiguous or unmatched
+  prefix rather than reporting a revocation that did not happen) — this is the
+  path `inherent keys create|revoke` uses so the CLI never opens a database.
+- **Authenticated `GET /v1/whoami` and MCP `whoami` identity surfaces using
+  the shared workspace-authorization rule (#278).**
+- **Flag-gated, read-only local admin listings for workspaces and API keys,
+  disabled by default for SaaS safety (#279).**
 
 - **`inherent up/down/status/logs/doctor` — one-command local stack lifecycle
   from a pip-installed CLI, with secrets persisted at 0600 and service

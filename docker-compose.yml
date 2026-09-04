@@ -138,14 +138,28 @@ services:
     restart: unless-stopped
     ports:
       - "19000:9000"
-    command: npx s3rver -d /data -a 0.0.0.0 -p 9000 --no-vhost-buckets --configure-bucket inherent-documents
+    # Pinned + --yes (#353): a bare `npx s3rver` resolves whatever npm serves
+    # that day, so the S3 implementation under every E2E run could change with
+    # no commit. Same class of drift as the image lockfile pinning in #225.
+    command: npx --yes s3rver@3.7.1 -d /data -a 0.0.0.0 -p 9000 --no-vhost-buckets --configure-bucket inherent-documents
     volumes:
       - s3_data:/data
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:9000"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      # Same budget as text-embeddings-inference above, and for the same
+      # reason: this container does network work before it can serve. It
+      # installs s3rver from npm on every start, and the old 10s x 5 = 50s
+      # left no room for it -- `up --wait` tore the whole stack down
+      # mid-download on four unrelated branches in one morning (#353).
+      # 90s + 12 x 10s = 210s, vs. the <50s the install historically took on
+      # CI runners. This is a budget, not a cure: the install time is
+      # unbounded (measured 423s on a cold local cache), so #353 tracks
+      # baking s3rver into a published image and dropping the runtime
+      # download entirely.
+      retries: 12
+      start_period: 90s
     networks:
       - inherent-oss
 
@@ -350,6 +364,8 @@ services:
       # exercise the ingestion→search path unthrottled. Rate-limit behavior has
       # its own offline coverage (tests/integration/test_rate_limiting.py).
       RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+      # Whole-stack listings are safe only on this local single-operator stack.
+      ADMIN_API_ENABLED: "true"
       # On by default since 2026-08-06 (#146, see settings.py and
       # docs/advanced-indexes.md) -- this Compose default must track
       # settings.py's default or this env var silently overrides it and

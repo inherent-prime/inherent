@@ -31,7 +31,7 @@ DEV_WORKSPACE_NAME   ?= Local Dev Workspace
 help:
 	@awk 'BEGIN {printf "\nInherent local development\n\nUsage:\n  make <target>\n\nTargets:\n"} /^## / {if (help == "") help = substr($$0, 4); next} /^[a-zA-Z0-9_.-]+:/ {if (help) {split($$1, target, ":"); desc = help; sub("^[^:]+: ", "", desc); printf "  %-18s %s\n", target[1], desc; help = ""}}' $(MAKEFILE_LIST)
 
-## setup: Create .env if needed and install both service dev environments.
+## setup: Create .env if needed and install every Python package's dev environment.
 setup: env install
 
 ## quickstart: One command from a fresh checkout to a working local stack.
@@ -61,7 +61,7 @@ env:
 		echo "Created .env from .env.example"; \
 	fi
 
-## install: Install dev dependencies for both Python services with uv.
+## install: Install dev dependencies for every Python package with uv.
 install:
 	@uv --project $(INGESTION_DIR) sync --extra dev --group dev
 	@uv --project $(PUBLIC_API_DIR) sync --extra dev --group dev
@@ -254,14 +254,14 @@ release-up:
 release-down:
 	@$(COMPOSE) -f $(RELEASE_COMPOSE) down -v
 
-## lint: Run Ruff checks for both services.
+## lint: Run Ruff checks for every Python package.
 lint:
 	@cd $(INGESTION_DIR) && uv run ruff check src tests
 	@cd $(PUBLIC_API_DIR) && uv run ruff check src tests
 	@cd $(CONTRACTS_DIR) && uv run ruff check src tests
 	@cd $(CLI_DIR) && uv run ruff check src tests
 
-## format-check: Check formatting for both services.
+## format-check: Check formatting for every Python package.
 format-check:
 	@cd $(INGESTION_DIR) && uv run black --check src tests
 	@cd $(PUBLIC_API_DIR) && uv run black --check src tests

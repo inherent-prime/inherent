@@ -75,6 +75,35 @@ services:
     networks:
       - inherent-oss
 
+  # One-shot seed of the default workspace + API key, so a pip-installed CLI
+  # never needs a database connection of its own (#275 decision 4). Same
+  # pattern as postgres-init above: release image, SERVICE_MODE, exit.
+  bootstrap:
+    image: ${INHERENT_REGISTRY:-ghcr.io/inherent-prime}/ingestion-svc:${INHERENT_VERSION:-latest}
+    container_name: inherent-oss-bootstrap
+    depends_on:
+      postgres-init:
+        condition: service_completed_successfully
+      mongodb:
+        condition: service_healthy
+    environment:
+      SERVICE_MODE: bootstrap
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-knowledge_base}
+      MONGODB_URI: mongodb://mongodb:27017
+      MONGODB_DB_NAME: main
+      # Required by shared Settings; bootstrap mode never connects to Weaviate.
+      WEAVIATE_URL: http://weaviate:8080
+      WEAVIATE_API_KEY: ${WEAVIATE_API_KEY:?WEAVIATE_API_KEY must be set}
+      BOOTSTRAP_API_KEY: ${INHERENT_API_KEY:?INHERENT_API_KEY must be set — `inherent up` generates it}
+      BOOTSTRAP_WORKSPACE_ID: ${INHERENT_WORKSPACE_ID:-ws_default}
+      BOOTSTRAP_USER_ID: ${INHERENT_USER_ID:-local-user}
+      BOOTSTRAP_KEY_NAME: ${INHERENT_KEY_NAME:-Local CLI Key}
+      BOOTSTRAP_WORKSPACE_NAME: ${INHERENT_WORKSPACE_NAME:-Default Workspace}
+      LOG_LEVEL: INFO
+    networks:
+      - inherent-oss
+    restart: "no"
+
   weaviate:
     image: semitechnologies/weaviate:1.27.0
     container_name: inherent-oss-weaviate
@@ -133,14 +162,28 @@ services:
     ports:
       # Loopback-only (#3): reached over the compose network by the services.
       - "127.0.0.1:19000:9000"
-    command: npx s3rver -d /data -a 0.0.0.0 -p 9000 --no-vhost-buckets --configure-bucket inherent-documents
+    # Pinned + --yes (#353): a bare `npx s3rver` resolves whatever npm serves
+    # that day, so the S3 implementation under every E2E run could change with
+    # no commit. Same class of drift as the image lockfile pinning in #225.
+    command: npx --yes s3rver@3.7.1 -d /data -a 0.0.0.0 -p 9000 --no-vhost-buckets --configure-bucket inherent-documents
     volumes:
       - s3_data:/data
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:9000"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      # Same budget as text-embeddings-inference above, and for the same
+      # reason: this container does network work before it can serve. It
+      # installs s3rver from npm on every start, and the old 10s x 5 = 50s
+      # left no room for it -- `up --wait` tore the whole stack down
+      # mid-download on four unrelated branches in one morning (#353).
+      # 90s + 12 x 10s = 210s, vs. the <50s the install historically took on
+      # CI runners. This is a budget, not a cure: the install time is
+      # unbounded (measured 423s on a cold local cache), so #353 tracks
+      # baking s3rver into a published image and dropping the runtime
+      # download entirely.
+      retries: 12
+      start_period: 90s
     networks:
       - inherent-oss
 
@@ -334,8 +377,12 @@ services:
       AWS_S3_REGION: ${AWS_REGION:-us-east-1}
       EMBEDDING_SERVICE_URL: http://text-embeddings-inference:80
       EMBEDDING_DIM: 384
+      # Whole-stack listings are safe only on this local single-operator stack.
+      ADMIN_API_ENABLED: "true"
       LOG_LEVEL: INFO
     depends_on:
+      bootstrap:
+        condition: service_completed_successfully
       postgres-init:
         condition: service_completed_successfully
       mongodb:

@@ -29,6 +29,8 @@ FRESH_INGESTED_AT = _dt.datetime.now(_dt.UTC).isoformat()
 
 pytestmark = pytest.mark.asyncio
 
+FRESH_INGESTED_AT = _dt.datetime.now(_dt.UTC).isoformat()
+
 
 def _key(*, permissions: list[str], user_id: str = "user-1") -> APIKeyInfo:
     return APIKeyInfo(
