@@ -1,9 +1,7 @@
 """MCP tool contract regression tests (M6 #30).
 
-Locks down the MCP agent surface so agents do not silently break. For each tool
-(search_documents, search_memory, get_citations, verify_claim, explain_lineage,
-refresh_stale_source, get_document_context, list_documents, get_document,
-list_chunks) we assert:
+Locks down the MCP agent surface so agents do not silently break. For every
+registered tool, including ``whoami``, we assert:
 
 - **inputSchema** advertises the documented required fields with the documented
   JSON types (and ``api_key`` is always required).
@@ -37,6 +35,7 @@ pytestmark = [pytest.mark.contract]
 # schema drifts from it, these tests fail. (Required permissions live in
 # ``_PERMISSION`` below, mirroring the server's _TOOL_PERMISSIONS map.)
 TOOL_SPEC: dict[str, dict] = {
+    "whoami": {"required": ["api_key"]},
     "search_documents": {"required": ["api_key", "query"]},
     "search_memory": {"required": ["api_key", "query"]},
     "get_citations": {"required": ["api_key", "query"]},
@@ -55,6 +54,7 @@ TOOL_SPEC: dict[str, dict] = {
 
 # Permission each tool requires (mirrors src/mcp_server/server._TOOL_PERMISSIONS).
 _PERMISSION: dict[str, str] = {
+    "whoami": "read",
     "search_documents": "search",
     "search_memory": "search",
     "get_citations": "search",
@@ -81,6 +81,7 @@ _DENY_KEY_PERMS: dict[str, list[str]] = {
 
 # Minimal arguments to actually drive each tool past schema/permission checks.
 _TOOL_ARGS: dict[str, dict] = {
+    "whoami": {},
     "search_documents": {"query": "q"},
     "search_memory": {"query": "q"},
     "get_citations": {"query": "q"},

@@ -4,6 +4,7 @@ Service modes:
     worker     — Temporal worker + MQ subscriber (production default)
     standalone — HTTP API + Temporal worker (manual triggers, health checks)
     migrate    — Apply pending SQL migrations, then exit (DB init container)
+    bootstrap  — Seed the local workspace and API key, then exit
 
 Configure via SERVICE_MODE environment variable.
 """
@@ -265,6 +266,12 @@ async def main() -> None:
             from src.services.migrations import run_migrations
 
             run_migrations(settings)
+            return
+        if mode == "bootstrap":
+            # One-shot identity seed for checkout-free release stacks.
+            from src.services.bootstrap import run_bootstrap
+
+            await run_bootstrap(settings)
             return
         if mode == "standalone":
             await run_standalone(settings)

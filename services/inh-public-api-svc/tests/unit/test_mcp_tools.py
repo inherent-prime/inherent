@@ -25,16 +25,11 @@ from src.models.citation import Citation
 from src.models.document import Document, DocumentChunk
 from src.models.search import SearchResponse, SearchResult
 
+FRESH_INGESTED_AT = _dt.datetime.now(_dt.UTC).isoformat()
+
 pytestmark = pytest.mark.asyncio
 
-
-# A hardcoded ingested_at is a calendar time bomb: FRESHNESS_MAX_AGE_DAYS (90)
-# turned a fixed 2026-06-01 fixture stale on 2026-08-30, failing this test on
-# every branch (#341). A recent, computed timestamp keeps the "fresh document"
-# premise true on any run date.
-_RECENT_INGESTED_AT = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=30)).strftime(
-    "%Y-%m-%dT00:00:00Z"
-)
+FRESH_INGESTED_AT = _dt.datetime.now(_dt.UTC).isoformat()
 
 
 def _key(*, permissions: list[str], user_id: str = "user-1") -> APIKeyInfo:
@@ -326,7 +321,7 @@ class TestMemoryPrimitives:
             metadata={
                 "source_uri": "s3://bucket/report.pdf",
                 "content_hash": "abc123",
-                "ingested_at": _RECENT_INGESTED_AT,
+                "ingested_at": FRESH_INGESTED_AT,
             },
         )
         mock_db = AsyncMock()
@@ -342,7 +337,7 @@ class TestMemoryPrimitives:
         assert payload["document_name"] == "report.pdf"
         assert payload["source_uri"] == "s3://bucket/report.pdf"
         assert payload["content_hash"] == "abc123"
-        assert payload["ingested_at"].startswith(_RECENT_INGESTED_AT[:10])
+        assert payload["ingested_at"] == FRESH_INGESTED_AT
         assert payload["is_stale"] is False
 
     async def test_explain_lineage_blocks_foreign_document(self):
