@@ -58,8 +58,23 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
         run: |
           set -euo pipefail
-          git fetch origin "$BASE_REF"
-          git diff --name-only "origin/$BASE_REF...HEAD" > changed.txt
+          # Diff against `FETCH_HEAD`, not a remote-tracking ref. Nothing
+          # guarantees `origin/$BASE_REF` exists in this checkout -- `git
+          # fetch origin "$BASE_REF"` updates FETCH_HEAD, not necessarily
+          # `refs/remotes/origin/$BASE_REF` -- so the old form could abort on
+          # a missing ref or, worse, diff against a stale one and hand the
+          # filter below a wrong file list. An aborted step is caught by the
+          # `!= 'false'` fail-open conditions and by #303's empty-file check;
+          # a stale-but-valid diff is caught by neither.
+          #
+          # Fetch by the canonical upstream URL rather than the `origin`
+          # remote: on a `pull_request` event `GITHUB_REPOSITORY` is always
+          # the BASE repo (never the contributor's fork), so this resolves to
+          # the same place for fork and non-fork PRs alike, independent of how
+          # the checkout action configured `origin`.
+          UPSTREAM="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch "$UPSTREAM" "$BASE_REF"
+          git diff --name-only "FETCH_HEAD...HEAD" > changed.txt
           echo "Changed files:" && cat changed.txt
 
           # Kept in sync with the identical filter in ci.yml's `changes` job:
