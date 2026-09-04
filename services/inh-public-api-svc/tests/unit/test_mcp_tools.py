@@ -24,6 +24,11 @@ from src.models.api_key import APIKeyInfo
 from src.models.citation import Citation
 from src.models.document import Document, DocumentChunk
 from src.models.search import SearchResponse, SearchResult
+from tests.unit.freshness_fixtures import (
+    FRESH_INGESTED_AT,
+    STALE_INGESTED_AT,
+    as_response_iso,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -295,7 +300,8 @@ class TestMemoryPrimitives:
         assert payload["support_level"] == "strong"
         assert 0.0 <= payload["score"] <= 1.0
 
-    async def test_explain_lineage_returns_provenance_and_freshness(self):
+    async def _lineage_payload(self, ingested_at: str):
+        """Run `explain_lineage` over one chunk of the given age."""
         doc = Document(
             id="doc-1",
             name="report.pdf",
@@ -317,7 +323,7 @@ class TestMemoryPrimitives:
             metadata={
                 "source_uri": "s3://bucket/report.pdf",
                 "content_hash": "abc123",
-                "ingested_at": "2026-06-01T00:00:00Z",
+                "ingested_at": ingested_at,
             },
         )
         mock_db = AsyncMock()
@@ -329,12 +335,26 @@ class TestMemoryPrimitives:
             {"api_key": "k", "document_id": "doc-1", "_key_info": _key(permissions=["read"])},
             mock_db,
         )
-        payload = _structured_payload(result)
+        return _structured_payload(result)
+
+    async def test_explain_lineage_returns_provenance_and_freshness(self):
+        payload = await self._lineage_payload(FRESH_INGESTED_AT)
         assert payload["document_name"] == "report.pdf"
         assert payload["source_uri"] == "s3://bucket/report.pdf"
         assert payload["content_hash"] == "abc123"
-        assert payload["ingested_at"].startswith("2026-06-01")
+        assert payload["ingested_at"] == as_response_iso(FRESH_INGESTED_AT)
         assert payload["is_stale"] is False
+
+    async def test_explain_lineage_flags_a_chunk_past_the_freshness_window(self):
+        """The other side of the boundary (#351) -- see the REST twin.
+
+        `explain_lineage` and `GET /v1/documents/{id}/lineage` share
+        `build_lineage`, so both surfaces must agree on staleness; asserting it
+        only on the fresh side leaves that agreement untested where it matters.
+        """
+        payload = await self._lineage_payload(STALE_INGESTED_AT)
+        assert payload["ingested_at"] == as_response_iso(STALE_INGESTED_AT)
+        assert payload["is_stale"] is True
 
     async def test_explain_lineage_blocks_foreign_document(self):
         """Undifferentiated not-found, not a distinguishable "you don't have
