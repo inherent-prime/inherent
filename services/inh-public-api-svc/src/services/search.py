@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
+from inh_contracts.conversation import is_conversation
 from inh_contracts.embedding.identity import decode_identity, resolve_identity
 from inh_contracts.naming import (
     WORKSPACE_COLLECTION_PREFIX,
@@ -307,7 +308,13 @@ class SearchService:
         return None
 
     @staticmethod
-    def _compute_is_stale(ingested_at: datetime | None, *, now: datetime | None = None) -> bool:
+    def _compute_is_stale(
+        ingested_at: datetime | None,
+        *,
+        content_type: str | None = None,
+        document_type: str | None = None,
+        now: datetime | None = None,
+    ) -> bool:
         """Return True when ``ingested_at`` is older than the freshness window.
 
         Stale-evidence policy (#42): a result is stale when
@@ -315,7 +322,29 @@ class SearchService:
         unknown (``None``) the result is treated as NOT stale (we never flag
         evidence we cannot age). Callers still receive stale results — they are
         only flagged, never dropped.
+
+        Conversations are EXEMPT from the age rule (#306 follow-up). The rule
+        assumes a document whose chunks are all re-stamped together — a
+        re-upload or refresh resets every chunk's ``ingested_at`` at once, so
+        an old timestamp really does mean "nothing has been re-ingested
+        since". A conversation does not have that shape:
+        ``ConversationMemoryWorkflow`` appends each flush's NEW chunks to the
+        same document (``append=True``) and deliberately leaves earlier
+        flushes' chunks untouched, so their ``ingested_at`` stays at the
+        moment those turns were written. Aging them out would report a live,
+        perfectly valid conversation as stale purely because its opening
+        turns are old — and nothing can clear the flag, since there is no
+        re-upload or refresh path for a conversation. So a conversation chunk
+        always resolves ``is_stale=False``, whatever its age.
+
+        ``content_type`` / ``document_type`` identify the document; either is
+        sufficient and both are optional, because the two call paths carry
+        different ones (a Weaviate search result has the chunk's
+        ``content_type``; a ``processed_documents`` row has both). Omitting
+        both preserves the original file-document behavior exactly.
         """
+        if is_conversation(content_type=content_type, document_type=document_type):
+            return False
         if ingested_at is None:
             return False
         reference = now or datetime.now(UTC)
@@ -684,8 +713,16 @@ class SearchService:
 
             # Freshness (#42): promote ingested_at and compute staleness. Stale
             # results are flagged, not dropped (see _compute_is_stale).
+            # `content_type` is selected purely to identify a conversation
+            # chunk, which is exempt from the age rule because each flush
+            # only re-stamps its OWN new chunks (#306 follow-up) — see
+            # _compute_is_stale's docstring.
             ingested_at = self._parse_ingested_at(chunk.get("ingested_at"))
-            is_stale = self._compute_is_stale(ingested_at)
+            raw_content_type = chunk.get("content_type")
+            is_stale = self._compute_is_stale(
+                ingested_at,
+                content_type=raw_content_type if isinstance(raw_content_type, str) else None,
+            )
 
             # RAG-poisoning risk (#44): promote the heuristic ingest-time signal.
             # NON-BLOCKING — risky chunks are flagged, never dropped. "none" is
@@ -894,6 +931,7 @@ class SearchService:
                     content_hash
                     source_uri
                     ingested_at
+                    content_type
                     content_risk
                     content_risk_reasons
                     _additional {{ id score certainty distance }}

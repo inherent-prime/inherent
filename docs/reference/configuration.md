@@ -50,6 +50,7 @@ and binds all datastore ports to `127.0.0.1`.
 | --- | --- | --- | --- |
 | `MQ_REDIS_URL` | `redis://localhost:6379` | Redis/Valkey URL for publishing upload events | yes |
 | `MQ_UPLOAD_TOPIC` | `core.document.uploaded.v1` | Upload topic — must match the ingestion consumer | no |
+| `MQ_CONVERSATION_TOPIC` | `core.conversation.turn.v1` | Conversation-turn topic (#306) — must match ingestion's `MQ_CONVERSATION_TOPIC`. One message per turn, never per batch | no |
 | `REDIS_URL` | unset | Redis for distributed rate limiting; in-memory (per-process) fallback when unset | yes |
 | `RATE_LIMIT_ENABLED` | `true` | Master toggle (CI/e2e sets `false`) | no |
 | `RATE_LIMIT_WINDOW_SECONDS` | `60` | Window length | no |
@@ -135,6 +136,8 @@ and binds all datastore ports to `127.0.0.1`.
 | `MQ_UPLOAD_TOPIC` | `core.document.uploaded.v1` | Consumed upload topic — must match publisher | no |
 | `MQ_COMPLETION_TOPIC` | `core.document.processed.v1` | Processed-document event topic | no |
 | `MQ_CONSUMER_GROUP` | `ingestion-workers` | Consumer group | no |
+| `MQ_CONVERSATION_TOPIC` | `core.conversation.turn.v1` | Consumed conversation-turn topic (#306) — must match public-api's `MQ_CONVERSATION_TOPIC`. Delivered to `ConversationMemoryWorkflow` via `signal_with_start` | no |
+| `MQ_CONVERSATION_CONSUMER_GROUP` | `ingestion-conversation-workers` | Own consumer group — kept separate from `MQ_CONSUMER_GROUP` so a conversation turn is never interleaved with (or lost to) the document-upload cursor | no |
 | `MQ_MAX_CONCURRENT` | `0` (→ `MAX_WORKERS`) | Backpressure: max in-flight workflow starts | no |
 
 ### Processing, embeddings & retries
@@ -201,18 +204,32 @@ docstring for the full design rationale and cost tradeoffs.
 | --- | --- | --- |
 | `REDACTION_PATTERNS_EXTRA` | `[]` (JSON array of regex strings) | Extra self-hosted patterns for the `redact_turns` Temporal activity, applied in addition to the built-in detector set (`services/inh-ingestion-svc/src/services/redaction_patterns.py`): common API-key prefixes, JWTs, PEM private-key blocks, connection strings with embedded credentials, and a high-entropy-token catch-all. Each string is compiled as its own regex; a match is replaced with `[redacted:custom]` |
 
-⚠️ **Standalone as of this writing.** `redact_turns` is not yet called by
-any workflow — it ships as an independently reviewable, independently
-tested activity ahead of the conversation-ingestion pipeline
-([#306](https://github.com/inherent-prime/inherent/issues/306)) that will
-call it. Setting `REDACTION_PATTERNS_EXTRA` today has no observable effect
-until that wiring lands.
+`redact_turns` runs on every `ConversationMemoryWorkflow` flush
+([#306](https://github.com/inherent-prime/inherent/issues/306)), before
+`chunk_conversation` — unredacted turn text never reaches the embedder or
+the vector store. `REDACTION_PATTERNS_EXTRA` is live from the moment a
+conversation is ingested.
 
 ⚠️ **Best-effort, not a guarantee.** This is pattern matching — it will not
 catch every credential shape (a secret with no recognizable prefix and low
 apparent entropy can pass through unredacted). Do not represent this as a
 complete guarantee to end users; see the module docstring in
 `redaction_patterns.py` for the full "honest limits" statement.
+
+### Conversation memory (#306)
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `CONVERSATION_FLUSH_CHAR_THRESHOLD` | `4000` | `ConversationMemoryWorkflow` flushes its buffer once buffered turn text reaches this many characters — the embedding-pipeline protection: one store batch per conversation per flush instead of one per turn |
+| `CONVERSATION_FLUSH_IDLE_SECONDS` | `90` | ...or once this many seconds pass since the buffer started filling, whichever comes first (size-or-idle debounce) |
+| `CONVERSATION_CONTINUE_AS_NEW_TURNS` | `500` | `continue_as_new` every N turns, to bound Temporal workflow history size for a long-lived conversation |
+| `CONVERSATION_IDLE_FINALIZE_HOURS` | `24` | No new turns for this long finalizes the conversation: publish `core.document.processed.v1` and let the workflow run complete, instead of waiting indefinitely |
+
+These are resolved once, outside the workflow (`conversation_trigger.py`),
+and carried through `ConversationMemoryInput` rather than read inside
+`@workflow.run` — a config value that could differ between the original run
+and a later replay of the same history must never be read directly inside
+workflow code (Temporal determinism).
 
 ⚠️ **Non-retryable.** `redact_turns` fails a turn's own redaction pass by
 dropping that turn and writing an audit row (`redaction_audit` table,

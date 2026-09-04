@@ -115,6 +115,11 @@ citations, and `GET /v1/documents/{id}/lineage`.
 - **It never filters, drops, or re-ranks.** Ranking is by score alone. A stale
   chunk and a current chunk with the same score sort identically.
 - **A reindex or refresh clears it**, because `ingested_at` is re-stamped.
+- **Conversations are exempt.** A conversation grows by appending each flush's
+  new chunks; earlier flushes' chunks deliberately keep their original
+  `ingested_at`, so the age rule would flag a still-active conversation as
+  stale — and no refresh path exists to clear it. `is_stale` is always `false`
+  on a conversation chunk. Only file documents are aged.
 
 Acting on the flag is the consuming application's job. Recency- and
 authority-aware ranking is tracked as

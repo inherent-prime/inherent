@@ -364,6 +364,78 @@ class DatabaseService:
             row = result.fetchone()
             return str(row.document_id) if row else None
 
+    # --- Conversations (#306) ------------------------------------------------
+
+    async def get_document_id_by_external_id(
+        self, workspace_id: str, external_id: str
+    ) -> str | None:
+        """Resolve a conversation's `processed_documents.document_id` from its
+        caller-supplied `external_id` (#306, migration 020).
+
+        Scoped to `document_type = 'conversation'` AND `workspace_id` so a
+        conversation in a workspace the caller can't see -- or an ordinary
+        file document whose (unrelated) `external_id` column happens to be
+        NULL, never matching here anyway -- reads as not-found rather than
+        leaking cross-workspace existence. Mirrors
+        `get_document_id_by_content_hash`'s shape.
+        """
+        async with self.session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT document_id
+                    FROM processed_documents
+                    WHERE workspace_id = :workspace_id
+                      AND external_id = :external_id
+                      AND document_type = 'conversation'
+                    """
+                ),
+                {"workspace_id": workspace_id, "external_id": external_id},
+            )
+            row = result.fetchone()
+            return str(row.document_id) if row else None
+
+    async def get_conversation(self, workspace_id: str, external_id: str) -> dict | None:
+        """Return a conversation's stats for `GET /v1/conversations/{external_id}`.
+
+        `turn_count`/`last_flushed_at` come from `processed_documents.metadata`
+        (ConversationMemoryWorkflow stamps both on every flush, see
+        StoreDocumentInput.metadata's docstring in inh-ingestion-svc) -- no
+        dedicated columns needed for either. Returns None when no
+        conversation with this `(workspace_id, external_id)` exists (never
+        distinguishes "wrong workspace" from "no such conversation").
+        """
+        async with self.session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT document_id, workspace_id, external_id, status,
+                           chunk_count, metadata, created_at, updated_at
+                    FROM processed_documents
+                    WHERE workspace_id = :workspace_id
+                      AND external_id = :external_id
+                      AND document_type = 'conversation'
+                    """
+                ),
+                {"workspace_id": workspace_id, "external_id": external_id},
+            )
+            row = result.fetchone()
+            if not row:
+                return None
+
+            metadata = row.metadata or {}
+            return {
+                "document_id": str(row.document_id),
+                "workspace_id": str(row.workspace_id),
+                "external_id": str(row.external_id),
+                "status": row.status,
+                "chunk_count": row.chunk_count or 0,
+                "turn_count": metadata.get("turn_count", 0),
+                "last_flushed_at": metadata.get("last_flushed_at"),
+                "created_at": row.created_at,
+                "updated_at": row.updated_at,
+            }
+
     async def create_or_reset_pending_document(
         self,
         *,

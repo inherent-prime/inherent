@@ -259,6 +259,26 @@ class Settings(BaseSettings):
     redaction_patterns_extra: list[str] = Field(default=[], alias="REDACTION_PATTERNS_EXTRA")
     # --- End Redaction (#307) ---
 
+    # --- Conversation Memory (#306) ---
+    # ConversationMemoryWorkflow's size-or-idle flush debounce -- "the
+    # embedding-pipeline protection" per the issue: one store batch per
+    # conversation per flush instead of one per turn. Both configurable.
+    conversation_flush_char_threshold: int = Field(4000, alias="CONVERSATION_FLUSH_CHAR_THRESHOLD")
+    conversation_flush_idle_seconds: int = Field(90, alias="CONVERSATION_FLUSH_IDLE_SECONDS")
+    # continue_as_new every N turns, to bound Temporal history size for a
+    # long-lived conversation.
+    conversation_continue_as_new_turns: int = Field(500, alias="CONVERSATION_CONTINUE_AS_NEW_TURNS")
+    # No turns for this long -> finalize (publish completion, complete the
+    # workflow run) instead of waiting indefinitely.
+    conversation_idle_finalize_hours: int = Field(24, alias="CONVERSATION_IDLE_FINALIZE_HOURS")
+    # MQ topic public-api publishes one message per turn to (never one per
+    # batch -- see ConversationTurnMessage's docstring, inh_contracts.events).
+    mq_conversation_topic: str = Field("core.conversation.turn.v1", alias="MQ_CONVERSATION_TOPIC")
+    mq_conversation_consumer_group: str = Field(
+        "ingestion-conversation-workers", alias="MQ_CONVERSATION_CONSUMER_GROUP"
+    )
+    # --- End Conversation Memory (#306) ---
+
     @property
     def resolved_mq_max_concurrent(self) -> int:
         """Effective MQ consume-loop concurrency bound.

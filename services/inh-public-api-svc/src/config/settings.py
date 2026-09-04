@@ -150,6 +150,15 @@ class Settings(BaseSettings):
         alias="MQ_UPLOAD_TOPIC",
         description="MQ topic for document upload events",
     )
+    # Must match ingestion-svc's MQ_CONVERSATION_TOPIC (settings.py,
+    # #306) — same reasoning as mq_topic_document_uploaded above: a
+    # separate env var name would let an operator override one side only
+    # and silently publish conversation turns to a stream nobody consumes.
+    mq_topic_conversation_turn: str = Field(
+        default="core.conversation.turn.v1",
+        alias="MQ_CONVERSATION_TOPIC",
+        description="MQ topic for conversation-turn events (#306), one message per turn",
+    )
 
     # Redis (optional - for distributed rate limiting)
     redis_url: str | None = Field(
