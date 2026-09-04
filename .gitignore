@@ -35,3 +35,9 @@ graphify-out/
 # MkDocs build output
 site/
 .memory/
+
+# Local agent tooling: skills vendored by the skills installer plus its
+# lockfile. Machine-local and third-party, same category as .claude/ and
+# .remember/ above (#347).
+.agents/
+skills-lock.json
