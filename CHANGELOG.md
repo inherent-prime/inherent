@@ -7,6 +7,12 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Changed
 
+- **`infra/` is now segregated per cloud provider: `infra/hetzner/` and
+  `infra/azure/` (#338, #355).** The Hetzner Terraform root moved from the
+  flat `infra/` directory into `infra/hetzner/` unchanged — remote state
+  keys are unaffected (they live in `backend.hcl`, not the path) — and
+  `infra/README.md` became a per-provider index. Operator commands change
+  from `cd infra` to `cd infra/hetzner`.
 - **Retrieval-eval golden corpus grown from 13 to 50 gated queries, closing
   the eval gate's ~7.7pp blind spot (#265).** #236 correctly derived the
   gate's per-metric tolerance as `max(EVAL_GATE_TOLERANCE,
@@ -111,6 +117,25 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Added
 
+- **Azure cloud-native production Terraform target: AKS, HA, DR, one-click
+  deploy script, and docs (#338, #320).** `infra/azure/` provisions a full
+  production stack on AKS (3 zones, autoscaling node pools), Postgres
+  Flexible Server (zone-redundant HA), Cosmos DB for MongoDB (vCore), Azure
+  Cache for Redis (TLS, `noeviction`), Key Vault, and self-hosted TEI on AKS
+  as the default embedding path — an Azure OpenAI resource is provisioned
+  alongside it, one tfvar away, but stays inactive until the
+  `openai_compatible` provider path merges
+  ([#311](https://github.com/inherent-prime/inherent/issues/311),
+  [PR #314](https://github.com/inherent-prime/inherent/pull/314)) — with
+  MinIO on-cluster mirrored hourly to Blob Storage (GRS) for DR, keeping
+  object-storage RPO within the stack's ≤1h target — see
+  [#329](https://github.com/inherent-prime/inherent/issues/329) for native
+  Blob support. `scripts/deploy-azure.sh` bootstraps remote state and
+  applies the stack end to end; `docs/deploy/azure.md` documents every
+  layer, tfvar, and TCO estimate, and `docs/deploy/azure-dr-runbook.md` covers
+  zone/region-loss and PITR restore procedures. `ingress_profile = "appgw_waf"`
+  and least-privilege Postgres app roles remain tracked follow-ups under this
+  same epic.
 - **Installable `inherent` CLI groundwork with shared config, HTTP, and
   agent-safe JSON output contracts (#276).**
 - **Checkout-free release bootstrap service that idempotently seeds one local

@@ -102,7 +102,7 @@ jobs:
         run: |
           REGION="${AWS_DEFAULT_REGION:-eu-central}"
           export AWS_DEFAULT_REGION="$REGION"
-          cat > infra/backend-ci.hcl <<EOF
+          cat > infra/hetzner/backend-ci.hcl <<EOF
           bucket = "${HETZNER_S3_BUCKET}"
           key    = "inherent/ci/${INPUT_RUN_ID}/terraform.tfstate"
 
@@ -116,10 +116,10 @@ jobs:
           skip_requesting_account_id  = true
           use_path_style              = true
           EOF
-          terraform -chdir=infra init -input=false -reconfigure -backend-config=backend-ci.hcl
+          terraform -chdir=infra/hetzner init -input=false -reconfigure -backend-config=backend-ci.hcl
           ok=0
           for attempt in 1 2 3; do
-            if terraform -chdir=infra destroy -auto-approve \
+            if terraform -chdir=infra/hetzner destroy -auto-approve \
               -var="server_name=inherent-ci-${INPUT_RUN_ID}" \
               -var="ssh_key_name=inherent-ci-key-${INPUT_RUN_ID}" \
               -var="ssh_public_key_path=${HETZNER_SSH_PUB}" \

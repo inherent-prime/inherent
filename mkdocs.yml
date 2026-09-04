@@ -40,7 +40,11 @@ markdown_extensions:
   - toc:
       permalink: true
   - pymdownx.highlight
-  - pymdownx.superfences
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.details
   - pymdownx.snippets:
       base_path: ["."]
@@ -75,6 +79,8 @@ nav:
       - Access-control model: access-control.md
       - Keeping content current: keeping-content-current.md
       - Production hardening: deploy/production.md
+      - Deploy → Azure (production): deploy/azure.md
+      - Azure DR runbook: deploy/azure-dr-runbook.md
       - Testing: testing.md
       - Advanced indexes: advanced-indexes.md
   - Reference:

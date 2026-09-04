@@ -18,8 +18,12 @@ htmlcov/
 dist/
 build/
 
-data/
-# The CLI ships the release compose file as package data (#280).
+# Anchored to the repo root deliberately -- an earlier un-anchored `data/`
+# here matched (and gitignored) infra/azure/modules/data/ too, silently
+# masking that whole Terraform module from git (#47). The anchor also means
+# the CLI's packaged release compose file (#280) needs no un-ignore rules,
+# but they stay as a guard should the anchor ever be loosened again.
+/data/
 !services/inh-cli/src/inh_cli/data/
 !services/inh-cli/src/inh_cli/data/docker-compose.release.yml
 uploads/
@@ -35,3 +39,8 @@ graphify-out/
 # MkDocs build output
 site/
 .memory/
+
+# Terraform working dirs (any root/module) — state and providers never belong in git.
+**/.terraform/
+*.tfstate
+*.tfstate.*
