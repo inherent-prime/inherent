@@ -127,6 +127,59 @@ class TestSearchFlow:
         assert data["results"][0]["content"] == "hello world"
         assert data["query"] == "hello"
 
+    async def test_search_surfaces_conversation_turn_attribution(self, client, mock_search):
+        """Turn attribution survives serialization to the wire (#306).
+
+        The unit tests pin the promotion inside ``_search_weaviate``; this pins
+        the other half — that the fields actually reach the JSON body a client
+        reads, alongside a file-document result that carries none of them.
+        """
+        mock_search.search = AsyncMock(
+            return_value=SearchResponse(
+                results=[
+                    SearchResult(
+                        chunk_id="c1",
+                        document_id="conv-1",
+                        document_name="session-42",
+                        content="the deploy failed on the migration step",
+                        score=0.95,
+                        metadata={},
+                        turn_index=3,
+                        turn_id="t-abc",
+                        role="assistant",
+                        turn_ts="2026-09-01T10:15:00Z",
+                        client="agent-cli",
+                    ),
+                    SearchResult(
+                        chunk_id="c2",
+                        document_id="d1",
+                        document_name="handbook.pdf",
+                        content="expense policy",
+                        score=0.80,
+                        metadata={},
+                    ),
+                ],
+                query="deploy",
+                total_results=2,
+                processing_time_ms=15,
+                search_mode="semantic",
+            )
+        )
+
+        resp = await client.post("/v1/search", json={"query": "deploy"})
+        assert resp.status_code == 200
+        conversation, file_doc = resp.json()["results"]
+
+        assert conversation["turn_index"] == 3
+        assert conversation["turn_id"] == "t-abc"
+        assert conversation["role"] == "assistant"
+        assert conversation["turn_ts"] == "2026-09-01T10:15:00Z"
+        assert conversation["client"] == "agent-cli"
+
+        # A result from an uploaded document carries no attribution at all.
+        for field in ("turn_index", "turn_id", "role", "turn_ts", "client"):
+            assert file_doc[field] is None, field
+
     async def test_search_empty_results(self, client, mock_search):
         mock_search.search = AsyncMock(
             return_value=SearchResponse(

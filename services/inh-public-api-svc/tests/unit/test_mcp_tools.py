@@ -255,6 +255,69 @@ class TestSearchParity:
         assert payload["results"][0]["score"] == 0.91
         assert payload["results"][0]["source_uri"] == "s3://bucket/report.pdf"
 
+    async def test_search_memory_surfaces_conversation_turn_attribution(self):
+        """search_memory is THE conversation tool -- it must say who spoke (#306)."""
+        conversation_result = _search_result(doc_id="conv-1")
+        conversation_result.turn_index = 3
+        conversation_result.turn_id = "t-abc"
+        conversation_result.role = "assistant"
+        conversation_result.turn_ts = "2026-09-01T10:15:00Z"
+        conversation_result.client = "agent-cli"
+
+        mock_db = AsyncMock()
+        mock_db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
+        mock_search = AsyncMock()
+        mock_search.search = AsyncMock(
+            return_value=SearchResponse(
+                results=[conversation_result],
+                query="deploy",
+                total_results=1,
+                processing_time_ms=1.0,
+                search_mode="semantic",
+            )
+        )
+        result = await _call(
+            "search_memory",
+            {"api_key": "k", "query": "deploy", "_key_info": _key(permissions=["search"])},
+            mock_db,
+            mock_search,
+        )
+        entry = _structured_payload(result)["results"][0]
+        assert entry["turn_index"] == 3
+        assert entry["turn_id"] == "t-abc"
+        assert entry["role"] == "assistant"
+        assert entry["turn_ts"] == "2026-09-01T10:15:00Z"
+        assert entry["client"] == "agent-cli"
+
+    async def test_document_result_payload_omits_turn_attribution(self):
+        """No regression, and no wasted tokens: a file chunk keeps its pre-#306 shape.
+
+        The attribution keys are ADDED for a conversation chunk, not emitted as
+        five nulls on every result of every response -- this payload is read by
+        agents and the token cost is theirs.
+        """
+        mock_db = AsyncMock()
+        mock_db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
+        mock_search = AsyncMock()
+        mock_search.search = AsyncMock(
+            return_value=SearchResponse(
+                results=[_search_result()],
+                query="x",
+                total_results=1,
+                processing_time_ms=1.0,
+                search_mode="semantic",
+            )
+        )
+        result = await _call(
+            "search_documents",
+            {"api_key": "k", "query": "x", "_key_info": _key(permissions=["search"])},
+            mock_db,
+            mock_search,
+        )
+        entry = _structured_payload(result)["results"][0]
+        for field in ("turn_index", "turn_id", "role", "turn_ts", "client"):
+            assert field not in entry, field
+
 
 # --------------------------------------------------------------------------
 # Memory primitives (#40) shapes

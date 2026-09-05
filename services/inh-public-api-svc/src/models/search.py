@@ -127,6 +127,26 @@ class SearchResult(BaseModel):
     content_risk: str | None = None
     content_risk_reasons: list[str] | None = None
 
+    # Conversation turn attribution (#306) — optional, backward-compatible.
+    # Promoted from the chunk so a caller can tell WHO said the retrieved text
+    # and WHERE in the conversation it sat, without a second lookup:
+    #   turn_index — the turn's 0-based position in the flush that produced it
+    #   turn_id    — the caller's idempotency key for that turn
+    #   role       — "user" | "assistant"
+    #   turn_ts    — the caller-supplied ISO-8601 timestamp of the turn
+    #   client     — the caller-supplied client/application label (e.g. "agent-cli")
+    # ALL None for an ordinary file-document chunk: the ingestion side only sets
+    # these on chunks that came from `chunk_conversation`, so "absent" means
+    # "not a conversation chunk" rather than a misleading turn_index=0/role="".
+    # Field names mirror the Weaviate properties AND the POST
+    # /v1/conversations/{external_id}/turns request body, so a caller reads back
+    # what it wrote under the same names.
+    turn_index: int | None = None
+    turn_id: str | None = None
+    role: str | None = None
+    turn_ts: str | None = None
+    client: str | None = None
+
     # Claim-level citation (#39) — optional, backward-compatible. Built from this
     # result's own fields (chunk_id + spans + score + provenance + freshness) so
     # the evidence is citable without a second lookup.

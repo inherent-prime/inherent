@@ -257,6 +257,13 @@ reintroduced through the schema). Omit the field; do not pass
   Pass a non-null `event_id` to `report_feedback` to close the loop; see
   [ADR 0003](../adr/0003-traffic-mined-retrieval-evals.md) for the flywheel
   this feeds.
+- A result whose chunk came from a conversation (`POST
+  /v1/conversations/{external_id}/turns`) carries `turn_index`, `turn_id`,
+  `role`, `turn_ts` and `client` in `search_documents` / `search_memory`'s
+  structured results (#306), so you can tell who said the retrieved text and
+  where in the conversation it sat. These keys are ABSENT — not `null` — on a
+  result from an uploaded document, so test with `"role" in result` rather
+  than comparing to `null`.
 - **Capture is opt-in at the shared retrieval call site, not implicit for
   every caller of it (#241 review).** `search_documents` / `search_memory`
   request capture explicitly; `get_citations` shares the identical retrieval
