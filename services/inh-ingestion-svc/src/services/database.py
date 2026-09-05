@@ -1058,13 +1058,54 @@ class DatabaseService:
                     # remote storage_url; NULL when neither is known.
                     source_uri = message.storage_path or message.storage_url
 
+                    # append (#306): renumber this batch's chunk_index values to
+                    # CONTINUE from this document's current max instead of using
+                    # `chunk.chunk_index` verbatim -- the incoming chunks' own
+                    # chunk_index is relative to THEIR batch (a fresh flush's
+                    # chunks are typically produced starting back at 0), and
+                    # inserting that unchanged collides with a prior flush's
+                    # rows on document_chunks' (processed_document_id,
+                    # chunk_index) unique constraint the moment a second flush
+                    # lands. Read the max HERE -- inside this same
+                    # session/transaction, after the (append-mode-skipped)
+                    # delete above and immediately before the insert below --
+                    # so a concurrent flush that already committed its own
+                    # chunks earlier in this same window is reflected, and
+                    # nothing else can slip a colliding row in between this
+                    # read and our insert. MAX() is NULL for a document with no
+                    # chunks yet (this document's very first append), which is
+                    # why the offset is 0 then, not 1 -- `+ 1` only applies
+                    # when a max actually exists.
+                    #
+                    # append=False (DocumentIngestionWorkflow's path) is left
+                    # byte-identical to before: chunks were just deleted above,
+                    # so `chunk.chunk_index` is used verbatim and indices start
+                    # whatever value the caller supplied (0 in every existing
+                    # caller).
+                    if append:
+                        max_chunk_index = session.execute(
+                            select(func.max(self.document_chunks.c.chunk_index)).where(
+                                self.document_chunks.c.processed_document_id == doc_id
+                            )
+                        ).scalar()
+                        next_chunk_index = 0 if max_chunk_index is None else max_chunk_index + 1
+                    else:
+                        next_chunk_index = None  # unused on this branch
+
+                    # Built as new dicts (never `chunk.chunk_index = ...`) so
+                    # the caller's own DocumentChunk objects are never mutated
+                    # -- store_in_weaviate (asyncio.gather'd alongside this
+                    # store activity) reads its OWN copy built from the same
+                    # staged chunk dicts, not these objects, but callers are
+                    # free to inspect `chunks` after this call returns and
+                    # must see exactly what they passed in.
                     chunk_values = [
                         {
                             "processed_document_id": doc_id,
                             "document_id": message.document_id,
                             "workspace_id": message.workspace_id,
                             "tenant_id": tenant_id,
-                            "chunk_index": chunk.chunk_index,
+                            "chunk_index": (next_chunk_index + i if append else chunk.chunk_index),
                             "content": chunk.content,
                             # Prefer the model-aware estimate computed by the
                             # chunk activity; fall back to the same estimate if
@@ -1091,7 +1132,7 @@ class DatabaseService:
                             # fresh ingested_at, so a refresh resets staleness.
                             "ingested_at": now,
                         }
-                        for chunk in chunks
+                        for i, chunk in enumerate(chunks)
                     ]
                     session.execute(self.document_chunks.insert(), chunk_values)
 
