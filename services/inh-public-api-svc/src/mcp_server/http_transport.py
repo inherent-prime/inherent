@@ -19,7 +19,7 @@ this module declares a tool description, schema, or handler a second time:
   (``_http_tools`` below) -- excluding ``verify_claim`` / ``search_memory`` /
   ``get_citations`` (and, pending a follow-up decision, ``report_feedback``;
   see the comments on those ``ToolDef`` entries in ``server.py`` for why each
-  is excluded). "10, not 13" is therefore DATA on the registry, not a second
+  is excluded). The exposed subset is therefore DATA on the registry, not a second
   hardcoded name list that could drift from it.
 - Every exposed schema is the registry's OWN schema with ``api_key`` stripped
   (``_strip_api_key`` below) -- computed, not hand-duplicated. On HTTP the key
@@ -47,7 +47,7 @@ from mcp.types import CallToolResult, TextContent, Tool
 from starlette.requests import Request
 from starlette.types import Receive, Scope, Send
 
-from src.mcp_server.server import _TOOLS, ToolDef
+from src.mcp_server.server import _TOOLS, ToolDef, current_mcp_endpoint
 from src.models.api_key import APIKeyInfo
 from src.services.auth import get_api_key_info
 from src.utils import get_logger
@@ -172,7 +172,7 @@ def create_http_mcp_server() -> Server:
 
     A SEPARATE ``mcp.server.Server`` instance from stdio's
     ``server.create_mcp_server`` -- different auth source (header vs. tool
-    argument), different advertised surface (10 vs. 13/14 tools), different
+    argument), different advertised surface, different
     error convention (``isError=True`` + failure class vs. stdio's unchanged
     plain-text errors) -- but built from the EXACT SAME ``_TOOLS`` registry
     via ``_http_tools`` / ``_strip_api_key``. There is no second tool
@@ -340,9 +340,11 @@ def mount_mcp_http(app: FastAPI) -> StreamableHTTPSessionManager:
         )
 
         token = _current_key_info.set(key_info)
+        endpoint_token = current_mcp_endpoint.set(str(request.base_url).rstrip("/"))
         try:
             await session_manager.handle_request(scope, receive, send)
         finally:
+            current_mcp_endpoint.reset(endpoint_token)
             _current_key_info.reset(token)
 
     # `add_route`, NOT `app.mount("/mcp", mcp_asgi_app)` -- tried and

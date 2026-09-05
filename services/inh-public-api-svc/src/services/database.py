@@ -267,7 +267,7 @@ class DatabaseService:
             result = await session.execute(
                 text(
                     """
-                    SELECT key_id, user_id, workspace_id, permissions, rate_limit,
+                    SELECT key_id, name, user_id, workspace_id, permissions, rate_limit,
                            expires_at, status
                     FROM api_keys
                     WHERE key_hash = :key_hash AND status = 'active'
@@ -293,6 +293,7 @@ class DatabaseService:
 
             return APIKeyInfo(
                 key_id=row.key_id,
+                name=row.name,
                 user_id=row.user_id,
                 workspace_id=row.workspace_id,
                 permissions=row.permissions if isinstance(row.permissions, list) else [],
@@ -300,6 +301,60 @@ class DatabaseService:
                 expires_at=row.expires_at,
                 status=row.status,
             )
+
+    async def list_admin_workspaces(self, *, offset: int, limit: int) -> list[dict[str, Any]]:
+        """List Mongo control-plane workspaces with cheap PostgreSQL document counts."""
+        from src.services.mongo_client import get_mongo_client
+
+        collection = get_mongo_client()[settings.mongodb_db_name]["workspaces"]
+        cursor = collection.find({}, {"_id": 1, "name": 1, "user_id": 1}).sort("_id", 1)
+        documents = await cursor.skip(offset).to_list(length=limit)
+        workspace_ids = [str(document["_id"]) for document in documents]
+        counts: dict[str, int] = {}
+        if workspace_ids:
+            async with self.session() as session:
+                result = await session.execute(
+                    text(
+                        """
+                        SELECT workspace_id, COUNT(*) AS document_count
+                        FROM processed_documents
+                        WHERE workspace_id = ANY(CAST(:workspace_ids AS text[]))
+                        GROUP BY workspace_id
+                        """
+                    ),
+                    {"workspace_ids": workspace_ids},
+                )
+                counts = {
+                    str(row.workspace_id): int(row.document_count) for row in result.fetchall()
+                }
+        return [
+            {
+                "workspace_id": str(document["_id"]),
+                "name": document.get("name"),
+                # A doc written by an older seeder may lack user_id; an admin
+                # listing must degrade, not 500, on one malformed row.
+                "user_id": str(document.get("user_id") or ""),
+                "document_count": counts.get(str(document["_id"]), 0),
+            }
+            for document in documents
+        ]
+
+    async def list_admin_keys(self, *, offset: int, limit: int) -> list[dict[str, Any]]:
+        """List only non-secret API-key columns for the local admin surface."""
+        async with self.session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT key_id, name AS key_name, key_prefix, workspace_id, user_id,
+                           permissions, status, created_at, last_used_at, expires_at
+                    FROM api_keys
+                    ORDER BY created_at DESC, key_id
+                    OFFSET :offset LIMIT :limit
+                    """
+                ),
+                {"offset": offset, "limit": limit},
+            )
+            return [dict(row._mapping) for row in result.fetchall()]
 
     # Document writes (upload lifecycle)
     async def get_document_id_by_filename(

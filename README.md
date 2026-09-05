@@ -278,7 +278,8 @@ Notes:
 This release stack is a zero-setup **demo**. Before you point real users or data
 at it, work through [Taking Inherent to Production](docs/deploy/production.md) —
 real object storage, MongoDB auth, TLS, `ENVIRONMENT=production`, the event-queue
-eviction policy, and backups.
+eviction policy, and backups. For a cloud-native production deploy on Azure
+(AKS, HA, DR, one-click script), see [Deploy to Azure](docs/deploy/azure.md).
 
 ## Local Smoke Test
 

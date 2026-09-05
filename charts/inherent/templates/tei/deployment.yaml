@@ -1,0 +1,52 @@
+{{- if eq .Values.embedding.profile "tei" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: text-embeddings-inference
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inherent.labels" . | nindent 4 }}
+    {{- include "inherent.selectorLabels" (dict "component" "tei") | nindent 4 }}
+spec:
+  # DEFAULT profile (embedding.profile="tei", values.yaml). The app only
+  # ever speaks TEI's wire protocol (POST /embed) today — azure_openai is a
+  # gated, non-functional alternative until #311/PR #314 merges an
+  # openai_compatible provider (see values.yaml's embedding.profile
+  # comment). This self-hosted BAAI/bge-small-en-v1.5 sidecar is what
+  # actually serves embeddings in a stock install.
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "inherent.selectorLabels" (dict "component" "tei") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "inherent.labels" . | nindent 8 }}
+        {{- include "inherent.selectorLabels" (dict "component" "tei") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "inherent.serviceAccountName" . }}
+      containers:
+        - name: tei
+          image: "{{ .Values.embedding.tei.image.repository }}:{{ .Values.embedding.tei.image.tag }}"
+          args:
+            - "--model-id"
+            - {{ .Values.embedding.tei.modelId | quote }}
+            - "--port"
+            - "80"
+          ports:
+            - name: http
+              containerPort: 80
+          resources:
+            {{- toYaml .Values.embedding.tei.resources | nindent 12 }}
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            failureThreshold: 12
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 90
+            periodSeconds: 15
+{{- end }}

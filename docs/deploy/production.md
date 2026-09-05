@@ -58,8 +58,13 @@ Set `ENVIRONMENT=production` before exposing the API to anything real.
 The demo stores document blobs in `s3rver`, a Node-based S3 mock, with
 credentials defaulting to `S3RVER`. Replace it with real S3-compatible storage.
 
-The application supports `s3`, `gcs`, and `azure` backends
-(`services/inh-ingestion-svc/src/temporal/models.py`). To switch:
+The application implements only `s3`-compatible and `local` storage backends.
+`services/inh-ingestion-svc/src/temporal/models.py` also defines `gcs` and
+`azure` as enum values, but neither has a client implementation — setting
+`STORAGE_BACKEND=gcs` or `azure` fails at runtime. Native Azure Blob support is
+tracked in [#329](https://github.com/inherent-prime/inherent/issues/329); until
+then, Azure deployments run MinIO (S3-compatible) on-cluster — see
+[Deploy to Azure](azure.md). To switch to real S3-compatible storage:
 
 1. Remove the `s3rver` service and the `depends_on: s3rver` entries from your
    compose file.
@@ -150,8 +155,10 @@ services.
 
 Inherent has **no key-management REST API** today — application keys are stored
 as an SHA-256 hash in the PostgreSQL `api_keys` table plus a workspace record in
-MongoDB. The `bootstrap.sh` script creates both. Run it with your own values
-instead of the seeded defaults:
+MongoDB. The release stack's one-shot `bootstrap` service creates one principal
+from `INHERENT_API_KEY`, `INHERENT_WORKSPACE_ID`, and `INHERENT_USER_ID`; it
+must complete before the public API starts. Set deployment-specific values.
+For a checkout-based deployment, `bootstrap.sh` creates the same two records:
 
 ```bash
 API_KEY=ink_<your-strong-key> WORKSPACE_ID=<your-workspace> \
