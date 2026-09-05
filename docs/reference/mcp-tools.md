@@ -41,8 +41,70 @@ claude mcp add --transport http inherent https://api.inherent.sh/mcp \
   independent HTTP request; the key is re-validated on every call.
 - Tool errors set `isError: true` with a machine-branchable `error_class` in
   `structuredContent` (e.g. `authorization_failed`, `not_found`,
-  `validation_error`, `unknown_tool`, `internal_error`) instead of the plain
-  prose stdio still returns.
+  `validation_error`, `unknown_tool`, `internal_error`, `quota_exceeded`)
+  instead of the plain prose stdio still returns.
+
+### Per-identity entitlements and quotas (#309)
+
+Permission (`read`/`search`/`write`) answers "can this key ever call this
+tool"; entitlements answer "has this identity got budget left today" — a
+separate question, checked after permission and before the tool handler
+runs, for **both** the API-key and the OAuth (#295) call paths. Limits are
+read from the resolved identity (`Principal.principal_type` +
+`principal_id`, not from a second identity notion), via a pluggable
+`EntitlementsProvider` (`src/services/entitlements.py`) — this repo ships
+only `NullEntitlementsProvider`, which returns *unlimited* for every
+principal. **No plan names or tier values live in this repo**; a
+deployment that wants enforcement wires its own provider in
+(`set_entitlements_provider`) reading a local table or an external billing
+service. An API-key caller with no entitlement record configured — the
+default for every self-hosted deployment and every SaaS caller until an
+operator configures one — is completely unaffected: no rate-limiter or
+database call happens at all.
+
+Four limits, all optional (absent = unlimited):
+
+| Limit | Meaning | Checked on |
+| --- | --- | --- |
+| `calls_per_minute` | Burst ceiling | every tool call |
+| `calls_per_month` | Total tool calls | every tool call |
+| `writes_per_day` | Calls to `permission: "write"` tools | write tools only |
+| `max_documents` | Existing-document cap | `upload_document` only |
+
+`max_documents` is deliberately checked only against `upload_document` —
+the one tool that can increase a workspace's document count — never
+against `delete_document` or `refresh_stale_source`. Both of those also
+carry `permission: "write"` (so `writes_per_day` still counts them), but
+blocking `delete_document` at the cap would trap a caller with no way back
+under it.
+
+A denial is the SAME `isError: true` / `structuredContent.error_class`
+shape every other rejection on this transport uses (`error_class:
+"quota_exceeded"`), naming the limit hit (`limit`), its configured value
+(`limit_value`), the Unix-timestamp reset time (`reset_at` — `null` for
+`max_documents`, which has no time window), and an operator-configured
+`upgrade_url` when one is set. Like `insufficient_scope` above, this is a
+JSON-RPC-level result at HTTP **200**, not a transport-level 429 — the same
+`StreamableHTTPSessionManager(json_response=True)` constraint applies.
+
+**Fail-open vs. fail-closed.** A genuinely-observed over-limit is rejected
+(fail closed). An *infrastructure* failure while checking a limit — the
+entitlements provider raising, the rate-limiter's backend (Redis or
+in-memory) raising, the `max_documents` document-count query raising — is
+logged loudly (`logger.error`, not swallowed) and the call is **allowed**
+(fail open): a metering-store blip must never lock out every caller on the
+box, which would be worse than the abuse the feature prevents.
+
+**Metering.** Per-call usage is published via a fire-and-forget
+`asyncio.create_task` (`quotas.publish_usage_event`) after the quota
+decision — never awaited by the dispatcher, so a slow or failing metering
+sink adds no latency to, and can never fail, a tool call. The three
+time-windowed limits above reuse #213's own `TokenBucketRateLimiter`
+(Redis-backed when `REDIS_URL` is set, in-memory otherwise) as their
+enforcement counter — that check-and-consume call IS synchronous (the
+decision cannot be made without it), the same tradeoff #213's
+`RateLimitingMiddleware` already makes for every request on this app, on
+the same sub-millisecond backend operation.
 
 ### OAuth 2.1 resource-server discovery (hosted only, #295)
 

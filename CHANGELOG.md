@@ -69,6 +69,41 @@ All notable changes to Inherent are documented here. The format follows
   adds `document_type`/`external_id` (+ a partial unique index on
   `(workspace_id, external_id)`) to `processed_documents`, which had neither
   before this.
+- **Per-identity entitlements and quotas in the MCP dispatcher, keyed off
+  the `Principal` seam (#309).** Any valid key previously got unlimited
+  access to every HTTP-exposed MCP tool — #213's rate limiting bounds a
+  connection, not an identity's budget, so plan tiering on a hosted
+  deployment was decorative and one runaway self-hosted agent loop could
+  exhaust the box for every other tenant. `src/services/entitlements.py`
+  adds an `Entitlements` value (`calls_per_month` / `writes_per_day` /
+  `calls_per_minute` / `max_documents` / `upgrade_url`, all optional —
+  absent means unlimited) behind a pluggable `EntitlementsProvider`; the
+  shipped `NullEntitlementsProvider` returns unlimited for every principal,
+  so an API-key caller with no entitlement record configured is byte-for-
+  byte unchanged (no plan names or tier values ship in this repo — a
+  deployment wires in its own provider via `set_entitlements_provider`).
+  `src/mcp_server/quotas.py` enforces the configured limits in both
+  `call_tool` and `_call_tool_oauth`, after the existing permission/scope
+  check and before the handler runs, reusing #213's own
+  `TokenBucketRateLimiter` (Redis-backed when configured, in-memory
+  otherwise) for the three time-windowed limits rather than a second
+  limiter; `max_documents` is checked against a live `COUNT(*)` on
+  `processed_documents` and applies only to `upload_document` — never to
+  `delete_document` / `refresh_stale_source`, which don't increase the
+  count and would otherwise trap a caller at the cap with no way back
+  under it. A denial is `isError=True` with `structuredContent.error_class
+  == "quota_exceeded"` naming the limit, its value, the reset time (`null`
+  for `max_documents`, which has no time window), and an operator
+  `upgrade_url` when configured — the same shape `_call_tool_oauth`'s
+  `insufficient_scope` result already uses, since the MCP SDK's
+  `StreamableHTTPSessionManager(json_response=True)` has no status-code
+  override reachable from inside `tools/call`, the same constraint #295's
+  scope check already documented. Any infrastructure failure (entitlements
+  lookup, rate-limiter backend, the document-count query) fails OPEN with a
+  loud `logger.error` rather than locking out every caller on a sink blip;
+  only a genuinely observed over-limit fails closed. Per-call usage is
+  published via a fire-and-forget `asyncio.create_task`, so a metering sink
+  can never add latency to, or fail, a tool call.
 - **`redact_turns` Temporal activity: non-retryable, per-turn credential
   redaction ahead of conversation ingestion (#307).** Conversations
   captured from an assistant contain credentials by default — API keys

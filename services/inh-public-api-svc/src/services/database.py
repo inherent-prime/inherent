@@ -1046,6 +1046,34 @@ class DatabaseService:
             raise
         return doc is not None
 
+    async def get_document_count_for_workspaces(self, workspace_ids: list[str]) -> int:
+        """Total live document count across ``workspace_ids`` (#309).
+
+        Backs the ``max_documents`` entitlement check
+        (``src/mcp_server/quotas.py``): a plain ``COUNT(*)`` against
+        ``processed_documents`` -- the same authoritative table
+        ``get_documents_multi_workspace`` below counts against, NOT the
+        denormalized ``workspace_metadata.document_count`` column
+        ``list_workspaces`` displays (that counter is maintained
+        best-effort for a fast listing summary and is not the row a quota
+        decision should be pinned to). Returns 0 for an empty
+        ``workspace_ids`` list without a query, same short-circuit
+        ``get_documents_multi_workspace`` uses.
+        """
+        if not workspace_ids:
+            return 0
+        async with self.session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT COUNT(*) FROM processed_documents
+                    WHERE workspace_id = ANY(:workspace_ids)
+                """
+                ),
+                {"workspace_ids": workspace_ids},
+            )
+            return result.scalar() or 0
+
     # Multi-workspace document queries
     async def get_documents_multi_workspace(
         self,

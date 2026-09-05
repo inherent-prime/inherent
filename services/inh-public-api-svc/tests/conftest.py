@@ -28,6 +28,23 @@ def _reset_rate_limiter_singleton():
 
 
 @pytest.fixture(autouse=True)
+def _reset_entitlements_provider_singleton():
+    """Isolate the global entitlements provider between tests (#309).
+
+    Mirrors ``_reset_rate_limiter_singleton`` above: without this, a test
+    that calls ``set_entitlements_provider`` to install a limited provider
+    would leak it into every later test, silently changing them from the
+    default-open ``NullEntitlementsProvider`` behavior the rest of the suite
+    (correctly) assumes.
+    """
+    import src.services.entitlements as entitlements_mod
+
+    entitlements_mod._entitlements_provider = None
+    yield
+    entitlements_mod._entitlements_provider = None
+
+
+@pytest.fixture(autouse=True)
 def _reset_service_singletons():
     """Isolate the process-wide service singletons between tests.
 
