@@ -39,7 +39,7 @@ from this environment variable.
 ## 2. Configure the Deployment
 
 ```bash
-cd infra
+cd infra/hetzner
 
 cp terraform.tfvars.example terraform.tfvars
 ```
@@ -92,7 +92,7 @@ Pick one init path:
 |------|------|---------------------|------|
 | **Prod / long-lived** | Stable prod VM | `backend.hcl` stable key (e.g. `inherent/prod/...`) | copy `backend.hcl.example` → `backend.hcl`, set `AWS_*` env, `terraform init -backend-config=backend.hcl` |
 | **Laptop test** | Local experiments | `backend.hcl` key e.g. `inherent/local/laptop/...` | same Object Storage; see [local-vm-test.md](local-vm-test.md) |
-| **CI e2e** | GHA Hetzner e2e | Object Storage `inherent/ci/<github.run_id>/terraform.tfstate` via workflow-generated `backend-ci.hcl` | see [infra/README.md § CI e2e](https://github.com/inherent-prime/inherent/blob/main/infra/README.md#ci-e2e) |
+| **CI e2e** | GHA Hetzner e2e | Object Storage `inherent/ci/<github.run_id>/terraform.tfstate` via workflow-generated `backend-ci.hcl` | see [infra/hetzner/README.md § CI e2e](https://github.com/inherent-prime/inherent/blob/main/infra/hetzner/README.md#ci-e2e) |
 
 - `.terraform.lock.hcl` is the **provider lock** — committed to git.
 - `*.tfstate` is **state** — never commit; remote state uses Hetzner Object Storage (S3-compatible).
@@ -122,7 +122,7 @@ key such as `inherent/local/laptop/terraform.tfstate`.
 
 GHA Hetzner e2e uses Object Storage under `inherent/ci/<run_id>/`, not local
 state. Configure secrets/vars, recover workflow, and orphan cleanup in
-[infra/README.md § CI e2e](https://github.com/inherent-prime/inherent/blob/main/infra/README.md#ci-e2e).
+[infra/hetzner/README.md § CI e2e](https://github.com/inherent-prime/inherent/blob/main/infra/hetzner/README.md#ci-e2e).
 
 ## 4. Review the Plan
 
@@ -204,7 +204,7 @@ docker compose -f docker-compose.release.yml up -d
 Edit the Terraform files and re-apply:
 
 ```bash
-cd infra
+cd infra/hetzner
 terraform apply
 ```
 
@@ -226,7 +226,7 @@ rules, or location.
 Remove all provisioned resources:
 
 ```bash
-cd infra
+cd infra/hetzner
 terraform destroy
 ```
 

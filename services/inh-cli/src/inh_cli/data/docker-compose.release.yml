@@ -1,0 +1,417 @@
+# Self-contained release stack for Inherent — runs entirely from PUBLISHED
+# images, no repo checkout or local build required.
+#
+#   curl -O https://raw.githubusercontent.com/inherent-prime/inherent/main/docker-compose.release.yml
+#   INHERENT_VERSION=0.4.0 docker compose -f docker-compose.release.yml up -d
+#
+# The two custom services pull from GHCR; everything else pulls upstream OSS
+# images from their own public registries. Override the source with:
+#   INHERENT_REGISTRY (default ghcr.io/inherent-prime)
+#   INHERENT_VERSION  (default latest)
+#
+# Database initialization runs the ingestion image in SERVICE_MODE=migrate
+# (migrations are baked into that image) instead of bind-mounting ./scripts,
+# which a checkout-free user would not have.
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: inherent-oss-postgres
+    restart: unless-stopped
+    ports:
+      # Loopback-only: the datastore is reached over the compose network by the
+      # services; publishing on all interfaces would expose it to the host's
+      # network. Override the bind address explicitly if you need remote access.
+      - "127.0.0.1:15432:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      # Fail-fast: refuse to boot with a default password (#3). Set POSTGRES_PASSWORD.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set — refusing to start with a default password}
+      POSTGRES_DB: ${POSTGRES_DB:-knowledge_base}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - inherent-oss
+
+  # DB init: apply migrations baked into the ingestion image, then exit.
+  # Replaces the dev compose's bind-mounted psql `postgres-init` step so the
+  # release stack needs no host files. Idempotent + non-destructive (#16).
+  postgres-init:
+    image: ${INHERENT_REGISTRY:-ghcr.io/inherent-prime}/ingestion-svc:${INHERENT_VERSION:-latest}
+    container_name: inherent-oss-postgres-init
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SERVICE_MODE: migrate
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-knowledge_base}
+      # Required by the shared Settings model; migrate mode never connects to it.
+      WEAVIATE_URL: http://weaviate:8080
+      WEAVIATE_API_KEY: ${WEAVIATE_API_KEY:?WEAVIATE_API_KEY must be set}
+      LOG_LEVEL: INFO
+    networks:
+      - inherent-oss
+    restart: "no"
+
+  mongodb:
+    image: mongo:7
+    container_name: inherent-oss-mongodb
+    restart: unless-stopped
+    ports:
+      # Loopback-only (#3): reached over the compose network by the services.
+      - "127.0.0.1:27018:27017"
+    volumes:
+      - mongodb_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - inherent-oss
+
+  # One-shot seed of the default workspace + API key, so a pip-installed CLI
+  # never needs a database connection of its own (#275 decision 4). Same
+  # pattern as postgres-init above: release image, SERVICE_MODE, exit.
+  bootstrap:
+    image: ${INHERENT_REGISTRY:-ghcr.io/inherent-prime}/ingestion-svc:${INHERENT_VERSION:-latest}
+    container_name: inherent-oss-bootstrap
+    depends_on:
+      postgres-init:
+        condition: service_completed_successfully
+      mongodb:
+        condition: service_healthy
+    environment:
+      SERVICE_MODE: bootstrap
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-knowledge_base}
+      MONGODB_URI: mongodb://mongodb:27017
+      MONGODB_DB_NAME: main
+      # Required by shared Settings; bootstrap mode never connects to Weaviate.
+      WEAVIATE_URL: http://weaviate:8080
+      WEAVIATE_API_KEY: ${WEAVIATE_API_KEY:?WEAVIATE_API_KEY must be set}
+      BOOTSTRAP_API_KEY: ${INHERENT_API_KEY:?INHERENT_API_KEY must be set — `inherent up` generates it}
+      BOOTSTRAP_WORKSPACE_ID: ${INHERENT_WORKSPACE_ID:-ws_default}
+      BOOTSTRAP_USER_ID: ${INHERENT_USER_ID:-local-user}
+      BOOTSTRAP_KEY_NAME: ${INHERENT_KEY_NAME:-Local CLI Key}
+      BOOTSTRAP_WORKSPACE_NAME: ${INHERENT_WORKSPACE_NAME:-Default Workspace}
+      LOG_LEVEL: INFO
+    networks:
+      - inherent-oss
+    restart: "no"
+
+  weaviate:
+    image: semitechnologies/weaviate:1.27.0
+    container_name: inherent-oss-weaviate
+    restart: unless-stopped
+    ports:
+      # Loopback-only (#3) as defense-in-depth alongside API-key auth below.
+      - "127.0.0.1:18080:8080"
+      - "127.0.0.1:15051:50051"
+    environment:
+      QUERY_DEFAULTS_LIMIT: 25
+      # API-key auth (#3): the vector store holding every tenant's chunks is no
+      # longer anonymous. Both services authenticate with WEAVIATE_API_KEY
+      # (Bearer token). Fail-fast if it's unset.
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "false"
+      AUTHENTICATION_APIKEY_ENABLED: "true"
+      AUTHENTICATION_APIKEY_ALLOWED_KEYS: ${WEAVIATE_API_KEY:?WEAVIATE_API_KEY must be set}
+      AUTHENTICATION_APIKEY_USERS: inherent@local
+      AUTHORIZATION_ADMINLIST_ENABLED: "true"
+      AUTHORIZATION_ADMINLIST_USERS: inherent@local
+      PERSISTENCE_DATA_PATH: /var/lib/weaviate
+      DEFAULT_VECTORIZER_MODULE: none
+      ENABLE_MODULES: ""
+      CLUSTER_HOSTNAME: node1
+    volumes:
+      - weaviate_data:/var/lib/weaviate
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/v1/.well-known/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - inherent-oss
+
+  valkey:
+    image: valkey/valkey:8-alpine
+    container_name: inherent-oss-valkey
+    restart: unless-stopped
+    ports:
+      # Loopback-only (#3): reached over the compose network by the services.
+      - "127.0.0.1:16379:6379"
+    command: valkey-server --appendonly yes --maxmemory 128mb --maxmemory-policy allkeys-lru
+    volumes:
+      - valkey_data:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - inherent-oss
+
+  s3rver:
+    image: node:20-alpine
+    container_name: inherent-oss-s3rver
+    restart: unless-stopped
+    ports:
+      # Loopback-only (#3): reached over the compose network by the services.
+      - "127.0.0.1:19000:9000"
+    # Pinned + --yes (#353): a bare `npx s3rver` resolves whatever npm serves
+    # that day, so the S3 implementation under every E2E run could change with
+    # no commit. Same class of drift as the image lockfile pinning in #225.
+    command: npx --yes s3rver@3.7.1 -d /data -a 0.0.0.0 -p 9000 --no-vhost-buckets --configure-bucket inherent-documents
+    volumes:
+      - s3_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:9000"]
+      interval: 10s
+      timeout: 5s
+      # Same budget as text-embeddings-inference above, and for the same
+      # reason: this container does network work before it can serve. It
+      # installs s3rver from npm on every start, and the old 10s x 5 = 50s
+      # left no room for it -- `up --wait` tore the whole stack down
+      # mid-download on four unrelated branches in one morning (#353).
+      # 90s + 12 x 10s = 210s, vs. the <50s the install historically took on
+      # CI runners. This is a budget, not a cure: the install time is
+      # unbounded (measured 423s on a cold local cache), so #353 tracks
+      # baking s3rver into a published image and dropping the runtime
+      # download entirely.
+      retries: 12
+      start_period: 90s
+    networks:
+      - inherent-oss
+
+  text-embeddings-inference:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.6
+    # NOTE: this upstream image is amd64-only. On Apple Silicon / arm64 hosts it
+    # runs under emulation (slow first start). The full stack therefore expects
+    # an amd64 host for production-like performance.
+    platform: linux/amd64
+    container_name: inherent-oss-tei
+    restart: unless-stopped
+    ports:
+      - "18088:80"
+    command:
+      - "--model-id"
+      - "${EMBEDDING_MODEL_ID:-BAAI/bge-small-en-v1.5}"
+      - "--port"
+      - "80"
+    volumes:
+      - tei_cache:/data
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/80' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 90s
+    networks:
+      - inherent-oss
+
+  temporal:
+    image: temporalio/auto-setup:1.24.2
+    container_name: inherent-oss-temporal
+    restart: unless-stopped
+    ports:
+      - "17233:7233"
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PWD: ${POSTGRES_PASSWORD}
+      POSTGRES_SEEDS: postgres
+      DEFAULT_NAMESPACE: default
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "tctl --address $(hostname -i):7233 cluster health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - inherent-oss
+
+  temporal-ui:
+    image: temporalio/ui:2.24.0
+    container_name: inherent-oss-temporal-ui
+    restart: unless-stopped
+    ports:
+      - "18233:8080"
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+    depends_on:
+      - temporal
+    networks:
+      - inherent-oss
+
+  # auto-setup only registers "default" (#148). The ingestion audit worker
+  # (settings.temporal_audit_namespace) dispatches to a separate namespace so
+  # audit-log workflows don't compete with document-ingestion ones; register
+  # it here, once, before the ingestion worker starts.
+  temporal-init:
+    image: temporalio/admin-tools:1.24.2-tctl-1.18.1-cli-1.0.0
+    container_name: inherent-oss-temporal-init
+    entrypoint: []
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      TEMPORAL_AUDIT_NAMESPACE: ${TEMPORAL_AUDIT_NAMESPACE:-audit}
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        set -e
+        # --namespace must precede the subcommand -- `namespace describe/register
+        # <name>` silently ignores a trailing positional name and operates on
+        # the default namespace instead, which made this check a false-positive
+        # no-op (#148 follow-up: verified against a live cluster).
+        if DESCRIBE_OUT=$$(tctl --address temporal:7233 --namespace "$$TEMPORAL_AUDIT_NAMESPACE" namespace describe 2>&1); then
+          echo "Temporal namespace '$$TEMPORAL_AUDIT_NAMESPACE' already registered."
+        elif echo "$$DESCRIBE_OUT" | grep -qi "notfound\|not found"; then
+          echo "Registering Temporal namespace '$$TEMPORAL_AUDIT_NAMESPACE'..."
+          tctl --address temporal:7233 --namespace "$$TEMPORAL_AUDIT_NAMESPACE" namespace register --retention 3
+        else
+          # Any other describe failure (network flake, version mismatch) must
+          # NOT be treated as "missing" -- blindly registering on top of a
+          # transient error could itself fail and permanently block ingestion
+          # boot (service_completed_successfully never succeeds).
+          echo "$$DESCRIBE_OUT" >&2
+          echo "Temporal namespace describe failed for a reason other than 'not found' -- refusing to register blindly." >&2
+          exit 1
+        fi
+    restart: "no"
+    networks:
+      - inherent-oss
+
+  inh-ingestion-svc:
+    image: ${INHERENT_REGISTRY:-ghcr.io/inherent-prime}/ingestion-svc:${INHERENT_VERSION:-latest}
+    container_name: inherent-oss-ingestion
+    restart: unless-stopped
+    ports:
+      - "18002:8000"
+      - "19090:9090"
+    environment:
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-knowledge_base}
+      WEAVIATE_URL: http://weaviate:8080
+      WEAVIATE_API_KEY: ${WEAVIATE_API_KEY:?WEAVIATE_API_KEY must be set}
+      MQ_BACKEND: redis
+      REDIS_URL: redis://valkey:6379
+      STORAGE_BACKEND: s3
+      STORAGE_BUCKET: ${AWS_S3_BUCKET:-inherent-documents}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-S3RVER}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-S3RVER}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_S3_ENDPOINT: http://s3rver:9000
+      SERVICE_MODE: worker
+      TEMPORAL_ENABLED: "true"
+      TEMPORAL_HOST: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      TEMPORAL_TASK_QUEUE: document-ingestion
+      TEMPORAL_AUDIT_NAMESPACE: ${TEMPORAL_AUDIT_NAMESPACE:-audit}
+      # Fail-fast: refuse to boot with the previously-shipped known dev key (#3).
+      INGESTION_API_KEY: ${INGESTION_API_KEY:?INGESTION_API_KEY must be set — refusing to start with a default key}
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+      EMBEDDING_ENABLED: "true"
+      EMBEDDING_SERVICE_URL: http://text-embeddings-inference:80
+      EMBEDDING_DIM: 384
+      MONGODB_URI: mongodb://mongodb:27017
+      MONGODB_DB_NAME: main
+      LOG_LEVEL: INFO
+    depends_on:
+      postgres-init:
+        condition: service_completed_successfully
+      mongodb:
+        condition: service_healthy
+      weaviate:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      s3rver:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+      temporal-init:
+        condition: service_completed_successfully
+      text-embeddings-inference:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks:
+      - inherent-oss
+
+  inh-public-api-svc:
+    image: ${INHERENT_REGISTRY:-ghcr.io/inherent-prime}/public-api-svc:${INHERENT_VERSION:-latest}
+    container_name: inherent-oss-public-api
+    restart: unless-stopped
+    ports:
+      - "18000:8080"
+    environment:
+      SERVICE_MODE: both
+      PORT: 8080
+      MCP_PORT: 8001
+      ENVIRONMENT: development
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-knowledge_base}
+      MONGODB_URI: mongodb://mongodb:27017
+      MONGODB_DB_NAME: main
+      WEAVIATE_URL: http://weaviate:8080
+      WEAVIATE_API_KEY: ${WEAVIATE_API_KEY:?WEAVIATE_API_KEY must be set}
+      MQ_REDIS_URL: redis://valkey:6379
+      REDIS_URL: redis://valkey:6379
+      AWS_S3_ENDPOINT: http://s3rver:9000
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-S3RVER}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-S3RVER}
+      AWS_S3_BUCKET: ${AWS_S3_BUCKET:-inherent-documents}
+      AWS_S3_REGION: ${AWS_REGION:-us-east-1}
+      EMBEDDING_SERVICE_URL: http://text-embeddings-inference:80
+      EMBEDDING_DIM: 384
+      # Whole-stack listings are safe only on this local single-operator stack.
+      ADMIN_API_ENABLED: "true"
+      LOG_LEVEL: INFO
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+      postgres-init:
+        condition: service_completed_successfully
+      mongodb:
+        condition: service_healthy
+      weaviate:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      s3rver:
+        condition: service_healthy
+      text-embeddings-inference:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks:
+      - inherent-oss
+
+volumes:
+  postgres_data:
+  mongodb_data:
+  weaviate_data:
+  valkey_data:
+  s3_data:
+  tei_cache:
+
+networks:
+  inherent-oss:
+    driver: bridge

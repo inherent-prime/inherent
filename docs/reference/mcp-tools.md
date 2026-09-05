@@ -29,7 +29,7 @@ claude mcp add --transport http inherent https://api.inherent.sh/mcp \
   a tool argument removes that surface entirely. Missing/invalid/expired
   keys get the same 401 REST returns, before any JSON-RPC request is even
   parsed.
-- **Tool surface: 11, not 15.** `verify_claim`, `search_memory`,
+- **Tool surface: 12 of 16.** `verify_claim`, `search_memory`,
   `get_citations`, and `report_feedback` are not advertised and cannot be
   called by name over HTTP
   (see [Surface difference](#surface-difference-http-vs-stdio) below) —
@@ -116,14 +116,14 @@ With `OAUTH_ENABLED=true`:
   exactly its one workspace — a `workspace_id` naming any other workspace
   is rejected, even one the key's owner also owns. A user-scoped key
   (`workspace_id` unset on the key) may use any workspace its owner owns.
-- **All 15 tools** are advertised and callable, including the 4 excluded
+- **All 16 tools** are advertised and callable, including the 4 excluded
   from HTTP (below) — unaffected by the HTTP transport's existence.
 
 ## Surface difference: HTTP vs stdio
 
 | | stdio | Streamable HTTP |
 | --- | --- | --- |
-| Tool count | 15 | 11 |
+| Tool count | 16 | 12 |
 | API key | `api_key` schema argument | `X-API-Key` / `Authorization` header |
 | `verify_claim` | ✅ | ❌ excluded |
 | `search_memory` | ✅ | ❌ excluded |
@@ -150,11 +150,11 @@ name list maintained separately):
   whose results already carry a full `citation` object per result
   (`chunk_id`, `document_name`, `content`, `start_char`, `end_char`).
 - **`report_feedback`** — stdio/REST-only, not part of issue #220's original
-  10-tool HTTP list; a pending decision, not a permanent exclusion.
+  original HTTP list; a pending decision, not a permanent exclusion.
 
 ## Tools
 
-The full, stdio-side catalogue (all 14 tools). The **HTTP** column marks
+The full, stdio-side catalogue (all 16 tools). The **HTTP** column marks
 whether a tool is also on the Streamable HTTP surface (see
 [Surface difference](#surface-difference-http-vs-stdio) above). On
 stdio every tool requires `api_key` (string) as a schema argument; on HTTP
@@ -175,6 +175,7 @@ parameters below.
 
 | Tool | HTTP | Parameters | Purpose | REST twin |
 | --- | --- | --- | --- | --- |
+| `whoami` | ✅ | none | Return the authenticated key's identity, binding, authoritative workspace set, engine version, and endpoint | `GET /v1/whoami` |
 | `list_workspaces` | ✅ | (none — uses authorized workspaces only) | List caller's authorized workspaces with metadata. Response includes top-level `is_scoped_binding` flag (true for workspace-scoped keys, false for user-scoped) and array of workspaces, each with `workspace_id`, `name` (null if not set), and `document_count`. A workspace-scoped key sees exactly its bound workspace; a user-scoped key sees every workspace its owner owns | No direct REST twin; closest: `GET /v1/documents` |
 | `list_documents` | ✅ | `workspace_id`, `page` (1), `page_size` (20) | Paginated document listing | `GET /v1/documents` |
 | `get_document` | ✅ | `document_id` (required) | Single document's metadata | `GET /v1/documents/{id}` |

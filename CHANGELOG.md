@@ -127,6 +127,12 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Changed
 
+- **`infra/` is now segregated per cloud provider: `infra/hetzner/` and
+  `infra/azure/` (#338, #355).** The Hetzner Terraform root moved from the
+  flat `infra/` directory into `infra/hetzner/` unchanged — remote state
+  keys are unaffected (they live in `backend.hcl`, not the path) — and
+  `infra/README.md` became a per-provider index. Operator commands change
+  from `cd infra` to `cd infra/hetzner`.
 - **Retrieval-eval golden corpus grown from 13 to 50 gated queries, closing
   the eval gate's ~7.7pp blind spot (#265).** #236 correctly derived the
   gate's per-metric tolerance as `max(EVAL_GATE_TOLERANCE,
@@ -194,7 +200,44 @@ All notable changes to Inherent are documented here. The format follows
   moving the same indeterminate hang further out. See
   `docs/developer/learnings.md` #298 for the chunked-continuation
   alternative considered and rejected.
-
+- **`s3rver` no longer installs itself at container start (#353).** It ran
+  `npx s3rver` on a bare `node:20-alpine`, downloading from npm on every
+  start while health probes were already counting against a `10s x 5 = 50s`
+  budget; a slow registry pushed it past that and `up --wait` tore the whole
+  stack down, failing the required `E2E smoke` gate on four unrelated
+  branches. The dev/CI stack now builds `docker/s3rver`, so the install
+  happens at build time and cannot race a probe. The release compose has no
+  build context (a pip-installed `inherent up` runs it from a wheel), so it
+  keeps `npx` with the version pinned to `s3rver@3.7.1` and the same
+  `90s + 12 x 10s` budget `text-embeddings-inference` uses. Both are pinned
+  to an exact version: a floating `s3rver` changed the S3 implementation
+  under every integration and E2E run with no commit.
+- **`inh-public-api-svc` reports its installed package version instead of a
+  hardcoded `0.2.0` (#278).** The literal had drifted from `pyproject.toml`, so
+  `/health/ready`, the OpenAPI document, and the new `whoami` surfaces all
+  published a stale number.
+- **`BOOTSTRAP_ACTION=create` now ensures the key's workspace exists (#277).**
+  It previously skipped MongoDB entirely, so a key created against a new
+  workspace id reported `workspace_ids: []` from `whoami` and failed every
+  request with `403`. An existing workspace is never renamed.
+- **A `403` from the API is no longer reported as a rejected key (#281).**
+  The CLI collapsed `401` and `403` into "API key rejected", so a
+  workspace-scope error told users to rotate a working key instead of passing
+  `--workspace`. The server's problem+json detail is now shown as-is.
+- **Table output no longer parses document content as Rich markup (#281).**
+  A search snippet containing `[bold]` or `[/]` had those spans silently
+  deleted, and a malformed tag raised `MarkupError`.
+- **`inherent docs show` prints one field per row (#281).** Eleven columns on
+  a single row elided every value at normal terminal widths.
+- **`inherent status --json` reports a real `engine_version` (#280).** It read
+  `/health`, which carries only `status` and `service`; the version lives on
+  `/health/ready`.
+- **`inherent up` names the engine version when its images are missing
+  (#280).** The default tag is the CLI's own version, so an unpublished
+  engine failed with a raw registry manifest error.
+- **`inherent connect` leaves no backup when nothing changes (#283).** A
+  re-run against the same stack wrote a fresh timestamped backup every time,
+  each holding a plaintext API key.
 - **Dead-letter rows left at `pending` for a document that later succeeded no
   longer read as broken, and can no longer replay a stale payload (#287).**
   #249 made a successful ingestion resolve that document's dead-letter rows,
@@ -249,6 +292,14 @@ All notable changes to Inherent are documented here. The format follows
   and that asymmetry is now pinned by a test and documented in
   `docs/developer/search-sequence.md` and `docs/reference/mcp-tools.md`
   rather than obscured by a test that patched the difference away.
+
+### Security
+
+- **The OpenAPI schema is no longer served outside development (#279).**
+  `docs_url` and `redoc_url` were already gated, but the unauthenticated
+  `/openapi.json` still listed every route — including the flag-gated
+  `/v1/admin/*` surface, whose 404-not-403 design exists precisely so its
+  existence is not confirmable.
 
 ### Added
 
@@ -312,6 +363,49 @@ All notable changes to Inherent are documented here. The format follows
   includes `workspace_id`, `name` (from workspace metadata if present), 
   `document_count`, and `is_scoped_binding` flag. Exported on both stdio and
   HTTP transports with `read` permission.
+
+- **Azure cloud-native production Terraform target: AKS, HA, DR, one-click
+  deploy script, and docs (#338, #320).** `infra/azure/` provisions a full
+  production stack on AKS (3 zones, autoscaling node pools), Postgres
+  Flexible Server (zone-redundant HA), Cosmos DB for MongoDB (vCore), Azure
+  Cache for Redis (TLS, `noeviction`), Key Vault, and self-hosted TEI on AKS
+  as the default embedding path — an Azure OpenAI resource is provisioned
+  alongside it, one tfvar away, but stays inactive until the
+  `openai_compatible` provider path merges
+  ([#311](https://github.com/inherent-prime/inherent/issues/311),
+  [PR #314](https://github.com/inherent-prime/inherent/pull/314)) — with
+  MinIO on-cluster mirrored hourly to Blob Storage (GRS) for DR, keeping
+  object-storage RPO within the stack's ≤1h target — see
+  [#329](https://github.com/inherent-prime/inherent/issues/329) for native
+  Blob support. `scripts/deploy-azure.sh` bootstraps remote state and
+  applies the stack end to end; `docs/deploy/azure.md` documents every
+  layer, tfvar, and TCO estimate, and `docs/deploy/azure-dr-runbook.md` covers
+  zone/region-loss and PITR restore procedures. `ingress_profile = "appgw_waf"`
+  and least-privilege Postgres app roles remain tracked follow-ups under this
+  same epic.
+- **Installable `inherent` CLI groundwork with shared config, HTTP, and
+  agent-safe JSON output contracts (#276).**
+- **Checkout-free release bootstrap service that idempotently seeds one local
+  workspace and API key before the public API starts (#277).** `BOOTSTRAP_ACTION`
+  selects `seed` (start-up), `create` (mint an extra key, creating its
+  workspace only if absent and never renaming one), or `revoke` (by key prefix; refuses an ambiguous or unmatched
+  prefix rather than reporting a revocation that did not happen) — this is the
+  path `inherent keys create|revoke` uses so the CLI never opens a database.
+- **Authenticated `GET /v1/whoami` and MCP `whoami` identity surfaces using
+  the shared workspace-authorization rule (#278).**
+- **Flag-gated, read-only local admin listings for workspaces and API keys,
+  disabled by default for SaaS safety (#279).**
+
+- **`inherent up/down/status/logs/doctor` — one-command local stack lifecycle
+  from a pip-installed CLI, with secrets persisted at 0600 and service
+  counts taken from compose rather than hardcoded (#280).**
+- **`inherent docs/chunks/search` REST client commands that work against
+  local and remote stacks via `INHERENT_URL` / `INHERENT_API_KEY` (#281).**
+- **`inherent whoami/workspaces/keys` identity commands, with admin 404
+  fallback only for workspaces list and key writes local-only (#282).**
+- **`inherent connect claude|cursor` MCP config writer that merges into
+  existing agent config, backs up, and verifies `POST /mcp` initialize
+  (#283).**
 - **Evals: `POST /v1/evals/runs` accepts optional replay scoping, and
   `DELETE /v1/evals/events` an opt-in case purge (#250).** Run-replay was
   unscoped — `start_run` and `execute_run` each independently selected *every*

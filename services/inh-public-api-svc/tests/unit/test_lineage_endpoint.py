@@ -28,6 +28,17 @@ from src.services.auth import (
 from src.services.database import get_database
 from src.services.search import build_search_request
 
+FRESH_INGESTED_AT = _dt.datetime.now(_dt.UTC).isoformat()
+# The mirror image of FRESH_INGESTED_AT (#332): relative to now, never a literal
+# date, so this doesn't silently expire the way a hardcoded date once did (a
+# pinned date ages past settings.freshness_max_age_days and then fails forever,
+# on every PR, for a reason unrelated to its own diff). Without a case at this
+# end, nothing pins is_stale=True -- a bug that hardwired the flag to False
+# would look identical to a passing suite.
+STALE_INGESTED_AT = (
+    _dt.datetime.now(_dt.UTC) - _dt.timedelta(days=_app_settings.freshness_max_age_days + 1)
+).isoformat()
+
 
 @pytest.fixture
 def read_key() -> APIKeyInfo:
@@ -59,20 +70,6 @@ def lineage_doc() -> Document:
     )
 
 
-# Freshness fixtures are RELATIVE to now, never absolute (#332).
-# These previously pinned ingested_at to a literal date and asserted
-# is_stale is False. That silently expires: the assertion held until the
-# date aged past settings.freshness_max_age_days (90), then failed forever
-# -- and it failed on main, so every open PR inherited a red job for a
-# reason unrelated to its own diff. Anchor to now +/- the threshold so the
-# tests assert the BEHAVIOUR (recent evidence is fresh, old evidence is
-# stale) rather than a calendar date.
-_FRESH_INGESTED_AT = (_dt.datetime.now(_dt.UTC) - _dt.timedelta(days=1)).isoformat()
-_STALE_INGESTED_AT = (
-    _dt.datetime.now(_dt.UTC) - _dt.timedelta(days=_app_settings.freshness_max_age_days + 1)
-).isoformat()
-
-
 def _chunk_ingested_at(ingested_at: str) -> DocumentChunk:
     return DocumentChunk(
         id="chunk-1",
@@ -89,7 +86,7 @@ def _chunk_ingested_at(ingested_at: str) -> DocumentChunk:
 
 @pytest.fixture
 def lineage_chunk() -> DocumentChunk:
-    return _chunk_ingested_at(_FRESH_INGESTED_AT)
+    return _chunk_ingested_at(FRESH_INGESTED_AT)
 
 
 @pytest.fixture
@@ -122,6 +119,17 @@ async def client(app):
 
 
 class TestLineageEndpoint:
+    async def test_returns_provenance_and_freshness(self, client):
+        resp = await client.get("/v1/documents/doc-1/lineage", headers={"X-API-Key": "k"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["document_name"] == "report.pdf"
+        assert body["source_uri"] == "s3://bucket/report.pdf"
+        assert body["content_hash"] == "abc123"
+        assert body["ingested_at"] == FRESH_INGESTED_AT
+        assert body["is_stale"] is False
+        assert body["chunk_id"] == "chunk-1"
+
     async def test_evidence_older_than_the_threshold_is_flagged_stale(self, mock_db, client):
         """The mirror image of the fresh case (#332).
 
@@ -131,22 +139,11 @@ class TestLineageEndpoint:
         invisible until the day it flipped.
         """
         mock_db.get_document_chunks = AsyncMock(
-            return_value=[_chunk_ingested_at(_STALE_INGESTED_AT)]
+            return_value=[_chunk_ingested_at(STALE_INGESTED_AT)]
         )
         resp = await client.get("/v1/documents/doc-1/lineage", headers={"X-API-Key": "k"})
         assert resp.status_code == 200
         assert resp.json()["is_stale"] is True
-
-    async def test_returns_provenance_and_freshness(self, client):
-        resp = await client.get("/v1/documents/doc-1/lineage", headers={"X-API-Key": "k"})
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["document_name"] == "report.pdf"
-        assert body["source_uri"] == "s3://bucket/report.pdf"
-        assert body["content_hash"] == "abc123"
-        assert body["ingested_at"].startswith(_FRESH_INGESTED_AT[:10])
-        assert body["is_stale"] is False
-        assert body["chunk_id"] == "chunk-1"
 
     async def test_404_when_document_missing(self, client, mock_db):
         mock_db.get_document = AsyncMock(return_value=None)
