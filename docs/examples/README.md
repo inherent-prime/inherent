@@ -959,6 +959,36 @@ curl -s "$API_BASE/v1/conversations/session-42" \
 
 Returns **404** if `external_id` isn't found in `workspace_id`.
 
+### Search a conversation
+
+Conversation chunks are searched through the same `POST /v1/search` as documents — no separate
+endpoint. Results carry turn attribution so you can tell who said what.
+
+```bash
+curl -s -X POST "$API_BASE/v1/search" \
+  -H "X-API-Key: $API_KEY" \
+  -H "X-Workspace-Id: $WORKSPACE_ID" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "refund policy", "limit": 5}' \
+  | jq '.results[] | {role, turn_index, turn_ts, client, content}'
+```
+
+**Expected output** (a conversation chunk, once the turns above have flushed):
+
+```json
+{
+  "role": "assistant",
+  "turn_index": 1,
+  "turn_ts": "2026-08-31T10:00:03Z",
+  "client": null,
+  "content": "Refunds are processed within 5 business days."
+}
+```
+
+`role`, `turn_index`, `turn_id`, `turn_ts` and `client` are `null` on results from uploaded
+documents — only conversation chunks carry them. `client` is `null` here because turn `t2` above
+supplied none.
+
 ### Delete a conversation
 
 ```bash

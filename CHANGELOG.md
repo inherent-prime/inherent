@@ -68,7 +68,16 @@ All notable changes to Inherent are documented here. The format follows
   not just an ordering convenience. Migration `020_conversation_documents.sql`
   adds `document_type`/`external_id` (+ a partial unique index on
   `(workspace_id, external_id)`) to `processed_documents`, which had neither
-  before this.
+  before this. `POST /v1/search` completes the round trip: each result now
+  carries `turn_index`/`turn_id`/`role`/`turn_ts`/`client`, GraphQL-selected
+  from the Weaviate properties the ingestion side stamps, so a retrieved
+  conversation chunk says who spoke and where in the conversation it sat
+  without a second lookup. Additive and backward-compatible — all five are
+  `null` on a result from an uploaded document, since only chunks that came
+  from `chunk_conversation` carry them. The MCP `search_documents` /
+  `search_memory` structured payload carries the same attribution (omitting
+  the keys entirely for a non-conversation chunk, rather than spending an
+  agent's tokens on five nulls per result).
 - **`redact_turns` Temporal activity: non-retryable, per-turn credential
   redaction ahead of conversation ingestion (#307).** Conversations
   captured from an assistant contain credentials by default — API keys

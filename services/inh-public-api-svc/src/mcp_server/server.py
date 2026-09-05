@@ -557,20 +557,35 @@ async def _handle_search(key_info: APIKeyInfo, arguments: dict) -> list[TextCont
         summary += f"Document ID: {result.document_id} | Workspace: {workspace_id}\n"
         content = result.content
         summary += f"```\n{content[:500]}{'...' if len(content) > 500 else ''}\n```\n\n"
-        structured_results.append(
-            {
-                "workspace_id": workspace_id,
-                "chunk_id": result.chunk_id,
-                "document_id": result.document_id,
-                "document_name": result.document_name,
-                "content": result.content,
-                "score": result.score,
-                "score_source": result.score_source,
-                "is_stale": result.is_stale,
-                "source_uri": result.source_uri,
-                "content_hash": result.content_hash,
-            }
-        )
+        entry = {
+            "workspace_id": workspace_id,
+            "chunk_id": result.chunk_id,
+            "document_id": result.document_id,
+            "document_name": result.document_name,
+            "content": result.content,
+            "score": result.score,
+            "score_source": result.score_source,
+            "is_stale": result.is_stale,
+            "source_uri": result.source_uri,
+            "content_hash": result.content_hash,
+        }
+        # Conversation turn attribution (#306): who said the retrieved text and
+        # where in the conversation it sat. search_memory is THE conversation
+        # tool, so without this an agent recalling its own transcript cannot
+        # tell its words from the user's.
+        #
+        # Added only when the chunk actually is a conversation chunk (turn_id
+        # is the same discriminator the ingestion and REST sides use). An
+        # uploaded-document result therefore keeps its exact pre-#306 payload
+        # rather than carrying five nulls in every result of every response --
+        # this payload is read by agents, and the token cost is theirs.
+        if result.turn_id is not None:
+            entry["turn_index"] = result.turn_index
+            entry["turn_id"] = result.turn_id
+            entry["role"] = result.role
+            entry["turn_ts"] = result.turn_ts
+            entry["client"] = result.client
+        structured_results.append(entry)
 
     return _structured(
         summary.rstrip(),

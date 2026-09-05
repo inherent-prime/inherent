@@ -759,6 +759,32 @@ class SearchService:
             start_char = _to_int(chunk.get("start_char"))
             end_char = _to_int(chunk.get("end_char"))
 
+            # Conversation turn attribution (#306): promote the properties
+            # `chunk_conversation` stamped, so a caller can tell WHO said the
+            # retrieved text and WHERE in the conversation it sat. Mirrors the
+            # promote-from-chunk pattern content_risk (#44) established.
+            #
+            # `turn_id` is the discriminator, exactly as on the write side
+            # (services/inh-ingestion-svc/src/services/weaviate.py sets these
+            # properties ONLY when the chunk's metadata carries a turn_id):
+            # an ordinary file-document chunk returns null for all five, and
+            # must surface as "no attribution" rather than a misleading
+            # turn_index=0/role="". We do NOT gate on `turn_index` — turn 0 is
+            # a real first turn, not a missing value.
+            #
+            # `turn_ts`/`client` are stored as "" when the caller supplied
+            # neither (Weaviate TEXT has no null), so empty strings normalise
+            # back to None — the same "only when it's notable" rule as
+            # content_risk's "none".
+            def _to_str(value: object) -> str | None:
+                return value if isinstance(value, str) and value else None
+
+            turn_id = _to_str(chunk.get("turn_id"))
+            turn_index = _to_int(chunk.get("turn_index")) if turn_id else None
+            role = _to_str(chunk.get("role")) if turn_id else None
+            turn_ts = _to_str(chunk.get("turn_ts")) if turn_id else None
+            client_label = _to_str(chunk.get("client")) if turn_id else None
+
             # Claim-level citation (#39): built purely from this result's own
             # fields so the evidence is citable without a second lookup.
             citation = Citation(
@@ -795,6 +821,11 @@ class SearchService:
                     is_stale=is_stale,
                     content_risk=content_risk,
                     content_risk_reasons=content_risk_reasons,
+                    turn_index=turn_index,
+                    turn_id=turn_id,
+                    role=role,
+                    turn_ts=turn_ts,
+                    client=client_label,
                     citation=citation,
                 )
             )
@@ -934,6 +965,11 @@ class SearchService:
                     content_type
                     content_risk
                     content_risk_reasons
+                    turn_index
+                    turn_id
+                    role
+                    turn_ts
+                    client
                     _additional {{ id score certainty distance }}
                 }}
             }}

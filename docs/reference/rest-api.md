@@ -51,8 +51,27 @@ ACL or clearance parameter. See the
 
 | Method | Path | Permission | Purpose |
 | --- | --- | --- | --- |
-| POST | `/v1/search` | `search` | Semantic / hybrid / keyword search. Request: `query` (1–1000 chars), `limit` (1–100, default 10), `min_score`, `document_ids[]`, `include_context`, `context_window` (0–5), `search_mode` (`semantic`/`hybrid`/`keyword`), `alpha` (0–1). Response: `results[]` (score provenance, `citation`, `is_stale`, `content_risk`), `quality_verdict`, `performed_fallback`, `event_id` (for eval feedback) |
+| POST | `/v1/search` | `search` | Semantic / hybrid / keyword search. Request: `query` (1–1000 chars), `limit` (1–100, default 10), `min_score`, `document_ids[]`, `include_context`, `context_window` (0–5), `search_mode` (`semantic`/`hybrid`/`keyword`), `alpha` (0–1). Response: `results[]` (score provenance, `citation`, `is_stale`, `content_risk`, and — on conversation chunks only — `turn_index`, `turn_id`, `role`, `turn_ts`, `client`), `quality_verdict`, `performed_fallback`, `event_id` (for eval feedback) |
 | POST | `/v1/verify-claim` | `read` | Offline lexical claim-vs-evidence check. Request: `claim` (1–2000 chars), `evidence[]`. Response: `support_level` (`strong`/`weak`/`none`), `score`, `reason` |
+
+#### Conversation turn attribution
+
+A result whose chunk came from a [conversation](#conversations) carries these
+extra fields, so you can tell who said the retrieved text and where in the
+conversation it sat without a second lookup. Names match the turn you posted
+to `POST /v1/conversations/{external_id}/turns` — you read back what you wrote.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `turn_index` | integer | 0-based position of the turn in the batch that produced the chunk. `0` is a real first turn, not a missing value |
+| `turn_id` | string | Your idempotency key for that turn |
+| `role` | string | `user` or `assistant` |
+| `turn_ts` | string | The `ts` you supplied (ISO 8601). `null` if you supplied none |
+| `client` | string | The `client` label you supplied, e.g. `agent-cli`. `null` if you supplied none |
+
+All five are `null` on a result from an uploaded document — only conversation
+chunks carry them, so `turn_id: null` means "not a conversation chunk". A long
+turn split across several chunks repeats that turn's attribution on every one.
 
 ### Documents
 
@@ -83,20 +102,21 @@ chat/agent transcripts instead.
 | DELETE | `/v1/conversations/{external_id}` | `write` | Delete the conversation + vectors + chunks. `204`; `404` if already gone |
 
 `external_id` is a caller-chosen identifier for the conversation (e.g. a
-session or thread id from your application) — the first turn ever posted for
-a given `external_id` creates the conversation; every later turn appends to
-it. Turns buffer server-side and flush in size-or-idle batches (not one
-store operation per turn) — the embedding-pipeline protection this exists
-for — so `GET` immediately after `POST` may not yet reflect the latest
-turns; `last_flushed_at` shows when they last landed. Each chunk is stamped
-with `turn_index`/`role`/`ts`/`client` (stored in chunk metadata and as
-Weaviate object properties) for speaker attribution — not yet surfaced in
-`POST /v1/search` response fields. Turn text is redacted for common
-credential shapes (API keys, JWTs, connection strings, private keys) before
-it is chunked or stored — best-effort pattern matching, not a guarantee;
-some credential shapes with no recognizable prefix and low apparent entropy
-can pass through unredacted, so do not represent this as a complete
-guarantee to end users.
+session or thread id from your application) — the first turn ever posted
+for a given `external_id` creates the conversation; every later turn
+appends to it. Turns buffer server-side and flush in size-or-idle batches
+(not one store operation per turn) — the embedding-pipeline protection
+this exists for — so `GET` immediately after `POST` may not yet reflect
+the latest turns; `last_flushed_at` shows when they last landed. Each
+chunk is stamped with `turn_index`/`role`/`ts`/`client` (stored in chunk
+metadata and as Weaviate object properties) for speaker attribution, and
+`POST /v1/search` surfaces that attribution on each result — see
+[Conversation turn attribution](#conversation-turn-attribution). Turn text
+is redacted for common credential shapes (API keys, JWTs, connection
+strings, private keys) before it is chunked or stored — best-effort
+pattern matching, not a guarantee; some credential shapes with no
+recognizable prefix and low apparent entropy can pass through unredacted,
+so do not represent this as a complete guarantee to end users.
 
 Conversation chunks are **exempt from the `is_stale` freshness rule** that
 applies to documents. Each flush appends only its own new chunks and leaves
