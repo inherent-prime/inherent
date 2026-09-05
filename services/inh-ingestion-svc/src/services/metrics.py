@@ -95,6 +95,30 @@ MQ_STREAM_PENDING = Gauge(
     ["stream", "group"],
 )
 
+# ── Redaction Metrics (#307) ─────────────────────────────────────────
+
+# Credential redactions performed by the redact_turns activity, by detector
+# type (e.g. 'api_key', 'jwt', 'private_key', 'connection_string',
+# 'high_entropy_token', 'custom'). One increment per MATCH, not per turn --
+# a turn with three API keys increments this three times.
+REDACTIONS_TOTAL = Counter(
+    "ingestion_redactions_total",
+    "Total number of credential redactions performed, by type",
+    ["redaction_type"],
+)
+
+# Turns dropped because their own redaction pass raised (#307: non-retryable
+# per-turn failure -- the turn is dropped and audited rather than retried or
+# stored unredacted). `detector` names which detector raised, matching
+# redaction_audit.detector -- an increase here with no corresponding
+# ingestion_redactions_total growth is the signal that turns are being
+# silently lost rather than successfully redacted.
+REDACTED_TURNS_DROPPED_TOTAL = Counter(
+    "ingestion_redacted_turns_dropped_total",
+    "Total number of turns dropped due to a redaction failure, by detector",
+    ["detector"],
+)
+
 # ── Database Metrics ─────────────────────────────────────────────────
 
 POSTGRES_QUERY_DURATION = Histogram(

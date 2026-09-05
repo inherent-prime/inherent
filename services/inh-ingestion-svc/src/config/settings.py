@@ -114,6 +114,38 @@ class Settings(BaseSettings):
     # we don't silently rely on TEI's server-side truncation (which would drop
     # the tail of an oversized chunk and degrade retrieval quality).
     embedding_max_tokens: int = Field(512, alias="EMBEDDING_MAX_TOKENS")
+    # #311: which EmbeddingProvider backend embedder.py constructs. "tei"
+    # (default) is NON-NEGOTIABLE -- `make up`/docker-compose with no new env
+    # vars must behave exactly as before this setting existed. The other
+    # supported value is "openai_compatible" (any /v1/embeddings-shaped API).
+    embedding_provider: str = Field("tei", alias="EMBEDDING_PROVIDER")
+    # #311: sent as `Authorization: Bearer <key>` to the embedding provider.
+    # TEI accepts one but does not require it (zero-config local dev); an
+    # openai_compatible backend generally requires one. NEVER logged.
+    embedding_api_key: str | None = Field(None, alias="EMBEDDING_API_KEY")
+    # #311: the model this service believes it is talking to -- feeds both
+    # the openai_compatible request body's "model" field AND the Weaviate
+    # collection model-identity guard (src/services/weaviate.py). Default
+    # matches EMBEDDING_MODEL_ID's existing use as the TEI sidecar's own
+    # --model-id in docker-compose.yml, so a stock `make up` stays
+    # self-consistent out of the box. An operator who changes the TEI
+    # sidecar's model (or points EMBEDDING_SERVICE_URL somewhere else) MUST
+    # update this (and EMBEDDING_DIM if it changed) or the identity guard
+    # will -- correctly -- refuse to serve stale-vector-space results.
+    embedding_model_id: str = Field("BAAI/bge-small-en-v1.5", alias="EMBEDDING_MODEL_ID")
+    # PR #314 review finding 3: an unstamped ("legacy") collection used to be
+    # adopted unconditionally -- silently certifying whatever model wrote its
+    # EXISTING vectors as the current active provider, with no check at all.
+    # Default OFF: a non-empty unstamped collection now raises
+    # EmbeddingIdentityAdoptionRequiredError instead of adopting, unless an
+    # operator deliberately sets this to true (only after confirming the
+    # collection's existing vectors actually match the active provider --
+    # see docs/reference/configuration.md#embedding-provider-model-identity-guard).
+    # An EMPTY unstamped collection always adopts silently regardless of this
+    # flag -- there is nothing yet that could be wrong.
+    embedding_adopt_unstamped_collections: bool = Field(
+        False, alias="EMBEDDING_ADOPT_UNSTAMPED_COLLECTIONS"
+    )
 
     # Performance Configuration
     max_workers: int = Field(4, alias="MAX_WORKERS")
@@ -224,6 +256,40 @@ class Settings(BaseSettings):
 
     # Port for Prometheus metrics server (worker mode only; standalone uses /metrics route)
     metrics_port: int = Field(9090, alias="METRICS_PORT")
+
+    # --- Redaction (#307) ---
+    # Extra self-hosted regex patterns for the redact_turns activity
+    # (src/temporal/activities/redact.py), applied IN ADDITION to the
+    # built-in detector set in src/services/redaction_patterns.py. Each
+    # string is compiled as its own regex and matches are replaced with
+    # "[redacted:custom]" -- lets a self-hoster catch an internal or
+    # provider-specific credential shape the built-in patterns don't know
+    # about without a code change. Empty by default (no extra patterns).
+    # NOTE for future slices: this block is deliberately append-only -- three
+    # other redaction-related settings land here later; keep new fields
+    # inside this delimited block rather than scattering them.
+    redaction_patterns_extra: list[str] = Field(default=[], alias="REDACTION_PATTERNS_EXTRA")
+    # --- End Redaction (#307) ---
+
+    # --- Conversation Memory (#306) ---
+    # ConversationMemoryWorkflow's size-or-idle flush debounce -- "the
+    # embedding-pipeline protection" per the issue: one store batch per
+    # conversation per flush instead of one per turn. Both configurable.
+    conversation_flush_char_threshold: int = Field(4000, alias="CONVERSATION_FLUSH_CHAR_THRESHOLD")
+    conversation_flush_idle_seconds: int = Field(90, alias="CONVERSATION_FLUSH_IDLE_SECONDS")
+    # continue_as_new every N turns, to bound Temporal history size for a
+    # long-lived conversation.
+    conversation_continue_as_new_turns: int = Field(500, alias="CONVERSATION_CONTINUE_AS_NEW_TURNS")
+    # No turns for this long -> finalize (publish completion, complete the
+    # workflow run) instead of waiting indefinitely.
+    conversation_idle_finalize_hours: int = Field(24, alias="CONVERSATION_IDLE_FINALIZE_HOURS")
+    # MQ topic public-api publishes one message per turn to (never one per
+    # batch -- see ConversationTurnMessage's docstring, inh_contracts.events).
+    mq_conversation_topic: str = Field("core.conversation.turn.v1", alias="MQ_CONVERSATION_TOPIC")
+    mq_conversation_consumer_group: str = Field(
+        "ingestion-conversation-workers", alias="MQ_CONVERSATION_CONSUMER_GROUP"
+    )
+    # --- End Conversation Memory (#306) ---
 
     @property
     def resolved_mq_max_concurrent(self) -> int:

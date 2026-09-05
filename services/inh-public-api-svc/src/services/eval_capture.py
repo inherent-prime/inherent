@@ -55,6 +55,7 @@ async def record_query_event(
     user_id: str | None,
     request: SearchRequest,
     response: SearchResponse,
+    transport: str,
 ) -> bool:
     """Persist one search event. Returns True when the row is durable.
 
@@ -67,6 +68,11 @@ async def record_query_event(
     "captured" from "not captured" — that is what decides whether an
     ``event_id`` is advertised at all — without capture ever being able to fail
     a search.
+
+    ``transport`` (#241) is ``"rest"`` or ``"mcp"`` — which surface produced
+    this event — required (not defaulted) so a future third transport cannot
+    silently mislabel itself by omission; see ``capture_search_event`` below,
+    the single call site both surfaces go through.
     """
     try:
         db = await get_database()
@@ -81,11 +87,65 @@ async def record_query_event(
             top_score=response.results[0].score if response.results else None,
             quality_verdict=response.quality_verdict.verdict if response.quality_verdict else None,
             latency_ms=response.processing_time_ms,
+            transport=transport,
         )
         return True
     except Exception as exc:  # noqa: BLE001 — capture is best-effort by contract
         logger.warning("eval_capture_failed", event_id=event_id, error=str(exc))
         return False
+
+
+async def capture_search_event(
+    *,
+    transport: str,
+    workspace_id: str,
+    user_id: str | None,
+    request: SearchRequest,
+    response: SearchResponse,
+) -> str | None:
+    """Mint + persist the capture event for one single-workspace search, and
+    stamp ``response.event_id`` when it lands (#241).
+
+    THE shared search-path helper: REST's ``POST /v1/search`` and MCP's
+    ``search_documents`` / ``search_memory`` both call this — and only
+    this — to capture a search. Before #241, REST inlined "mint id, call
+    ``record_query_event``, stamp the response" directly at its call site and
+    MCP had no equivalent at all; any field ``record_query_event`` needed
+    later would have had to be added at REST's call site and would then
+    silently miss a second, independently-written MCP call site (the fan-out
+    shape the issue calls out). Factoring the whole mint-record-stamp
+    sequence into one function makes that class of drift unrepresentable:
+    there is only one call site per transport, and both go through the exact
+    same three lines.
+
+    Caller contract (unchanged from REST's original inline version, now
+    shared instead of duplicated):
+    - Call this only for a SINGLE-workspace search, and only after checking
+      ``capture_enabled(workspace_id)`` — this function does not re-check it,
+      because the caller already needs that same boolean to decide whether to
+      schedule ``purge_expired_events`` afterwards, and computing it twice
+      would be the only thing left to drift. A multi-workspace fan-out has no
+      one response to attribute an event to, and REST has never captured for
+      that path either — callers must not call this per sub-workspace of a
+      fan-out.
+    - ``response`` is mutated in place (``event_id`` set) only on success;
+      on any failure it is left untouched, so ``response.event_id`` staying
+      ``None`` is itself the "not captured" signal — never a dangling id.
+
+    Returns the minted ``event_id``, or ``None`` when the write did not land.
+    """
+    event_id = new_event_id()
+    if await record_query_event(
+        event_id=event_id,
+        workspace_id=workspace_id,
+        user_id=user_id,
+        request=request,
+        response=response,
+        transport=transport,
+    ):
+        response.event_id = event_id
+        return event_id
+    return None
 
 
 async def purge_expired_events(workspace_id: str) -> None:

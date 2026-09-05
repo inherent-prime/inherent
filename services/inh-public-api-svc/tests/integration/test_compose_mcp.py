@@ -84,11 +84,11 @@ REST_HEADERS = {"X-API-Key": API_KEY, "X-Workspace-Id": WORKSPACE_ID}
 # would make this test tautological: it would assert that the registry equals
 # itself and would keep passing while a tool is silently added, renamed, or
 # flipped on/off for HTTP. The whole value here is that registry drift BREAKS
-# a live test and forces a human to re-confirm the published surface -- 15
-# tools on stdio, 11 of them exposed on HTTP (#220's "10, not 13", plus
-# report_feedback which arrived after that issue was filed). If a diff to
-# these lists is intentional, update them in the same commit as the registry
-# change.
+# a live test and forces a human to re-confirm the published surface -- 16
+# tools on stdio, 12 of them exposed on HTTP (#220's "10, not 13", plus
+# report_feedback which arrived after that issue was filed, plus whoami from
+# #278 and list_workspaces from #297). If a diff to these lists is
+# intentional, update them in the same commit as the registry change.
 # ---------------------------------------------------------------------------
 EXPECTED_STDIO_TOOLS = sorted(
     [
@@ -100,6 +100,7 @@ EXPECTED_STDIO_TOOLS = sorted(
         "get_retrieval_health",
         "list_chunks",
         "list_documents",
+        "list_workspaces",
         "refresh_stale_source",
         "report_feedback",
         "search_documents",
@@ -119,6 +120,7 @@ EXPECTED_HTTP_TOOLS = sorted(
         "get_retrieval_health",
         "list_chunks",
         "list_documents",
+        "list_workspaces",
         "refresh_stale_source",
         "search_documents",
         "upload_document",
@@ -194,11 +196,14 @@ def live_backend_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
     ``src/services/embedder.py`` is the one component that does NOT read
     ``Settings``: it reads ``os.environ["EMBEDDING_SERVICE_URL"]`` directly
-    and memoizes an ``httpx.Client`` in a module global. So it needs BOTH an
-    env var and an explicit reset of that global -- patching the settings
-    object alone leaves it pointed at the in-network ``text-embeddings-
-    inference`` hostname, which does not resolve from the test runner's host
-    (found the hard way: ``Error: [Errno 8] nodename nor servname provided``).
+    and memoizes an ``EmbeddingProvider`` (holding its own ``httpx.Client``)
+    in a module global (``_PROVIDER`` -- #311 renamed this from ``_CLIENT``
+    when the HTTP client moved behind the shared ``inh_contracts.embedding``
+    provider abstraction). So it needs BOTH an env var and an explicit reset
+    of that global -- patching the settings object alone leaves it pointed
+    at the in-network ``text-embeddings-inference`` hostname, which does not
+    resolve from the test runner's host (found the hard way: ``Error:
+    [Errno 8] nodename nor servname provided``).
 
     Only the stdio test needs this: the HTTP tests talk to the containerized
     app, which is already configured with the in-network hostnames.
@@ -206,16 +211,16 @@ def live_backend_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     import src.services.embedder as embedder
 
     def _drop_embedder_client() -> None:
-        """Close, then null, the memoized client.
+        """Close, then null, the memoized provider's client.
 
         Nulling alone would leak the previous ``httpx.Client``'s connection
         pool (sockets stay open until GC finalizes them), and the one on the
         way OUT points at a host port this fixture only made valid for the
         duration of the test.
         """
-        if embedder._CLIENT is not None:
-            embedder._CLIENT.close()
-        embedder._CLIENT = None
+        if embedder._PROVIDER is not None:
+            embedder._PROVIDER._get_client().close()
+        embedder._PROVIDER = None
 
     for field, value in _LIVE_BACKENDS.items():
         monkeypatch.setattr(app_settings, field, value)
@@ -499,32 +504,18 @@ async def test_stdio_surface_and_search(live_backend_settings: None, seeded_docu
 class MissingMcpEventIdError(Exception):
     """Raised at exactly ONE line: the ``event_id`` check below (#241).
 
-    Exists so the xfail on ``test_http_report_feedback_closes_loop`` can be
-    SCOPED to the known bug via ``raises=``. A bare ``xfail(strict=True)``
-    swallows every call-phase exception, so an MCP search regression (a
-    tool returning ``isError=True``), a transport-framing break, or a 500
-    from the feedback endpoint would all be reported as a green "xfailed" --
-    the known-broken test would silently absorb NEW breakage in the very
-    path it exercises. With ``raises`` set, only this one exception counts
-    as the expected failure; anything else is a real, loud FAILURE.
+    #241 previously left this test a strict ``xfail`` scoped to this
+    exception via ``raises=`` (a bare ``xfail(strict=True)`` would have
+    swallowed every call-phase exception -- an MCP search regression, a
+    transport-framing break, or a 500 from the feedback endpoint -- and
+    reported them all as a green "xfailed" instead of a loud failure). Now
+    that capture runs on the shared search path (#241 fixed), the xfail is
+    gone and this test asserts for real; the exception stays as the
+    precise, readable failure this one precondition raises if a future
+    regression drops ``event_id`` from the MCP search payload again.
     """
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=MissingMcpEventIdError,
-    reason=(
-        "#241 (filed, then auto-closed IN ERROR by the #240 fix commit 48cbe72 -- "
-        "PR #242's body said 'Closes #240' but the merge commit also closed #241): "
-        "no MCP search ever mints an event_id. ``record_query_event`` is called "
-        "only from src/api/v1/search.py, so _handle_search's structured payload "
-        "carries {query, results, workspaces_searched} and nothing else -- while "
-        "report_feedback's schema tells the agent to 'pass the event_id from the "
-        "search response'. An MCP-only agent cannot close the evals loop. Remove "
-        "this xfail (strict, so it fails loudly) when capture moves into the "
-        "shared search path."
-    ),
-)
 async def test_http_report_feedback_closes_loop(client: httpx.Client, seeded_document: str) -> None:
     """An event_id obtained over MCP must be durable enough for REST feedback.
 

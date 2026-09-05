@@ -192,7 +192,7 @@ blast radius cannot touch production servers or SSH keys.
 - **Flow:** generate `backend-ci.hcl` → `terraform init -reconfigure -backend-config=backend-ci.hcl` → apply (`environment=ci`) → export `SERVER_IPV4` from TF state → cloud-init wait → `/health` → bootstrap on VM → public-api `pytest -m compose` → always destroy with retries (same remote state).
 - **Naming:** unique `server_name` / `ssh_key_name` per run (`inherent-ci-${{ github.run_id }}`).
 - **Image parity:** default env sets `WEAVIATE_API_KEY`, and release compose enables Weaviate API-key auth. The **published** `public-api-svc` image must include Weaviate Bearer client support (see [docs/audit/act-hetzner-e2e-weaviate-401.md](../../docs/audit/act-hetzner-e2e-weaviate-401.md)). `/health` alone does not prove Weaviate auth works. Smoke-grep image before long e2e runs ([docs/maintainers/releasing.md](../../docs/maintainers/releasing.md)).
-- **Long-lived deploys:** use Hetzner Object Storage via `backend.hcl` (see Setup above and [docs/getting-started/production.md](../../docs/getting-started/production.md)).
+- **Long-lived deploys:** use Hetzner Object Storage via `backend.hcl` (see Setup above and [docs/getting-started/deploy-hetzner.md](../../docs/getting-started/deploy-hetzner.md)).
 
 ### Manual run (GitHub form)
 

@@ -50,6 +50,7 @@ TOOL_SPEC: dict[str, dict] = {
     "get_document": {"required": ["api_key", "document_id"]},
     "list_chunks": {"required": ["api_key", "document_id"]},
     "upload_document": {"required": ["api_key", "filename", "content"]},
+    "list_workspaces": {"required": ["api_key"]},
 }
 
 # Permission each tool requires (mirrors src/mcp_server/server._TOOL_PERMISSIONS).
@@ -69,6 +70,7 @@ _PERMISSION: dict[str, str] = {
     "get_document": "read",
     "list_chunks": "read",
     "upload_document": "write",
+    "list_workspaces": "read",
 }
 
 # A key that LACKS the tool's required permission (so the denied path triggers).
@@ -96,6 +98,7 @@ _TOOL_ARGS: dict[str, dict] = {
     "get_document": {"document_id": "doc-1"},
     "list_chunks": {"document_id": "doc-1"},
     "upload_document": {"filename": "notes.md", "content": "# hello world"},
+    "list_workspaces": {},
 }
 
 ALL_TOOLS = list(_PERMISSION)

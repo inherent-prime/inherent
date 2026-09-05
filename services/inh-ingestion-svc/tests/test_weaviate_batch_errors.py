@@ -54,7 +54,9 @@ async def test_raises_on_partial_batch_failure(service):
     failure.message = "vector dimension mismatch"
     _wire_batch(service, [failure])
     chunks = [_chunk(0), _chunk(1)]
-    with patch("src.services.embedder.embed_texts", return_value=[[0.1] * 384] * 2):
+    # #298: store_chunks_with_tenant now calls the async, per-batch-
+    # heartbeating embed_texts_with_progress instead of sync embed_texts.
+    with patch("src.services.embedder.embed_texts_with_progress", return_value=[[0.1] * 384] * 2):
         with pytest.raises(RuntimeError, match="batch store failed"):
             await service.store_chunks_with_tenant(
                 chunks=chunks,
@@ -70,7 +72,7 @@ async def test_raises_on_partial_batch_failure(service):
 async def test_returns_count_when_no_failures(service):
     _wire_batch(service, [])
     chunks = [_chunk(0), _chunk(1), _chunk(2)]
-    with patch("src.services.embedder.embed_texts", return_value=[[0.1] * 384] * 3):
+    with patch("src.services.embedder.embed_texts_with_progress", return_value=[[0.1] * 384] * 3):
         n = await service.store_chunks_with_tenant(
             chunks=chunks,
             document_id="d",
@@ -84,14 +86,25 @@ async def test_returns_count_when_no_failures(service):
 
 @pytest.mark.asyncio
 async def test_embedding_is_offloaded_to_thread(service):
-    """The synchronous embed_texts call must be offloaded to a thread so it does
-    not block the event loop during document store (#19)."""
-    import src.services.weaviate as wv
+    """Each batch's synchronous TEI POST must be offloaded to a thread so it
+    does not block the event loop during document store (#19).
+
+    #298 update: store_chunks_with_tenant used to make ONE
+    ``asyncio.to_thread(embed_texts, ...)`` call for the whole document,
+    which this test pinned directly. It now calls
+    ``embed_texts_with_progress``, which drives the batch loop on the event
+    loop itself (so it can heartbeat real per-batch progress) and offloads
+    each batch's blocking HTTP call individually -- so the offload
+    assertion now lives at the ``embedder`` module's ``asyncio.to_thread``
+    call, one per batch, each wrapping ``embed_batch_with_retry`` (the
+    shared #311 helper) rather than the whole-document ``embed_texts``.
+    """
+    import src.services.embedder as emb
 
     _wire_batch(service, [])
     chunks = [_chunk(0)]
     with patch.object(
-        wv.asyncio, "to_thread", new=AsyncMock(return_value=[[0.1] * 384])
+        emb.asyncio, "to_thread", new=AsyncMock(return_value=[[0.1] * 384])
     ) as to_thread:
         await service.store_chunks_with_tenant(
             chunks=chunks,
@@ -102,4 +115,8 @@ async def test_embedding_is_offloaded_to_thread(service):
             content_type="text/plain",
         )
     to_thread.assert_awaited_once()
-    assert to_thread.await_args.args[0].__name__ == "embed_texts"
+    # Post-#311 the per-batch blocking call is the shared
+    # inh_contracts.embedding.retry.embed_batch_with_retry, not this service's
+    # deleted _post_embed_with_retry. Same property under test (#19): the
+    # blocking HTTP call must be thread-offloaded, once per batch.
+    assert to_thread.await_args.args[0].__name__ == "embed_batch_with_retry"

@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from src.config.settings import settings as _app_settings
 from src.main import create_app
 from src.models.api_key import APIKeyInfo
 from src.models.document import Document, DocumentChunk
@@ -28,6 +29,15 @@ from src.services.database import get_database
 from src.services.search import build_search_request
 
 FRESH_INGESTED_AT = _dt.datetime.now(_dt.UTC).isoformat()
+# The mirror image of FRESH_INGESTED_AT (#332): relative to now, never a literal
+# date, so this doesn't silently expire the way a hardcoded date once did (a
+# pinned date ages past settings.freshness_max_age_days and then fails forever,
+# on every PR, for a reason unrelated to its own diff). Without a case at this
+# end, nothing pins is_stale=True -- a bug that hardwired the flag to False
+# would look identical to a passing suite.
+STALE_INGESTED_AT = (
+    _dt.datetime.now(_dt.UTC) - _dt.timedelta(days=_app_settings.freshness_max_age_days + 1)
+).isoformat()
 
 
 @pytest.fixture
@@ -60,8 +70,7 @@ def lineage_doc() -> Document:
     )
 
 
-@pytest.fixture
-def lineage_chunk() -> DocumentChunk:
+def _chunk_ingested_at(ingested_at: str) -> DocumentChunk:
     return DocumentChunk(
         id="chunk-1",
         document_id="doc-1",
@@ -70,9 +79,14 @@ def lineage_chunk() -> DocumentChunk:
         metadata={
             "source_uri": "s3://bucket/report.pdf",
             "content_hash": "abc123",
-            "ingested_at": FRESH_INGESTED_AT,
+            "ingested_at": ingested_at,
         },
     )
+
+
+@pytest.fixture
+def lineage_chunk() -> DocumentChunk:
+    return _chunk_ingested_at(FRESH_INGESTED_AT)
 
 
 @pytest.fixture
@@ -115,6 +129,21 @@ class TestLineageEndpoint:
         assert body["ingested_at"] == FRESH_INGESTED_AT
         assert body["is_stale"] is False
         assert body["chunk_id"] == "chunk-1"
+
+    async def test_evidence_older_than_the_threshold_is_flagged_stale(self, mock_db, client):
+        """The mirror image of the fresh case (#332).
+
+        Without this, nothing pins is_stale=True, so a bug that hardwired the
+        flag to False would look identical to a passing suite -- which is
+        exactly how the expiring fixture this test accompanies stayed
+        invisible until the day it flipped.
+        """
+        mock_db.get_document_chunks = AsyncMock(
+            return_value=[_chunk_ingested_at(STALE_INGESTED_AT)]
+        )
+        resp = await client.get("/v1/documents/doc-1/lineage", headers={"X-API-Key": "k"})
+        assert resp.status_code == 200
+        assert resp.json()["is_stale"] is True
 
     async def test_404_when_document_missing(self, client, mock_db):
         mock_db.get_document = AsyncMock(return_value=None)
