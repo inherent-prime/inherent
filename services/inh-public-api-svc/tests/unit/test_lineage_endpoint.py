@@ -27,6 +27,8 @@ from src.services.auth import (
 from src.services.database import get_database
 from src.services.search import build_search_request
 
+FRESH_INGESTED_AT = _dt.datetime.now(_dt.UTC).isoformat()
+
 
 @pytest.fixture
 def read_key() -> APIKeyInfo:
@@ -68,7 +70,7 @@ def lineage_chunk() -> DocumentChunk:
         metadata={
             "source_uri": "s3://bucket/report.pdf",
             "content_hash": "abc123",
-            "ingested_at": "2026-06-01T00:00:00Z",
+            "ingested_at": FRESH_INGESTED_AT,
         },
     )
 
@@ -110,7 +112,7 @@ class TestLineageEndpoint:
         assert body["document_name"] == "report.pdf"
         assert body["source_uri"] == "s3://bucket/report.pdf"
         assert body["content_hash"] == "abc123"
-        assert body["ingested_at"].startswith("2026-06-01")
+        assert body["ingested_at"] == FRESH_INGESTED_AT
         assert body["is_stale"] is False
         assert body["chunk_id"] == "chunk-1"
 

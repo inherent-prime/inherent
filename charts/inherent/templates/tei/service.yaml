@@ -1,0 +1,20 @@
+{{- if eq .Values.embedding.profile "tei" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: text-embeddings-inference
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inherent.labels" . | nindent 4 }}
+    {{- include "inherent.selectorLabels" (dict "component" "tei") | nindent 4 }}
+spec:
+  # Name matches docker-compose.yml's service key — EMBEDDING_SERVICE_URL
+  # for the tei profile is http://text-embeddings-inference:80.
+  type: ClusterIP
+  selector:
+    {{- include "inherent.selectorLabels" (dict "component" "tei") | nindent 4 }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+{{- end }}

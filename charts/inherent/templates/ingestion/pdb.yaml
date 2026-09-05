@@ -1,0 +1,15 @@
+{{- if .Values.ingestion.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: inh-ingestion
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inherent.labels" . | nindent 4 }}
+    {{- include "inherent.selectorLabels" (dict "component" "ingestion") | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.ingestion.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "inherent.selectorLabels" (dict "component" "ingestion") | nindent 6 }}
+{{- end }}
