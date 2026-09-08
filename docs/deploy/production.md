@@ -14,6 +14,35 @@ future or hosted-only.
 datastore on an internal network (the release stack already binds them to
 loopback).
 
+## Running From Published Images
+
+The two custom services are public images —
+`ghcr.io/inherent-prime/ingestion-svc` and `ghcr.io/inherent-prime/public-api-svc`
+— no registry login is needed to pull. Override the source with the
+`INHERENT_REGISTRY` / `INHERENT_VERSION` env vars to pin a version or point at
+a private mirror.
+
+The stack initializes the database automatically: an init container runs the
+ingestion image in `SERVICE_MODE=migrate`, applying the SQL migrations baked
+into the image (idempotent and non-destructive — safe to restart).
+
+The embedding service (`text-embeddings-inference`) is **amd64-only**; on
+Apple Silicon / arm64 it runs under emulation (slower first start). Run the
+full stack on an amd64 host for production-like performance.
+
+Seed a local dev workspace + API key with the bootstrap script (needs no
+checkout — it only talks to the running containers via `docker exec`):
+
+```bash
+curl -O https://raw.githubusercontent.com/inherent-prime/inherent/main/scripts/dev/bootstrap.sh
+PG_CONTAINER=inherent-oss-postgres MONGO_CONTAINER=inherent-oss-mongodb \
+  bash bootstrap.sh
+```
+
+The seeded `ink_dev_local_key_001` is a **dev convenience** — create your own
+workspace and API keys (see [§8](#8-provision-workspaces-and-api-keys)) before
+exposing the stack to anything real.
+
 ## Pre-flight Checklist
 
 - [ ] Strong secrets set: `POSTGRES_PASSWORD`, `WEAVIATE_API_KEY`, `INGESTION_API_KEY`

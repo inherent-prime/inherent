@@ -275,6 +275,25 @@ jobs:
           uv run coverage report --include='src/temporal/activities/store.py' --fail-under=71
           uv run coverage report --include='src/temporal/activities/chunk.py' --fail-under=91
 
+      # Main-only: the coverage badge (see the `coverage-badge` job below)
+      # only ever reads the latest push-to-main numbers, so there is no
+      # reason to spend artifact storage/upload time on every PR run. The
+      # Test step above already wrote `.coverage` in this service's
+      # directory; `coverage json` re-reads it into a machine-readable
+      # summary (`totals.covered_lines` / `totals.num_statements`) without
+      # rerunning any tests.
+      - name: Export coverage summary
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        run: uv run coverage json -o coverage-summary.json
+
+      - name: Upload coverage summary
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.service }}
+          path: ${{ matrix.path }}/coverage-summary.json
+          retention-days: 7
+
       # #205: this step used to run unconditionally under `if: always()` and
       # unconditionally echo a "checks passed" line -- so a red job (a failed
       # Lint/Format/Type/Security/Test step above) still printed a green
@@ -371,3 +390,88 @@ jobs:
           else
             echo "All service checks passed."
           fi
+
+  # README trust-signal badge (docs/maintainers/readme-trim-plan.md #4): a
+  # single weighted-coverage number across all four services, published to a
+  # gist that shields.io's dynamic-badge endpoint reads.
+  #
+  # Main-only, not per-PR: a PR's coverage numbers are transient (they can
+  # regress and get fixed again before merge) and forking a PR cannot see
+  # `secrets.GIST_SECRET` anyway (GitHub withholds repo secrets from
+  # fork-triggered runs) -- publishing here would either no-op unpredictably
+  # or publish noise the badge shouldn't reflect. `main` is the one branch
+  # whose CI run is a merge-gate record, so it is the only trustworthy source
+  # for "what does main's coverage look like right now".
+  #
+  # Not a required check: it depends on an external gist (network flake,
+  # gist-owner token expiry) that has nothing to do with whether the code
+  # under test is correct, so it must never be able to block a merge --
+  # `required-tests` above only waits on `service-checks` / `root-tests`.
+  #
+  # No-ops (skips entirely, via the `vars.COVERAGE_GIST_ID != ''` guard)
+  # until the one-time setup in docs/maintainers/coverage-badge.md is done:
+  # a public gist seeded with `inherent-coverage.json`, the `COVERAGE_GIST_ID`
+  # repo variable, and a `GIST_SECRET` repo secret (a PAT with `gist` scope).
+  coverage-badge:
+    name: Publish coverage badge
+    runs-on: ubuntu-latest
+    needs: service-checks
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.COVERAGE_GIST_ID != ''
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Download coverage summaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-*
+          merge-multiple: false
+          path: coverage
+
+      # Weighted (not averaged) across services: summing covered/total lines
+      # first means a large service's coverage counts proportionally more
+      # than a small one's, matching how `cov_fail_under` already treats each
+      # service as its own floor rather than pretending they are equal-sized.
+      - name: Compute weighted coverage
+        id: coverage
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          from pathlib import Path
+
+          covered = 0
+          total = 0
+          for summary_path in sorted(Path("coverage").glob("*/coverage-summary.json")):
+              totals = json.loads(summary_path.read_text())["totals"]
+              covered += totals["covered_lines"]
+              total += totals["num_statements"]
+
+          if total == 0:
+              raise SystemExit("no coverage-summary.json files found under coverage/")
+
+          percent = round(100 * covered / total, 1)
+
+          if percent >= 90:
+              color = "brightgreen"
+          elif percent >= 80:
+              color = "green"
+          elif percent >= 70:
+              color = "yellowgreen"
+          elif percent >= 60:
+              color = "yellow"
+          else:
+              color = "orange"
+
+          print(f"percent={percent}")
+          print(f"color={color}")
+          PY
+
+      - name: Publish badge
+        uses: schneegans/dynamic-badges-action@v1.7.0
+        with:
+          auth: ${{ secrets.GIST_SECRET }}
+          gistID: ${{ vars.COVERAGE_GIST_ID }}
+          filename: inherent-coverage.json
+          label: coverage
+          message: ${{ steps.coverage.outputs.percent }}%
+          color: ${{ steps.coverage.outputs.color }}
