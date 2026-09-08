@@ -1082,15 +1082,22 @@ class DatabaseService:
                     # so `chunk.chunk_index` is used verbatim and indices start
                     # whatever value the caller supplied (0 in every existing
                     # caller).
+                    # Typed `int` (not `int | None`) and defaulted to 0 rather
+                    # than left unset on the append=False branch: the value is
+                    # unused there (the dict below picks `chunk.chunk_index`),
+                    # but an Optional here makes `next_chunk_index + i` a mypy
+                    # error that only inh-ingestion-svc's own `mypy src` run
+                    # catches -- `make type-check` covers public-api only.
+                    next_chunk_index: int = 0
                     if append:
                         max_chunk_index = session.execute(
                             select(func.max(self.document_chunks.c.chunk_index)).where(
                                 self.document_chunks.c.processed_document_id == doc_id
                             )
                         ).scalar()
-                        next_chunk_index = 0 if max_chunk_index is None else max_chunk_index + 1
-                    else:
-                        next_chunk_index = None  # unused on this branch
+                        next_chunk_index = (
+                            0 if max_chunk_index is None else int(max_chunk_index) + 1
+                        )
 
                     # Built as new dicts (never `chunk.chunk_index = ...`) so
                     # the caller's own DocumentChunk objects are never mutated
