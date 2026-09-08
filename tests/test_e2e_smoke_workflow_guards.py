@@ -206,6 +206,29 @@ def test_tears_the_stack_down_unconditionally() -> None:
     )
 
 
+def test_cli_wheel_path_runs_in_the_existing_smoke_stack() -> None:
+    """The adopter path must use a wheel and locally-built PR images.
+
+    A second job cannot share this job's Docker daemon, so it would boot a
+    second stack and double the merge-gate cost. Pin the CLI steps here.
+    """
+    job = _job_block("e2e-smoke", _text())
+    for required in (
+        "uv build",
+        "python -m venv",
+        "pip install",
+        "up --engine-version",
+        "status --json",
+        "docs upload",
+        "search \"inherent\"",
+        "whoami --json",
+        "connect claude --print",
+        "down --volumes --yes",
+        "--registry localhost/inherent",
+    ):
+        assert required in job, f"expected CLI adopter-path check containing {required!r}"
+
+
 @pytest.mark.parametrize("pyproject", SERVICE_PYPROJECTS, ids=lambda p: p.parent.name)
 def test_service_declares_the_smoke_marker(pyproject: Path) -> None:
     """Both services must declare `smoke`, even before both use it.

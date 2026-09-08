@@ -16,6 +16,16 @@ permissions, and freshness signals.
 [Get started locally](getting-started/local.md){ .md-button .md-button--primary }
 [What's new](release-notes.md){ .md-button }
 
+## Start with the CLI
+
+```bash
+pip install inherent
+inherent up
+inherent connect claude --print
+```
+
+Use `make quickstart` when contributing from a checkout.
+
 ## Fast routes
 
 | If you need to... | Open this |

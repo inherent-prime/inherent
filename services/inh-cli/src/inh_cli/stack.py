@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 import httpx
 import typer
+from packaging.version import InvalidVersion, Version
 from rich.console import Console
 from rich.table import Table
 
@@ -29,6 +30,37 @@ from inh_cli.secrets import load_or_create_compose_env
 LOCAL_API_URL = "http://localhost:18000"
 INGESTION_HEALTH_URL = "http://localhost:18002/health"
 DOCKER_INSTALL_URL = "https://docs.docker.com/get-docker/"
+
+
+def version_drift_message(cli_version: str, engine_version: object) -> str | None:
+    """Return the compatible-version notice, or nothing for patch/unknown versions."""
+
+    try:
+        cli_parsed = Version(cli_version)
+        engine_parsed = Version(str(engine_version))
+    except InvalidVersion:
+        return None
+    if cli_parsed.major != engine_parsed.major:
+        return (
+            f"Warning: CLI {cli_version} and engine {engine_version} have different major versions. "
+            "Use `inherent up --engine-version <version>` to select an engine image."
+        )
+    if cli_parsed.minor != engine_parsed.minor:
+        return f"Note: CLI {cli_version} and engine {engine_version} differ."
+    return None
+
+
+def _warn_version_drift(engine_version: object) -> None:
+    message = version_drift_message(__version__, engine_version)
+    if message:
+        sys.stderr.write(message + "\n")
+
+
+def _major_version_conflict(cli_version: str, engine_version: str) -> bool:
+    try:
+        return Version(cli_version).major != Version(engine_version).major
+    except InvalidVersion:
+        return False
 
 
 def _json_mode(ctx: typer.Context, json_flag: bool) -> bool:
@@ -134,12 +166,24 @@ def up(
         str | None,
         typer.Option("--registry", help="Override INHERENT_REGISTRY."),
     ] = None,
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force", help="Start anyway when --engine-version has a different major version."
+        ),
+    ] = False,
 ) -> None:
     """Pull images, start the stack, seed a workspace, and save config."""
 
     preflight_docker()
     env_path, values = load_or_create_compose_env()
     version = (engine_version or __version__).lstrip("v")
+    if engine_version is not None and not force and _major_version_conflict(__version__, version):
+        raise ClientError(
+            f"CLI {__version__} and engine {version} have different major versions. "
+            "Pass --force to start it anyway.",
+            exit_code=2,
+        )
     child_env = {"INHERENT_VERSION": version}
     if registry:
         child_env["INHERENT_REGISTRY"] = registry
@@ -157,7 +201,13 @@ def up(
     workspace_id = values["INHERENT_WORKSPACE_ID"]
     resolved = Resolved(url=LOCAL_API_URL, api_key=api_key, workspace_id=workspace_id)
     with make_client(resolved) as client:
-        request(client, "GET", "/v1/whoami")
+        response = request(client, "GET", "/v1/whoami")
+    try:
+        identity = response.json()
+    except ValueError:
+        identity = None
+    if isinstance(identity, dict):
+        _warn_version_drift(identity.get("engine_version"))
 
     first_run = load_config() is None
     save_config(
@@ -247,6 +297,8 @@ def status(
     # /health/ready is the one carrying `version` and per-component `checks`,
     # so reading `version` off /health left status --json permanently null.
     _, health = _health_payload("/health/ready")
+    if health:
+        _warn_version_drift(health.get("version"))
     merged = []
     for row in rows:
         service = row.get("Service") or row.get("Name") or ""
