@@ -3,7 +3,7 @@
 Cloud-native production deployment on Azure: AKS, zone-redundant HA, and
 restore-based DR. Terraform provisions everything; a one-click script wraps
 `terraform apply` plus post-deploy bootstrap. This is the alternative to the
-[Hetzner + Terraform](../getting-started/production.md) path for teams that
+[Hetzner + Terraform](../getting-started/deploy-hetzner.md) path for teams that
 want a managed-Kubernetes, multi-zone target instead of a single VM.
 
 All infrastructure lives under `infra/azure/`. Nothing here is hosted-only —
@@ -157,7 +157,7 @@ graph TB
 **Truthfully, today:** secrets are read out of Key Vault by Terraform and
 written into the cluster as plain Kubernetes `Secret` objects
 (`kubernetes_secret` resources in `modules/apps`), which pods reference via
-`secretKeyRef` — the same mechanism the [Hetzner path](../getting-started/production.md)
+`secretKeyRef` — the same mechanism the [Hetzner path](../getting-started/deploy-hetzner.md)
 uses, not a Key Vault CSI mount. A federated OIDC credential (`modules/security`)
 now exists on the AKS OIDC issuer, but no workload's ServiceAccount consumes
 it yet — see the [state-file secret caveat](#7-enterprise-vnet-integration)
@@ -329,7 +329,7 @@ the tfvar on a live corpus.
 | An existing VNet | Only needed for BYO-VNet mode (`existing_vnet_id`); default mode creates one |
 | GPU quota | Nothing in this stack requests GPU SKUs (embedding runs on CPU TEI by default, or Azure OpenAI once selectable) |
 | Docker installed locally | Terraform and `az`/`kubectl`/`helm` are the only local tools; images are pulled by AKS |
-| Any Hetzner account/token | Azure and Hetzner are independent deploy targets — see [Hetzner + Terraform](../getting-started/production.md) for that path |
+| Any Hetzner account/token | Azure and Hetzner are independent deploy targets — see [Hetzner + Terraform](../getting-started/deploy-hetzner.md) for that path |
 
 ## 4. One-Click Deploy
 
@@ -565,7 +565,7 @@ would need re-pointing) and add roughly $300/mo over nginx (see
 
 **State-file secret caveat.** Generated secrets (PG password, API keys, MinIO
 keys) are written into Terraform state as resource attributes, exactly like
-the [Hetzner path](../getting-started/production.md#setting-application-secrets)
+the [Hetzner path](../getting-started/deploy-hetzner.md#setting-application-secrets)
 documents. `sensitive = true` only redacts CLI output — the values are in
 plaintext in `terraform.tfstate`. Lock down the state storage account:
 
@@ -705,4 +705,4 @@ see the runbook for the resolved detail.
 
 - [Azure DR Runbook](azure-dr-runbook.md) — failure modes, restore procedures, DR drills
 - [Taking Inherent to Production](production.md) — hardening steps that apply to every deployment target
-- [Deploy to Production (Hetzner)](../getting-started/production.md) — single-VM alternative
+- [Deploy to Production (Hetzner)](../getting-started/deploy-hetzner.md) — single-VM alternative

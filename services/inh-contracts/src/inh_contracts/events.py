@@ -126,6 +126,63 @@ class DocumentUploadMessage(BaseModel):
     )
 
 
+class ConversationTurnMessage(BaseModel):
+    """Schema for one conversation turn published to core.conversation.turn.v1 (#306).
+
+    Mirrors ``DocumentUploadMessage`` as the pattern for a public-api ->
+    ingestion-svc event contract, but at TURN granularity rather than
+    document granularity: ``POST /v1/conversations/{external_id}/turns``
+    publishes ONE message per turn (never one per batch) so the MQ layer
+    needs no batching/debounce logic of its own -- that lives entirely in
+    ``ConversationMemoryWorkflow``'s buffer (#306) -- and so ``turn_id``
+    dedup on the consumer side is a simple bounded ``set[str]`` membership
+    check instead of per-item dedup inside a batch payload.
+
+    ``turn_id`` is the idempotency key: a duplicate ``turn_id`` delivered
+    twice (e.g. an MQ at-least-once redelivery) must be a no-op on the
+    workflow side, never a duplicated turn in the conversation.
+    """
+
+    event_type: Literal["conversation.turn"] = Field(..., description="Event type identifier")
+    workspace_id: str = Field(..., description="Workspace identifier")
+    user_id: str = Field(..., description="User identifier who sent/owns the turn")
+    external_id: str = Field(
+        ..., description="Caller-supplied conversation identifier (path segment)"
+    )
+    turn_id: str = Field(..., description="Idempotency key for this turn")
+    role: Literal["user", "assistant"] = Field(..., description="Who produced this turn")
+    text: str = Field(..., min_length=1, description="Raw (pre-redaction) turn text")
+    ts: str = Field(
+        ..., description="ISO 8601 timestamp the turn was produced at (client-supplied)"
+    )
+    client: str | None = Field(
+        None, description="Caller-supplied client/application label, e.g. 'agent-cli'"
+    )
+    timestamp: str = Field(..., description="ISO 8601 timestamp of the publish event")
+    contract_version: str = Field(
+        CONTRACT_VERSION,
+        description="Semantic version of the conversation-turn contract. Defaults so "
+        "older messages produced without it still validate.",
+    )
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "event_type": "conversation.turn",
+                "workspace_id": "507f1f77bcf86cd799439012",
+                "user_id": "507f1f77bcf86cd799439013",
+                "external_id": "conv-abc123",
+                "turn_id": "turn-0001",
+                "role": "user",
+                "text": "What's the capital of France?",
+                "ts": "2026-08-31T10:30:00Z",
+                "client": "agent-cli",
+                "timestamp": "2026-08-31T10:30:00Z",
+            }
+        }
+    )
+
+
 class DocumentCompletionMessage(BaseModel):
     """Schema for document processing completion notification.
 

@@ -41,6 +41,14 @@ dependencies = [
     "prometheus-client>=0.19.0",
     # MongoDB (read-only — for workspace ownership lookups; control-plane truth)
     "motor>=3.6.0",
+    # OAuth 2.1 resource-server bearer-token verification (#295). Already an
+    # indirect dependency of `mcp` (pinned above) at 2.10.1; declared
+    # directly here now that src/services/auth.py imports it, so this
+    # service's own supported-version contract with it is explicit rather
+    # than riding on mcp's. `[crypto]` pulls in `cryptography` (already
+    # resolved transitively, e.g. via cloud-sql-python-connector) for
+    # RS256/ES256 signature verification.
+    "pyjwt[crypto]>=2.10.1",
 ]
 
 [project.optional-dependencies]

@@ -17,9 +17,11 @@ The SHIPPED default is worse, not milder: `CHUNKING_STRATEGY=sentences`
 pipe-delimited rows contain NO sentence-ending punctuation at all, so the
 "sentence" splitter never finds a boundary and the entire 10,000-row sheet
 becomes exactly ONE chunk (measured: 510,258 chars, one chunk, for a
-similarly-shaped 10k-row sheet). `embedder.py`'s `_post_embed` calls TEI
-with `truncate=True` (the all-MiniLM-L6-v2 model's 256-token input limit) --
-so ~99.8% of that single chunk is silently discarded before a vector is
+similarly-shaped 10k-row sheet). The TEI wire adapter (`inh_contracts.
+embedding.tei_provider`, #311) calls TEI with `truncate=True` (the
+configured model's input-token limit -- see `docs/reference/
+configuration.md`'s embedding section for the deployed default) -- so a
+large fraction of that single chunk is silently discarded before a vector is
 ever computed. This is not a hypothetical worst case; it is what every
 default-configuration deployment does today. Separately: an .eml's
 From/To/Subject/Date block appears once at the top, so any mid-body chunk

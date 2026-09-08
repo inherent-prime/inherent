@@ -962,6 +962,105 @@ class TestSetDocumentStatusActivity:
 
 
 # =========================================================================
+# _risk_metadata conversation turn attribution (#306)
+# =========================================================================
+
+
+class TestRiskMetadataTurnAttribution:
+    """`_risk_metadata` additively stamps conversation-turn fields (#306)
+    onto chunk metadata when the staged chunk dict carries `turn_id` -- and
+    must be a total no-op for ordinary document chunks that don't."""
+
+    def test_conversation_chunk_gets_all_five_turn_fields(self):
+        """A chunk_dict with turn_id present must have all five turn fields
+        stamped onto the returned metadata, with the right values."""
+        from src.temporal.activities.store import _risk_metadata
+
+        chunk_dict = {
+            "content": "hello",
+            "turn_id": "turn_abc123",
+            "turn_index": 2,
+            "role": "user",
+            "turn_ts": "2026-01-01T00:00:00Z",
+            "client": "web",
+        }
+
+        metadata = _risk_metadata(chunk_dict)
+
+        assert metadata == {
+            "turn_index": 2,
+            "turn_id": "turn_abc123",
+            "role": "user",
+            "turn_ts": "2026-01-01T00:00:00Z",
+            "client": "web",
+        }
+
+    def test_ordinary_document_chunk_has_no_turn_fields(self):
+        """An ordinary document chunk (no turn_id key at all) must not have
+        any of the five turn fields added -- the block is a no-op, per the
+        docstring's claim for every non-conversation document. With no risk
+        signal or chunking strategy either, metadata is None."""
+        from src.temporal.activities.store import _risk_metadata
+
+        chunk_dict = {
+            "content": "plain document text",
+            "chunk_index": 0,
+        }
+
+        metadata = _risk_metadata(chunk_dict)
+
+        assert metadata is None
+
+    def test_turn_id_explicitly_none_is_not_a_conversation_chunk(self):
+        """The guard is `is not None`, not truthiness -- a chunk_dict that
+        explicitly carries turn_id=None (as opposed to omitting the key
+        entirely) must still be treated as "not a conversation chunk"."""
+        from src.temporal.activities.store import _risk_metadata
+
+        chunk_dict = {
+            "content": "plain document text",
+            "turn_id": None,
+            "turn_index": 5,
+            "role": "user",
+        }
+
+        metadata = _risk_metadata(chunk_dict)
+
+        assert metadata is None
+
+    def test_turn_fields_coexist_with_risk_and_strategy_signals(self):
+        """The three additive blocks (#44 risk, #129 strategy, #306 turn
+        attribution) must all land in the same metadata dict without
+        clobbering each other."""
+        from src.temporal.activities.store import _risk_metadata
+
+        chunk_dict = {
+            "content": "hello",
+            "content_risk": "prompt_injection",
+            "content_risk_reasons": ["suspicious phrase"],
+            "chunking_strategy": "sentences",
+            "turn_id": "turn_1",
+            "turn_index": 0,
+            "role": "assistant",
+            "turn_ts": "2026-01-01T00:00:00Z",
+            "client": "api",
+        }
+
+        metadata = _risk_metadata(chunk_dict)
+
+        assert metadata == {
+            "content_risk": "prompt_injection",
+            "content_risk_reasons": ["suspicious phrase"],
+            "chunking_strategy": "sentences",
+            "turn_index": 0,
+            "turn_id": "turn_1",
+            "role": "assistant",
+            "turn_ts": "2026-01-01T00:00:00Z",
+            "client": "api",
+        }
+
+
+# =========================================================================
 # store_in_weaviate idempotent reindex tests (Fix #11)
 # =========================================================================
 
@@ -1077,6 +1176,98 @@ class TestStoreInWeaviateReindex:
 
         assert result.success is True
         weaviate.delete_document_chunks_graceful.assert_awaited_once()
+        weaviate.store_chunks_with_tenant.assert_awaited_once()
+
+    @patch("src.temporal.shared_services.get_db_service")
+    @patch("src.temporal.shared_services.get_weaviate_service")
+    @patch("src.temporal.shared_services.get_staging_service")
+    @pytest.mark.asyncio
+    async def test_append_true_skips_delete_but_still_stores(
+        self, mock_get_staging, mock_get_weaviate, mock_get_db
+    ):
+        """(#306) append=True must SKIP delete_document_chunks_graceful
+        entirely -- a previous flush's objects must survive this one --
+        while still calling store_chunks_with_tenant for the new chunks."""
+        from src.temporal.activities.store import store_in_weaviate
+
+        mock_staging = MagicMock()
+        mock_staging.read_chunks.return_value = [
+            {
+                "document_id": "doc_1",
+                "content": "chunk text",
+                "chunk_index": 3,
+                "start_char": 0,
+                "end_char": 10,
+            }
+        ]
+        mock_get_staging.return_value = mock_staging
+
+        weaviate = MagicMock()
+        weaviate.is_connected.return_value = True
+        weaviate.delete_document_chunks_graceful = AsyncMock(return_value=(True, 0))
+        weaviate.store_chunks_with_tenant = AsyncMock(return_value=None)
+        mock_get_weaviate.return_value = weaviate
+
+        mock_db = MagicMock()
+        mock_db.record_ingestion_event = AsyncMock(return_value=None)
+        mock_db.is_active_run = AsyncMock(return_value=True)
+        mock_get_db.return_value = mock_db
+
+        store_input = self._store_input()
+        store_input.append = True
+
+        result = await store_in_weaviate(store_input)
+
+        assert result.success is True
+        weaviate.delete_document_chunks_graceful.assert_not_awaited()
+        weaviate.store_chunks_with_tenant.assert_awaited_once()
+
+    @patch("src.temporal.shared_services.get_db_service")
+    @patch("src.temporal.shared_services.get_weaviate_service")
+    @patch("src.temporal.shared_services.get_staging_service")
+    @pytest.mark.asyncio
+    async def test_append_false_still_deletes_before_storing(
+        self, mock_get_staging, mock_get_weaviate, mock_get_db
+    ):
+        """(#306) append=False (the pre-#306 default) must preserve existing
+        behaviour: delete_document_chunks_graceful IS awaited before the
+        store call."""
+        from src.temporal.activities.store import store_in_weaviate
+
+        mock_staging = MagicMock()
+        mock_staging.read_chunks.return_value = [
+            {
+                "document_id": "doc_1",
+                "content": "chunk text",
+                "chunk_index": 0,
+                "start_char": 0,
+                "end_char": 10,
+            }
+        ]
+        mock_get_staging.return_value = mock_staging
+
+        weaviate = MagicMock()
+        weaviate.is_connected.return_value = True
+        weaviate.delete_document_chunks_graceful = AsyncMock(return_value=(True, 1))
+        weaviate.store_chunks_with_tenant = AsyncMock(return_value=None)
+        mock_get_weaviate.return_value = weaviate
+
+        mock_db = MagicMock()
+        mock_db.record_ingestion_event = AsyncMock(return_value=None)
+        mock_db.is_active_run = AsyncMock(return_value=True)
+        mock_get_db.return_value = mock_db
+
+        store_input = self._store_input()
+        store_input.append = False
+
+        result = await store_in_weaviate(store_input)
+
+        assert result.success is True
+        weaviate.delete_document_chunks_graceful.assert_awaited_once_with(
+            workspace_id="ws_1",
+            document_id="doc_1",
+            user_id="user_1",
+        )
         weaviate.store_chunks_with_tenant.assert_awaited_once()
 
 

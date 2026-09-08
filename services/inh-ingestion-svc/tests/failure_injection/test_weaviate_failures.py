@@ -31,6 +31,9 @@ def mock_settings():
     settings = MagicMock(spec=Settings)
     settings.weaviate_url = "http://example.invalid:8080"
     settings.weaviate_api_key = ""
+    # #311 PR #314 review finding 3: _check_or_stamp_collection_identity now
+    # reads this on every call.
+    settings.embedding_adopt_unstamped_collections = False
     return settings
 
 
@@ -62,10 +65,16 @@ async def test_store_chunks_with_tenant_propagates_client_error(mock_settings, c
     tenant_collection = MagicMock()
     tenant_collection.batch.dynamic.side_effect = Exception("weaviate unavailable")
     collection.with_tenant.return_value = tenant_collection
+    # #311 PR #314 review finding 3: this test isn't about the identity
+    # guard -- resolve the mocked collection as fresh/empty (no tenants yet)
+    # so it adopts silently instead of tripping the opt-in gate.
+    collection.tenants.get.return_value = {}
     service.client.collections.get.return_value = collection
 
+    # store_chunks_with_tenant now calls the async, per-batch-heartbeating
+    # embed_texts_with_progress (#298) instead of the sync embed_texts.
     with patch(
-        "src.services.embedder.embed_texts",
+        "src.services.embedder.embed_texts_with_progress",
         return_value=[[0.0, 0.1, 0.2]],
     ):
         with pytest.raises(Exception, match="weaviate unavailable"):

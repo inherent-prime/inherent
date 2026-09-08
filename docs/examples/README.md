@@ -52,9 +52,10 @@ Not sure which endpoint to call? Start here.
 | Search your knowledge base | [Search](#5-search) — semantic (default), hybrid, or keyword |
 | Inspect indexed content | [Fetch chunks](#6-fetch-chunks) — list chunks or get the full reconstructed text |
 | Fix or refine a chunk | [Edit a chunk](#9-edit-a-chunk) — replaces content and re-embeds in Weaviate |
-| Debug why a document wasn't indexed | [Ingestion status](#8-get-ingestion-status) → [Lineage](#10-document-lineage) → [Dead-letter jobs](#12-dead-letter-jobs) |
-| Retry a failed ingestion | [Dead-letter jobs → Retry](#12-dead-letter-jobs) |
+| Debug why a document wasn't indexed | [Ingestion status](#8-get-ingestion-status) → [Lineage](#10-document-lineage) → [Dead-letter jobs](#13-dead-letter-jobs) |
+| Retry a failed ingestion | [Dead-letter jobs → Retry](#13-dead-letter-jobs) |
 | Remove a document | [Delete a document](#11-delete-a-document) — clears PostgreSQL and Weaviate |
+| Ingest a chat/agent transcript | [Conversations](#12-conversations) — append-only, turn-aware, never re-uploads the whole history |
 
 ---
 
@@ -896,7 +897,82 @@ exists but belongs to a different workspace — no cross-tenant existence leak, 
 
 ---
 
-## 12. Dead-letter Jobs
+## 12. Conversations
+
+Conversations are append-only and grow — use these instead of `/v1/documents` for chat/agent
+transcripts. `external_id` is a caller-chosen identifier (e.g. a session id); the first turn ever
+posted for it creates the conversation, every later turn appends to it.
+
+### Append turns
+
+```bash
+curl -s -X POST "$API_BASE/v1/conversations/session-42/turns" \
+  -H "X-API-Key: $API_KEY" \
+  -H "X-Workspace-Id: $WORKSPACE_ID" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "turns": [
+      {"turn_id": "t1", "role": "user", "text": "What'"'"'s our refund policy?", "ts": "2026-08-31T10:00:00Z", "client": "agent-cli"},
+      {"turn_id": "t2", "role": "assistant", "text": "Refunds are processed within 5 business days.", "ts": "2026-08-31T10:00:03Z"}
+    ]
+  }' | jq .
+```
+
+**Expected response (202):**
+
+```json
+{
+  "external_id": "session-42",
+  "workspace_id": "ws_local_001",
+  "accepted": 2,
+  "message": "Turns accepted for processing."
+}
+```
+
+Processing happens asynchronously — turns buffer server-side and flush in size-or-idle batches, so
+`GET` immediately after `POST` may not yet reflect the latest turns. A duplicate `turn_id` (a retry
+of this same request) is a no-op — safe to resend.
+
+### Get conversation stats
+
+```bash
+curl -s "$API_BASE/v1/conversations/session-42" \
+  -H "X-API-Key: $API_KEY" \
+  -H "X-Workspace-Id: $WORKSPACE_ID" \
+  | jq .
+```
+
+**Expected response:**
+
+```json
+{
+  "external_id": "session-42",
+  "workspace_id": "ws_local_001",
+  "turn_count": 2,
+  "chunk_count": 2,
+  "last_flushed_at": "2026-08-31T10:01:33Z",
+  "status": "processed",
+  "created_at": "2026-08-31T10:00:00Z",
+  "updated_at": "2026-08-31T10:01:33Z"
+}
+```
+
+Returns **404** if `external_id` isn't found in `workspace_id`.
+
+### Delete a conversation
+
+```bash
+curl -s -X DELETE "$API_BASE/v1/conversations/session-42" \
+  -H "X-API-Key: $API_KEY" \
+  -H "X-Workspace-Id: $WORKSPACE_ID"
+```
+
+Returns **204** on success, **404** if already gone. Removes the conversation's chunks and vectors
+the same way `DELETE /v1/documents/{id}` does.
+
+---
+
+## 13. Dead-letter Jobs
 
 Failed ingestion messages land in a dead-letter table for inspection and recovery. These
 endpoints live on the ingestion service (write/admin plane) and use `$INGEST_KEY`.
@@ -1026,7 +1102,7 @@ Returns **404** if missing or not owned by `workspace_id`.
 
 ---
 
-## 13. Common Error Reference
+## 14. Common Error Reference
 
 | HTTP Status | Service | Cause | Fix |
 |---|---|---|---|

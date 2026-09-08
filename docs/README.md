@@ -10,7 +10,7 @@ then open the smallest relevant document.
 | --- | --- |
 | Start the system locally and run the first upload/search flow | [getting-started/local.md](getting-started/local.md) |
 | Provision a throwaway Hetzner VM from a laptop (Object Storage state) | [getting-started/local-vm-test.md](getting-started/local-vm-test.md) |
-| Provision a Hetzner VM with Terraform (production path) | [getting-started/production.md](getting-started/production.md) |
+| Provision a Hetzner VM with Terraform (production path) | [getting-started/deploy-hetzner.md](getting-started/deploy-hetzner.md) |
 | Harden the demo stack before exposing it to real users/data | [deploy/production.md](deploy/production.md) |
 | Separate content by clearance, tenant, or need-to-know | [access-control.md](access-control.md) |
 | Replace a document that changed, or run a clean retrieval eval | [keeping-content-current.md](keeping-content-current.md) |
@@ -55,7 +55,7 @@ docs/
   getting-started/
     local.md                   local start, upload, ingest, and search guide
     local-vm-test.md           laptop Hetzner VM test (Object Storage TF state)
-    production.md              Hetzner Terraform deploy (VM + compose release stack)
+    deploy-hetzner.md          Hetzner Terraform deploy (VM + compose release stack)
   deploy/
     production.md              hardening checklist for the demo stack
   examples/

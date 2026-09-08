@@ -102,7 +102,7 @@ on an output only redacts it from CLI plan/apply text — the raw value is still
 anyone with state access. The backend storage account (see [Terraform
 init](#terraform-init-pick-one-path) above) MUST have public network access disabled and use
 RBAC scoped to the one container — treat it as security-critical infrastructure, the same
-discipline [docs/getting-started/production.md](../../docs/getting-started/production.md#setting-application-secrets)
+discipline [docs/getting-started/deploy-hetzner.md](../../docs/getting-started/deploy-hetzner.md#setting-application-secrets)
 documents for the Hetzner root's state.
 
 ## Clean up

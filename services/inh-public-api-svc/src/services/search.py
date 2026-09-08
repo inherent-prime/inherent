@@ -7,6 +7,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
+from inh_contracts.conversation import is_conversation
+from inh_contracts.embedding.identity import decode_identity, resolve_identity
 from inh_contracts.naming import (
     WORKSPACE_COLLECTION_PREFIX,
     get_user_tenant_name,
@@ -152,6 +154,12 @@ class SearchService:
         self.weaviate_url = weaviate_url.rstrip("/")
         self._api_key = weaviate_api_key
         self._client: httpx.AsyncClient | None = None
+        # #311 item 4: collections whose embedding identity has already been
+        # asserted this process lifetime -- mirrors WeaviateService's
+        # _collection_cache on the ingestion side. The identity cannot change
+        # mid-process (a provider swap needs a restart), so re-checking on
+        # every query would only add a schema round-trip with no extra safety.
+        self._identity_checked: set[str] = set()
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get HTTP client for Weaviate."""
@@ -300,7 +308,13 @@ class SearchService:
         return None
 
     @staticmethod
-    def _compute_is_stale(ingested_at: datetime | None, *, now: datetime | None = None) -> bool:
+    def _compute_is_stale(
+        ingested_at: datetime | None,
+        *,
+        content_type: str | None = None,
+        document_type: str | None = None,
+        now: datetime | None = None,
+    ) -> bool:
         """Return True when ``ingested_at`` is older than the freshness window.
 
         Stale-evidence policy (#42): a result is stale when
@@ -308,7 +322,29 @@ class SearchService:
         unknown (``None``) the result is treated as NOT stale (we never flag
         evidence we cannot age). Callers still receive stale results — they are
         only flagged, never dropped.
+
+        Conversations are EXEMPT from the age rule (#306 follow-up). The rule
+        assumes a document whose chunks are all re-stamped together — a
+        re-upload or refresh resets every chunk's ``ingested_at`` at once, so
+        an old timestamp really does mean "nothing has been re-ingested
+        since". A conversation does not have that shape:
+        ``ConversationMemoryWorkflow`` appends each flush's NEW chunks to the
+        same document (``append=True``) and deliberately leaves earlier
+        flushes' chunks untouched, so their ``ingested_at`` stays at the
+        moment those turns were written. Aging them out would report a live,
+        perfectly valid conversation as stale purely because its opening
+        turns are old — and nothing can clear the flag, since there is no
+        re-upload or refresh path for a conversation. So a conversation chunk
+        always resolves ``is_stale=False``, whatever its age.
+
+        ``content_type`` / ``document_type`` identify the document; either is
+        sufficient and both are optional, because the two call paths carry
+        different ones (a Weaviate search result has the chunk's
+        ``content_type``; a ``processed_documents`` row has both). Omitting
+        both preserves the original file-document behavior exactly.
         """
+        if is_conversation(content_type=content_type, document_type=document_type):
+            return False
         if ingested_at is None:
             return False
         reference = now or datetime.now(UTC)
@@ -423,6 +459,79 @@ class SearchService:
         """
         return f'Cannot query field "{collection_name}"' in text
 
+    async def _ensure_identity_checked(self, collection_name: str) -> None:
+        """Assert a Weaviate collection's persisted embedding identity (#311 item 4).
+
+        Read-only counterpart to ``WeaviateService._check_or_stamp_collection_
+        identity`` on the ingestion write path. A mismatch is a hard error
+        (``EmbeddingIdentityMismatchError`` propagates, never caught here) --
+        it means this query's vector would be compared against a vector space
+        built by a different model, which returns plausible-looking noise
+        with no other error anywhere.
+
+        Deliberate asymmetry vs. the write path: this method NEVER adopts/
+        stamps an unstamped ("legacy") collection -- it has no business
+        PATCHing Weaviate schema from a read path, and (unlike the write
+        path, PR #314 review finding 3) has no cheap way to prove a
+        multi-tenant collection empty across every tenant, so it cannot
+        apply the write path's empty-collection adopt rule either. An
+        unstamped collection is therefore NEVER routed through
+        ``resolve_identity``'s adopt gate at all (see that function's
+        docstring) -- it is handled inline, directly below.
+
+        What changed (PR #314 review finding 3): an unstamped collection
+        used to be silently treated as fine, with no signal anywhere that
+        this query ran unguarded. By the time a collection has data to
+        query, ingestion's write path will USUALLY have already stamped it
+        via ``ensure_workspace_collection`` -- but "usually" is not
+        "always": a deployment upgrading through #311 has a window, until
+        the next write touches each workspace, where a read-mostly
+        collection stays unstamped indefinitely. That window is now
+        VISIBLE (a WARNING log every time it's hit) instead of silent. It
+        still does not fail the request: query has no way to fix what it
+        finds, and hard-failing every read against every not-yet-migrated
+        legacy workspace the moment this ships would be a worse regression
+        than the risk being flagged.
+
+        A schema-endpoint outage or unexpected shape fails OPEN (returns
+        without asserting) rather than raising -- the real connectivity
+        problem will already surface from the GraphQL query this precedes,
+        and turning a schema-fetch hiccup into a confusing identity error
+        here would only obscure that.
+        """
+        if collection_name in self._identity_checked:
+            return
+        from src.services.embedder import get_active_embedding_identity
+
+        current = get_active_embedding_identity()
+        client = await self._get_client()
+        try:
+            resp = await client.get(f"/v1/schema/{collection_name}")
+        except httpx.HTTPError:
+            return
+        if resp.status_code != 200:
+            # 404 (collection doesn't exist yet) or any other non-200:
+            # nothing to assert against here -- _search_weaviate's own
+            # missing-collection/tenant handling covers the empty-result case.
+            return
+        persisted = decode_identity(resp.json().get("description"))
+        if persisted is None:
+            # PR #314 review finding 3: visible, not silent -- see docstring.
+            # Cached like the matched/mismatched cases below so a hot
+            # collection doesn't log on every request.
+            logger.warning(
+                "querying_unstamped_legacy_collection",
+                collection_name=collection_name,
+                active_model_id=current.model_id,
+                active_dimension=current.dimension,
+            )
+            self._identity_checked.add(collection_name)
+            return
+        # Raises EmbeddingIdentityMismatchError on a genuine mismatch --
+        # intentionally NOT caught here, see docstring.
+        resolve_identity(persisted=persisted, current=current, collection_name=collection_name)
+        self._identity_checked.add(collection_name)
+
     async def _search_weaviate(
         self,
         workspace_id: str,
@@ -450,6 +559,14 @@ class SearchService:
 
         _require_safe_name(collection_name, "collection")
         _require_safe_name(tenant_name, "tenant")
+
+        # #311 item 4: assert the collection's persisted embedding identity
+        # BEFORE issuing the vector query -- only relevant when a query
+        # vector is actually used (semantic/hybrid); pure keyword (BM25)
+        # search never touches the vector space. A mismatch raises here,
+        # failing fast instead of returning plausible-looking noise.
+        if query_vector is not None:
+            await self._ensure_identity_checked(collection_name)
 
         graphql_query = self._build_graphql(collection_name, tenant_name, request, query_vector)
 
@@ -596,8 +713,16 @@ class SearchService:
 
             # Freshness (#42): promote ingested_at and compute staleness. Stale
             # results are flagged, not dropped (see _compute_is_stale).
+            # `content_type` is selected purely to identify a conversation
+            # chunk, which is exempt from the age rule because each flush
+            # only re-stamps its OWN new chunks (#306 follow-up) — see
+            # _compute_is_stale's docstring.
             ingested_at = self._parse_ingested_at(chunk.get("ingested_at"))
-            is_stale = self._compute_is_stale(ingested_at)
+            raw_content_type = chunk.get("content_type")
+            is_stale = self._compute_is_stale(
+                ingested_at,
+                content_type=raw_content_type if isinstance(raw_content_type, str) else None,
+            )
 
             # RAG-poisoning risk (#44): promote the heuristic ingest-time signal.
             # NON-BLOCKING — risky chunks are flagged, never dropped. "none" is
@@ -806,6 +931,7 @@ class SearchService:
                     content_hash
                     source_uri
                     ingested_at
+                    content_type
                     content_risk
                     content_risk_reasons
                     _additional {{ id score certainty distance }}

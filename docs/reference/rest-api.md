@@ -92,6 +92,44 @@ Re-uploading the same filename into the same workspace reuses the existing
 `document_id` and reindexes in place, removing the superseded chunks from
 retrieval — see [Keeping content current](../keeping-content-current.md).
 
+### Conversations
+
+A conversation is append-only and grows, which `/v1/documents` cannot serve
+without either re-uploading the whole history on every turn or flooding the
+embedding pipeline with one tiny document per turn. Use these endpoints for
+chat/agent transcripts instead.
+
+| Method | Path | Permission | Purpose |
+| --- | --- | --- | --- |
+| POST | `/v1/conversations/{external_id}/turns` | `write` | Append one or more turns. Body: `{"turns": [{"turn_id", "role": "user"\|"assistant", "text", "ts", "client"}, ...]}`. `202` with `accepted` count. Publishes asynchronously — processing happens in the background, same as document upload. A duplicate `turn_id` (client retry, MQ redelivery) is a no-op |
+| GET | `/v1/conversations/{external_id}` | `read` | Turn count, chunk count, `last_flushed_at`, `status`. `404` if not found |
+| DELETE | `/v1/conversations/{external_id}` | `write` | Delete the conversation + vectors + chunks. `204`; `404` if already gone |
+
+`external_id` is a caller-chosen identifier for the conversation (e.g. a
+session or thread id from your application) — the first turn ever posted for
+a given `external_id` creates the conversation; every later turn appends to
+it. Turns buffer server-side and flush in size-or-idle batches (not one
+store operation per turn) — the embedding-pipeline protection this exists
+for — so `GET` immediately after `POST` may not yet reflect the latest
+turns; `last_flushed_at` shows when they last landed. Each chunk is stamped
+with `turn_index`/`role`/`ts`/`client` (stored in chunk metadata and as
+Weaviate object properties) for speaker attribution — not yet surfaced in
+`POST /v1/search` response fields. Turn text is redacted for common
+credential shapes (API keys, JWTs, connection strings, private keys) before
+it is chunked or stored — best-effort pattern matching, not a guarantee;
+some credential shapes with no recognizable prefix and low apparent entropy
+can pass through unredacted, so do not represent this as a complete
+guarantee to end users.
+
+Conversation chunks are **exempt from the `is_stale` freshness rule** that
+applies to documents. Each flush appends only its own new chunks and leaves
+earlier ones untouched, so a live conversation's opening turns keep their
+original `ingested_at` — ageing them out would flag a perfectly current
+conversation as stale, and there is no re-upload or refresh path to clear it.
+`is_stale` is therefore always `false` on a conversation chunk, in both
+`POST /v1/search` results and `GET /v1/documents/{id}/lineage`, whatever its
+age. See [Keeping content current](../keeping-content-current.md).
+
 ### Chunks
 
 | Method | Path | Permission | Purpose |

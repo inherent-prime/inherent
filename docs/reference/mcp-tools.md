@@ -29,7 +29,7 @@ claude mcp add --transport http inherent https://api.inherent.sh/mcp \
   a tool argument removes that surface entirely. Missing/invalid/expired
   keys get the same 401 REST returns, before any JSON-RPC request is even
   parsed.
-- **Tool surface: 11 of 15.** `verify_claim`, `search_memory`,
+- **Tool surface: 12 of 16.** `verify_claim`, `search_memory`,
   `get_citations`, and `report_feedback` are not advertised and cannot be
   called by name over HTTP
   (see [Surface difference](#surface-difference-http-vs-stdio) below) —
@@ -41,8 +41,127 @@ claude mcp add --transport http inherent https://api.inherent.sh/mcp \
   independent HTTP request; the key is re-validated on every call.
 - Tool errors set `isError: true` with a machine-branchable `error_class` in
   `structuredContent` (e.g. `authorization_failed`, `not_found`,
-  `validation_error`, `unknown_tool`, `internal_error`) instead of the plain
-  prose stdio still returns.
+  `validation_error`, `unknown_tool`, `internal_error`, `quota_exceeded`)
+  instead of the plain prose stdio still returns.
+
+### Per-identity entitlements and quotas (#309)
+
+Permission (`read`/`search`/`write`) answers "can this key ever call this
+tool"; entitlements answer "has this identity got budget left today" — a
+separate question, checked after permission and before the tool handler
+runs, for **both** the API-key and the OAuth (#295) call paths. Limits are
+read from the resolved identity (`Principal.principal_type` +
+`principal_id`, not from a second identity notion), via a pluggable
+`EntitlementsProvider` (`src/services/entitlements.py`) — this repo ships
+only `NullEntitlementsProvider`, which returns *unlimited* for every
+principal. **No plan names or tier values live in this repo**; a
+deployment that wants enforcement wires its own provider in
+(`set_entitlements_provider`) reading a local table or an external billing
+service. An API-key caller with no entitlement record configured — the
+default for every self-hosted deployment and every SaaS caller until an
+operator configures one — is completely unaffected: no rate-limiter or
+database call happens at all.
+
+Four limits, all optional (absent = unlimited):
+
+| Limit | Meaning | Checked on |
+| --- | --- | --- |
+| `calls_per_minute` | Burst ceiling | every tool call |
+| `calls_per_month` | Total tool calls | every tool call |
+| `writes_per_day` | Calls to `permission: "write"` tools | write tools only |
+| `max_documents` | Existing-document cap | `upload_document` only |
+
+`max_documents` is deliberately checked only against `upload_document` —
+the one tool that can increase a workspace's document count — never
+against `delete_document` or `refresh_stale_source`. Both of those also
+carry `permission: "write"` (so `writes_per_day` still counts them), but
+blocking `delete_document` at the cap would trap a caller with no way back
+under it.
+
+A denial is the SAME `isError: true` / `structuredContent.error_class`
+shape every other rejection on this transport uses (`error_class:
+"quota_exceeded"`), naming the limit hit (`limit`), its configured value
+(`limit_value`), the Unix-timestamp reset time (`reset_at` — `null` for
+`max_documents`, which has no time window), and an operator-configured
+`upgrade_url` when one is set. Like `insufficient_scope` above, this is a
+JSON-RPC-level result at HTTP **200**, not a transport-level 429 — the same
+`StreamableHTTPSessionManager(json_response=True)` constraint applies.
+
+**Fail-open vs. fail-closed.** A genuinely-observed over-limit is rejected
+(fail closed). An *infrastructure* failure while checking a limit — the
+entitlements provider raising, the rate-limiter's backend (Redis or
+in-memory) raising, the `max_documents` document-count query raising — is
+logged loudly (`logger.error`, not swallowed) and the call is **allowed**
+(fail open): a metering-store blip must never lock out every caller on the
+box, which would be worse than the abuse the feature prevents.
+
+**Metering.** Per-call usage is published via a fire-and-forget
+`asyncio.create_task` (`quotas.publish_usage_event`) after the quota
+decision — never awaited by the dispatcher, so a slow or failing metering
+sink adds no latency to, and can never fail, a tool call. The three
+time-windowed limits above reuse #213's own `TokenBucketRateLimiter`
+(Redis-backed when `REDIS_URL` is set, in-memory otherwise) as their
+enforcement counter — that check-and-consume call IS synchronous (the
+decision cannot be made without it), the same tradeoff #213's
+`RateLimitingMiddleware` already makes for every request on this app, on
+the same sub-millisecond backend operation.
+
+### OAuth 2.1 resource-server discovery (hosted only, #295)
+
+`/mcp`'s auth is `X-API-Key` / `Bearer ink_...` only, by default -- nothing
+below changes unless `OAUTH_ENABLED=true` is set (default **false**). A
+self-hosted deployment should leave this off: turning it on advertises
+`OAUTH_AUTHORIZATION_SERVER` as a trusted issuer for this resource, so it
+must only ever be set to an authorization server the operator actually
+runs (or, for the hosted SaaS deployment, Clerk).
+
+With `OAUTH_ENABLED=true`:
+
+- `GET /.well-known/oauth-protected-resource` serves an
+  [RFC 9728](https://datatracker.ietf.org/doc/html/rfc9728)
+  protected-resource metadata document naming `OAUTH_AUTHORIZATION_SERVER`
+  and the minimal `OAUTH_SCOPES_SUPPORTED` catalogue (default `["kb:read",
+  "kb:search"]` -- write access is never advertised upfront; it arrives via
+  an `insufficient_scope` step-up on the specific tool that needs it,
+  returned as a JSON-RPC `tools/call` result -- `isError: true`,
+  `structuredContent.error: "insufficient_scope"`, `structuredContent.scope`
+  naming what is missing -- at HTTP **200**, not a transport-level 403: the
+  Streamable HTTP transport always answers a parsed `tools/call` with 200,
+  so a per-tool scope check, which only runs once the request body has been
+  parsed, has no way to change the surrounding HTTP status. A true HTTP 403
+  challenge is reserved for connection-level rejection below, which runs
+  before the body is parsed at all).
+  This route does not exist at all when OAuth is disabled (a request 404s
+  exactly as if the route were never registered, because it wasn't).
+- An unauthenticated `/mcp` request's 401 carries a combined
+  `WWW-Authenticate` header advertising BOTH schemes --
+  `ApiKey, Bearer resource_metadata="...", scope="kb:read kb:search"` --
+  never silently dropping the `ApiKey` challenge existing clients rely on.
+- `Authorization: Bearer <token>` is treated as an OAuth access token only
+  when the token does NOT start with the `ink_` API-key prefix; a `Bearer
+  ink_...` value keeps resolving through the unchanged API-key path.
+  Presented tokens are verified against `OAUTH_AUTHORIZATION_SERVER`'s
+  published JWKS: signature, `iss`, `exp`, and -- non-negotiably, per
+  [RFC 8707 Sec 2](https://datatracker.ietf.org/doc/html/rfc8707#section-2)
+  -- that `aud` contains `OAUTH_RESOURCE_IDENTIFIER`. A token for any other
+  resource is rejected outright, not merely logged about. An expired token
+  always comes back as 401 (never 403), so a client's silent-refresh path
+  can key off status code alone.
+- Config: `OAUTH_ENABLED`, `OAUTH_AUTHORIZATION_SERVER`,
+  `OAUTH_RESOURCE_IDENTIFIER`, `OAUTH_SCOPES_SUPPORTED`, `OAUTH_JWKS_URL`
+  (optional override; defaults to
+  `<OAUTH_AUTHORIZATION_SERVER>/.well-known/jwks.json`),
+  `OAUTH_JWKS_CACHE_SECONDS` -- see `src/config/settings.py` for the full
+  field docs.
+- **Scope of #295**: this issue is the resource-server contract only
+  (discovery + the 401 challenge shape + the insufficient-scope JSON-RPC
+  shape + token verification). A
+  verified OAuth caller with sufficient scope for a tool still gets a
+  clearly-labeled "not yet available" rejection on `tools/call` --
+  executing a tool needs mapping the token's `sub` to an Inherent
+  user/workspace, which needs the identity link the commercial platform
+  owns, not this repo (see issue #295's "Scope" section). `tools/list`
+  works today for an OAuth caller since it needs no workspace resolution.
 
 ### stdio (self-hosters / internal development)
 
@@ -59,14 +178,14 @@ claude mcp add --transport http inherent https://api.inherent.sh/mcp \
   exactly its one workspace — a `workspace_id` naming any other workspace
   is rejected, even one the key's owner also owns. A user-scoped key
   (`workspace_id` unset on the key) may use any workspace its owner owns.
-- **All 15 tools** are advertised and callable, including the 4 excluded
+- **All 16 tools** are advertised and callable, including the 4 excluded
   from HTTP (below) — unaffected by the HTTP transport's existence.
 
 ## Surface difference: HTTP vs stdio
 
 | | stdio | Streamable HTTP |
 | --- | --- | --- |
-| Tool count | 15 | 11 |
+| Tool count | 16 | 12 |
 | API key | `api_key` schema argument | `X-API-Key` / `Authorization` header |
 | `verify_claim` | ✅ | ❌ excluded |
 | `search_memory` | ✅ | ❌ excluded |
@@ -97,7 +216,7 @@ name list maintained separately):
 
 ## Tools
 
-The full, stdio-side catalogue (all 15 tools). The **HTTP** column marks
+The full, stdio-side catalogue (all 16 tools). The **HTTP** column marks
 whether a tool is also on the Streamable HTTP surface (see
 [Surface difference](#surface-difference-http-vs-stdio) above). On
 stdio every tool requires `api_key` (string) as a schema argument; on HTTP
@@ -108,10 +227,10 @@ parameters below.
 
 | Tool | HTTP | Parameters | Purpose | REST twin |
 | --- | --- | --- | --- | --- |
-| `search_documents` | ✅ | `query` (required); `workspace_id`, `limit` (10), `min_score` (0.0), `document_ids[]`, `search_mode` (`semantic`/`hybrid`/`keyword`), `alpha` (0.7) | Search chunks; with no `workspace_id`, fans out across every workspace the key is authorized for (its one bound workspace if scoped, otherwise every workspace its owner owns) | `POST /v1/search` |
-| `search_memory` | ❌ | same as `search_documents` | Memory-primitive alias — identical behavior | `POST /v1/search` |
-| `get_citations` | ❌ | same as `search_documents` | Search returning claim-level citation objects (spans, score, provenance, freshness) | `POST /v1/search` |
-| `report_feedback` | ❌ | `event_id`, `verdict` (`answered`/`partial`/`not_relevant`) required; `useful_chunk_ids[]`, `note` | Record a verdict on a captured search event; builds the workspace eval set | `POST /v1/evals/feedback` |
+| `search_documents` | ✅ | `query` (required); `workspace_id`, `limit` (10), `min_score` (0.0), `document_ids[]`, `search_mode` (`semantic`/`hybrid`/`keyword`), `alpha` (0.7) | Search chunks; with no `workspace_id`, fans out across every workspace the key is authorized for (its one bound workspace if scoped, otherwise every workspace its owner owns). A single-workspace call also mints an eval capture event and returns its id as `event_id` (#241) — pass it to `report_feedback` | `POST /v1/search` |
+| `search_memory` | ❌ | same as `search_documents` | Memory-primitive alias — identical behavior, including `event_id` capture | `POST /v1/search` |
+| `get_citations` | ❌ | same as `search_documents` | Search returning claim-level citation objects (spans, score, provenance, freshness). Retrieves through the same shared path as `search_documents`, but does NOT mint an eval capture event — capture is opt-in at that call site (#241 review), and get_citations has never returned an `event_id` an agent could give feedback against | `POST /v1/search` |
+| `report_feedback` | ❌ | `event_id`, `verdict` (`answered`/`partial`/`not_relevant`) required; `useful_chunk_ids[]`, `note` | Record a verdict on a captured search event (the `event_id` from `search_documents` / `search_memory`, or from `POST /v1/search`); builds the workspace eval set | `POST /v1/evals/feedback` |
 | `get_retrieval_health` | ✅ | `workspace_id` (required) | Workspace retrieval scorecard | `GET /v1/evals/scorecard` |
 
 ### Read (`read` permission)
@@ -119,6 +238,7 @@ parameters below.
 | Tool | HTTP | Parameters | Purpose | REST twin |
 | --- | --- | --- | --- | --- |
 | `whoami` | ✅ | none | Return the authenticated key's identity, binding, authoritative workspace set, engine version, and endpoint | `GET /v1/whoami` |
+| `list_workspaces` | ✅ | (none — uses authorized workspaces only) | List caller's authorized workspaces with metadata. Response includes top-level `is_scoped_binding` flag (true for workspace-scoped keys, false for user-scoped) and array of workspaces, each with `workspace_id`, `name` (null if not set), and `document_count`. A workspace-scoped key sees exactly its bound workspace; a user-scoped key sees every workspace its owner owns | No direct REST twin; closest: `GET /v1/documents` |
 | `list_documents` | ✅ | `workspace_id`, `page` (1), `page_size` (20) | Paginated document listing | `GET /v1/documents` |
 | `get_document` | ✅ | `document_id` (required) | Single document's metadata | `GET /v1/documents/{id}` |
 | `list_chunks` | ✅ | `document_id` (required) | All chunks for a document | `GET /v1/chunks/{document_id}` |
@@ -165,6 +285,16 @@ reintroduced through the schema). Omit the field; do not pass
 
 ## Notes
 
+- `list_workspaces` (#297) returns only workspaces the caller's API key is
+  authorized for — a workspace-scoped key sees exactly one, its bound workspace,
+  while a user-scoped key sees every workspace its owner owns. Returns an
+  empty list (not an error) if the caller is authorized for zero workspaces.
+  Each workspace object includes `workspace_id`, `name` (null if not set in
+  metadata), and `document_count`. The response also carries a top-level
+  `is_scoped_binding` flag (always `true` for a workspace-scoped key; always
+  `false` for a user-scoped key) describing the caller's key type. Use
+  `list_workspaces` to discover valid `workspace_id` values before calling
+  workspace-targeted tools like `upload_document`.
 - Search tools do not take `include_context` / `context_window` — use
   `get_document_context` for surrounding text.
 - Permissions are exact membership, same as REST: `write` does not imply
@@ -181,3 +311,30 @@ reintroduced through the schema). Omit the field; do not pass
   actually covered — check it rather than assuming the prose summary means
   every workspace you own was searched, which is only true for a user-scoped
   key with no narrower request.
+- `search_documents` / `search_memory`'s structured payload also carries
+  `event_id` (#241) — the same handle `POST /v1/search`'s `SearchResponse`
+  returns, minted and recorded through the same shared capture path as REST.
+  It is `null` for a multi-workspace search (no single response to attribute
+  one event to, matching REST's own single-workspace-only capture scope) and
+  whenever eval capture is disabled for the workspace or the write failed.
+  Pass a non-null `event_id` to `report_feedback` to close the loop; see
+  [ADR 0003](../adr/0003-traffic-mined-retrieval-evals.md) for the flywheel
+  this feeds.
+- **Capture is opt-in at the shared retrieval call site, not implicit for
+  every caller of it (#241 review).** `search_documents` / `search_memory`
+  request capture explicitly; `get_citations` shares the identical retrieval
+  code path (`_run_search`) but does not, so it never mints an
+  `eval_query_events` row — an event get_citations could never surface an
+  `event_id` for, and that no agent could therefore ever attach feedback to,
+  would just double-count that query in MCP analytics.
+- **`quality_verdict` is always `NULL` on `transport='mcp'` captured rows.**
+  REST's `POST /v1/search` runs an adaptive retrieval quality gate and a
+  single bounded fallback retry before capturing (`quality_verdict` populated,
+  and the captured results/latency are the fallback's when one ran, see
+  `docs/developer/search-sequence.md`); MCP's `search_documents` /
+  `search_memory` call `SearchService.search` directly, with no quality gate
+  on that path at all. The two transports therefore capture different
+  *inputs* for the same query even though they write through the identical
+  `capture_search_event` helper and record field list. Segmenting eval
+  analytics by `quality_verdict` must account for this — every `mcp` row will
+  read as ungated, never as a fallback.

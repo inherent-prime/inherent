@@ -9,7 +9,7 @@ State lives in **Hetzner Object Storage** (S3-compatible) — same backend style
 prod/CI, with a dedicated laptop state key.
 
 For long-lived production deploys (stable state key, firewall lockdown), see
-[production.md](production.md) and [infra/hetzner/README.md](https://github.com/inherent-prime/inherent/blob/main/infra/hetzner/README.md).
+[deploy-hetzner.md](deploy-hetzner.md) and [infra/hetzner/README.md](https://github.com/inherent-prime/inherent/blob/main/infra/hetzner/README.md).
 
 ## Prerequisites
 
@@ -296,7 +296,7 @@ Prefer a **versioned** `inherent_version` (e.g. `0.4.x` after a known-good publi
 
 | Doc | When |
 | --- | --- |
-| [production.md](production.md) | Long-lived VM + stable Object Storage state key |
+| [deploy-hetzner.md](deploy-hetzner.md) | Long-lived VM + stable Object Storage state key |
 | [infra/hetzner/README.md](https://github.com/inherent-prime/inherent/blob/main/infra/hetzner/README.md) | Full infra layout + CI e2e secrets |
 | [testing.md](../testing.md) | CI Hetzner e2e vs local compose tests |
 | [deploy/production.md](../deploy/production.md) | Secrets / Temporal hardening checklist |

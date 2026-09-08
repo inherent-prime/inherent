@@ -231,6 +231,44 @@ def test_dead_letter_jobs_created_by_a_migration():
     assert creating[0].name <= "013_dead_letter_dedup.sql"
 
 
+def test_conversation_columns_added_by_a_migration():
+    """#306: `document_type`/`external_id` (migration 020) must come from a
+    shipped migration, not just ensure_schema()/create_all -- same defect
+    class as #89/#110's dead_letter_jobs/ingestion_events gaps above. Also
+    pins that 020 is the ONLY migration number in this directory that adds
+    these columns (guards against a future duplicate/renumbered migration
+    silently re-adding them and masking a real conflict)."""
+    sql_files = sorted(migrations._migrations_dir().glob("*.sql"))
+    adding = [
+        p
+        for p in sql_files
+        if "ADD COLUMN IF NOT EXISTS document_type" in p.read_text()
+        and "ADD COLUMN IF NOT EXISTS external_id" in p.read_text()
+    ]
+    assert len(adding) == 1
+    assert adding[0].name == "020_conversation_documents.sql"
+
+    sql = adding[0].read_text()
+    # The (workspace_id, external_id) upsert key GET/DELETE
+    # /v1/conversations/{external_id} resolve against -- partial so it never
+    # constrains the near-totality of rows (ordinary file documents, always
+    # external_id IS NULL).
+    assert "uq_processed_documents_workspace_external_id" in sql
+    assert "WHERE external_id IS NOT NULL" in sql
+    assert "chk_document_type" in sql
+    assert "'file'" in sql  # default preserves DocumentIngestionWorkflow's behavior
+
+
+def test_migration_020_is_the_first_free_number():
+    """Ground truth check (#306): 018/019 are taken by
+    018_eval_event_transport.sql / 019_redaction_audit.sql -- 020 must be
+    the actual next number, not a guess that happens to not collide today."""
+    sql_files = sorted(p.name for p in migrations._migrations_dir().glob("*.sql"))
+    assert "018_eval_event_transport.sql" in sql_files
+    assert "019_redaction_audit.sql" in sql_files
+    assert "020_conversation_documents.sql" in sql_files
+
+
 def test_missing_directory_raises(tmp_path, monkeypatch):
     monkeypatch.setenv("MIGRATIONS_DIR", str(tmp_path / "does-not-exist"))
     with pytest.raises(RuntimeError, match="Migrations directory not found"):

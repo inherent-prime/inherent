@@ -73,6 +73,21 @@ jobs:
     name: Compose ingestion-to-search
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    # RFC 9728 discovery-handshake fixture (#295, PR #317 review finding 2):
+    # tests/integration/test_compose_mcp_oauth.py needs the container
+    # actually booted with OAuth enabled, and needs to know the SAME values
+    # the container was given so it can assert the served metadata document
+    # against them. Job-level (not step-level) so both "Start the Compose
+    # stack" below (which feeds these to the container via docker-compose.yml's
+    # `${OAUTH_ENABLED:-false}`-style opt-in) and the pytest step further down
+    # (which reads them back from its own process env) see identical values.
+    # The code default, and docker-compose.yml's own default, both stay
+    # OAuth-OFF -- this is a CI-only opt-in, not a change to what a self-hosted
+    # `make dev` / `make quickstart` boots with.
+    env:
+      OAUTH_ENABLED: "true"
+      OAUTH_AUTHORIZATION_SERVER: "https://oauth.inherent-test.example"
+      OAUTH_RESOURCE_IDENTIFIER: "http://localhost:18000/mcp"
     # Expose whether the retrieval-eval hard gate specifically failed, so the
     # alert job can fire on a *retrieval* regression only -- not on any unrelated
     # compose failure (ingestion benchmark, latency SLO, ...).
@@ -95,6 +110,11 @@ jobs:
         # than the default 100 req/min per key, so run the stack unthrottled;
         # rate-limit enforcement is covered by the offline suites. Compose reads
         # RATE_LIMIT_ENABLED from the shell env for its ${VAR:-true} default.
+        # OAUTH_ENABLED / OAUTH_AUTHORIZATION_SERVER / OAUTH_RESOURCE_IDENTIFIER
+        # come from this job's own `env:` above (not repeated here) and reach
+        # the container the same way, via docker-compose.yml's `${VAR:-false}`
+        # opt-in -- so test_compose_mcp_oauth.py's discovery-handshake test has
+        # a live OAuth-enabled `/mcp` to hit.
         env:
           RATE_LIMIT_ENABLED: "false"
         run: docker compose up -d --build --wait

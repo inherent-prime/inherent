@@ -65,6 +65,9 @@ class TestUpdateChunkReembeds:
         settings = MagicMock(spec=Settings)
         settings.weaviate_url = "http://localhost:8080"
         settings.weaviate_api_key = None
+        # #311 PR #314 review finding 3: _check_or_stamp_collection_identity
+        # now reads this on every call.
+        settings.embedding_adopt_unstamped_collections = False
         return settings
 
     @pytest.fixture
@@ -91,6 +94,11 @@ class TestUpdateChunkReembeds:
         mock_tenant_collection = MagicMock()
         weaviate_service.client.collections.get.return_value = mock_collection
         mock_collection.with_tenant.return_value = mock_tenant_collection
+        # #311 PR #314 review finding 3: an unstamped collection is only
+        # silently adopted when known empty -- this test isn't about the
+        # identity guard, so make the mocked collection resolve as fresh/
+        # empty (no tenants yet) rather than tripping the opt-in gate.
+        mock_collection.tenants.get.return_value = {}
 
         new_vector = [0.1, 0.2, 0.3]
         with patch("src.services.embedder.embed_text", return_value=new_vector) as mock_embed:
@@ -120,6 +128,7 @@ class TestUpdateChunkReembeds:
         mock_tenant_collection = MagicMock()
         weaviate_service.client.collections.get.return_value = mock_collection
         mock_collection.with_tenant.return_value = mock_tenant_collection
+        mock_collection.tenants.get.return_value = {}  # see identity-guard note above
 
         with patch("src.services.embedder.embed_text", return_value=[0.0, 0.0]):
             await weaviate_service.update_chunk(

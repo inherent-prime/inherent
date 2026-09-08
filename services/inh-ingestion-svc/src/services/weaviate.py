@@ -18,11 +18,18 @@ import weaviate
 # Weaviate naming now lives in the shared contracts package (single source of
 # truth, #12). Re-exported here so existing imports keep working:
 #   from src.services.weaviate import get_workspace_collection_name
+from inh_contracts.embedding.identity import (
+    EmbeddingIdentityMismatchError,
+    decode_identity,
+    encode_identity,
+    resolve_identity,
+)
 from inh_contracts.naming import (
     WORKSPACE_COLLECTION_PREFIX,
     get_user_tenant_name,
     get_workspace_collection_name,
 )
+from temporalio import activity
 from weaviate.classes.config import Configure, DataType, Property
 from weaviate.classes.init import Auth
 from weaviate.classes.query import Filter, MetadataQuery
@@ -43,6 +50,26 @@ logger = structlog.get_logger(__name__)
 
 # Legacy collection name (kept for backward compatibility)
 DOCUMENT_CHUNKS_COLLECTION = "DocumentChunk"
+
+
+def _heartbeat_embed_progress(completed_batches: int, total_batches: int) -> None:
+    """Heartbeat with real embedding progress (#298).
+
+    Passed as ``embed_texts_with_progress``'s ``on_batch_done`` callback in
+    ``store_chunks_with_tenant`` below. Only takes effect inside a Temporal
+    activity -- ``store_chunks_with_tenant`` is also called directly by
+    ``processor.py`` and ``reindex_from_postgres.py`` outside any activity,
+    where ``activity.heartbeat()`` raises "not in an activity". Progress is
+    a genuine batch-completion count, not a timer, so the heartbeat_timeout
+    set on the store_in_weaviate activity (see
+    ``weaviate_store_budget.weaviate_store_heartbeat_timeout``) still
+    detects a worker that has actually stopped making progress rather than
+    one that is merely slow.
+    """
+    if activity.in_activity():
+        activity.heartbeat(
+            {"chunk_batches_done": completed_batches, "chunk_batches_total": total_batches}
+        )
 
 
 class WeaviateService:
@@ -122,16 +149,130 @@ class WeaviateService:
         try:
             if self.client.collections.exists(DOCUMENT_CHUNKS_COLLECTION):
                 logger.debug("Legacy collection exists", collection=DOCUMENT_CHUNKS_COLLECTION)
+                collection = self.client.collections.get(DOCUMENT_CHUNKS_COLLECTION)
+                self._check_or_stamp_collection_identity(collection, DOCUMENT_CHUNKS_COLLECTION)
                 return
 
+            from src.services.embedder import get_active_embedding_identity
+
+            current_identity = get_active_embedding_identity()
             self.client.collections.create(
                 name=DOCUMENT_CHUNKS_COLLECTION,
                 properties=self._get_chunk_properties(),
                 vectorizer_config=Configure.Vectorizer.none(),
+                # Stamp the active embedding identity at creation time (#311
+                # item 4) so a mismatch is caught the moment a different
+                # model/provider is later pointed at this same collection.
+                description=encode_identity(current_identity),
             )
             logger.info("Created legacy collection", collection=DOCUMENT_CHUNKS_COLLECTION)
+        except EmbeddingIdentityMismatchError:
+            # Always a hard error (#311 item 4) -- never swallow into the
+            # best-effort warning below, which exists for genuine
+            # connectivity/schema failures only.
+            raise
         except Exception as e:
             logger.warning("Failed to create legacy collection", error=str(e))
+
+    def _collection_is_empty(self, collection: Any) -> bool:
+        """Best-effort, CONSERVATIVE "does this collection hold any data" check.
+
+        Used only to gate the legacy-adopt policy (#311 PR #314 review
+        finding 3): adopting an unstamped collection is safe when there is
+        nothing yet that could be wrong -- an empty collection cannot hold
+        vectors written by a different model. Errs toward "NOT empty" (the
+        conservative branch, which routes through the
+        ``EMBEDDING_ADOPT_UNSTAMPED_COLLECTIONS`` opt-in instead of adopting
+        silently) on anything this cannot definitively prove empty:
+
+        - Non-multi-tenant collections (e.g. the legacy
+          ``DOCUMENT_CHUNKS_COLLECTION``): a plain aggregate object count.
+        - Multi-tenant collections (per-workspace, #12): Weaviate's aggregate
+          endpoint needs a tenant to scope to, and checking "does ANY of
+          potentially many tenants hold an object" is not one cheap call.
+          The proxy used instead is "does at least one tenant exist" --
+          every write requires a tenant to exist first, so zero tenants is a
+          safe, EXACT "empty". Any tenant existing is conservatively treated
+          as "not proven empty", even if that specific tenant holds nothing.
+        - Anything that raises while checking (schema/tenant-list call
+          failure) is treated as NOT proven empty -- fail closed, same
+          direction as the two cases above.
+        """
+        try:
+            config = collection.config.get()
+            mt_config = config.multi_tenancy_config
+            if mt_config is not None and mt_config.enabled:
+                tenants = collection.tenants.get()
+                return not tenants
+            result = collection.aggregate.over_all(total_count=True)
+            return (result.total_count or 0) == 0
+        except Exception as exc:  # noqa: BLE001 -- best-effort, see docstring
+            logger.warning("embedding_identity_emptiness_check_failed", error=str(exc))
+            return False
+
+    def _check_or_stamp_collection_identity(self, collection: Any, collection_name: str) -> None:
+        """Assert (or adopt) a collection's persisted embedding identity (#311 item 4).
+
+        The active provider's (model_id, dimension) is persisted as the
+        collection's Weaviate ``description`` (see
+        ``inh_contracts.embedding.identity`` for the encode/decode format and
+        the full policy write-up). Outcomes:
+
+        - No persisted identity, collection is EMPTY -> ADOPT silently: stamp
+          the collection with the active identity now via ``config.update``.
+          Nothing to be wrong about yet. This is what keeps a FRESH
+          deployment working with zero manual migration.
+        - No persisted identity, collection is NOT empty -> refuse by
+          default (PR #314 review finding 3: adopting here would silently
+          CERTIFY whatever model wrote the existing vectors as the current
+          one, e.g. an operator upgrading and switching providers in the
+          same deploy). Raises ``EmbeddingIdentityAdoptionRequiredError`` (a
+          subclass of ``EmbeddingIdentityMismatchError`` -- see its
+          docstring for why) UNLESS the operator opted in via
+          ``EMBEDDING_ADOPT_UNSTAMPED_COLLECTIONS=true``, in which case it
+          adopts anyway and logs loudly that it did.
+        - Persisted identity matches -> return, nothing to do.
+        - Persisted identity does NOT match -> raise
+          ``EmbeddingIdentityMismatchError``. ALWAYS a hard error, never a
+          warning -- callers must not swallow it (see the two call sites
+          below, both of which are inside broad best-effort ``except``
+          blocks that explicitly re-raise this one exception type -- the
+          adoption-required error above is caught by the same guards, being
+          a subclass).
+        """
+        from src.services.embedder import get_active_embedding_identity
+
+        current = get_active_embedding_identity()
+        persisted = decode_identity(collection.config.get().description)
+        is_empty: bool | None = None
+        allow_adopt = self.settings.embedding_adopt_unstamped_collections
+        if persisted is None:
+            is_empty = self._collection_is_empty(collection)
+            if not is_empty and allow_adopt:
+                logger.warning(
+                    "embedding_identity_adopted_unstamped_nonempty_collection",
+                    collection=collection_name,
+                    model_id=current.model_id,
+                    dimension=current.dimension,
+                    reason="EMBEDDING_ADOPT_UNSTAMPED_COLLECTIONS=true operator opt-in -- "
+                    "existing vectors were NOT verified to match the active provider",
+                )
+        resolved = resolve_identity(
+            persisted=persisted,
+            current=current,
+            collection_name=collection_name,
+            is_empty=is_empty,
+            allow_adopt_unstamped=allow_adopt,
+        )
+        if persisted is None:
+            collection.config.update(description=encode_identity(resolved))
+            logger.info(
+                "embedding_identity_stamped",
+                collection=collection_name,
+                model_id=resolved.model_id,
+                dimension=resolved.dimension,
+                was_empty=is_empty,
+            )
 
     def _get_chunk_properties(self) -> list[Property]:
         """Get the standard properties for chunk collections."""
@@ -174,6 +315,16 @@ class WeaviateService:
             # ("only rows-strategy chunks") is a legitimate, cheap use this
             # field should keep supporting once #196 wires it through.
             Property(name="chunking_strategy", data_type=DataType.TEXT, index_searchable=False),
+            # Conversation turn attribution (#306): promoted from
+            # chunk.metadata by store_chunks_with_tenant below, same
+            # promote-from-metadata pattern as content_risk/chunking_strategy
+            # above. Absent (never set) on an ordinary document chunk -- only
+            # chunk_conversation's staged chunks carry these keys.
+            Property(name="turn_index", data_type=DataType.INT),
+            Property(name="turn_id", data_type=DataType.TEXT, index_searchable=False),
+            Property(name="role", data_type=DataType.TEXT, index_searchable=False),
+            Property(name="turn_ts", data_type=DataType.TEXT, index_searchable=False),
+            Property(name="client", data_type=DataType.TEXT, index_searchable=False),
         ]
 
     def _reconcile_collection_properties(self, collection_name: str) -> None:
@@ -252,10 +403,19 @@ class WeaviateService:
                 # properties (provenance/freshness/risk) gain them; otherwise a
                 # search selecting those fields fails on the old schema.
                 self._reconcile_collection_properties(collection_name)
+                # #311 item 4: assert (or adopt, for a legacy pre-#311
+                # collection) the persisted embedding identity BEFORE this
+                # collection is cached as usable -- a mismatch here must
+                # raise, never get cached over.
+                collection = self.client.collections.get(collection_name)
+                self._check_or_stamp_collection_identity(collection, collection_name)
                 self._collection_cache.add(collection_name)
                 logger.debug("Workspace collection exists", collection=collection_name)
                 return collection_name
 
+            from src.services.embedder import get_active_embedding_identity
+
+            current_identity = get_active_embedding_identity()
             # Create collection with multi-tenancy enabled
             self.client.collections.create(
                 name=collection_name,
@@ -267,6 +427,10 @@ class WeaviateService:
                     auto_tenant_creation=False,  # We manage tenant creation explicitly
                     auto_tenant_activation=True,  # Auto-activate on access
                 ),
+                # Stamp the active embedding identity at creation time (#311
+                # item 4) so a later mismatched provider/model is caught
+                # instead of silently writing into the same vector space.
+                description=encode_identity(current_identity),
             )
 
             self._collection_cache.add(collection_name)
@@ -277,6 +441,12 @@ class WeaviateService:
             )
             return collection_name
 
+        except EmbeddingIdentityMismatchError:
+            # Always a hard error (#311 item 4) -- must not be caught by the
+            # generic "already exists" race handling or the catch-all log+
+            # raise below (which still re-raises, but this makes the intent
+            # explicit and skips the "already exists" string-match entirely).
+            raise
         except Exception as e:
             # Handle race condition - collection might have been created by another process
             if "already exists" in str(e).lower():
@@ -469,6 +639,18 @@ class WeaviateService:
 
         Returns:
             Number of chunks stored
+
+        append mode (#306): this method never deletes -- it only ever writes
+        the ``chunks`` it is given. The caller (``store_in_weaviate``,
+        activities/store.py) is what decides whether to delete existing
+        objects for this document FIRST (full-replace, the default) or skip
+        that delete entirely (``StoreDocumentInput.append=True``,
+        ConversationMemoryWorkflow's flush) -- see that activity's own
+        comment. ``chunks`` already carries GLOBAL, non-colliding
+        ``chunk_index`` values in append mode (assigned once by
+        ``chunk_conversation``, continuing from the document's current
+        chunk_count), so this method needs no append-awareness of its own to
+        stay correct either way.
         """
         if not self.client:
             raise RuntimeError("Weaviate not connected")
@@ -484,14 +666,20 @@ class WeaviateService:
             # Use tenant-scoped operations
             tenant_collection = collection.with_tenant(tenant_name)
 
-            # Compute embeddings in one batch (much faster than per-chunk).
-            # embed_texts does blocking HTTP to the TEI sidecar, so offload it to
-            # a thread — otherwise it stalls the event loop (and every other
-            # coroutine) for the whole document's embedding round-trip (#19).
-            from src.services.embedder import embed_texts
+            # Compute embeddings in batches (much faster than per-chunk). Each
+            # batch's blocking TEI HTTP call is offloaded to a thread so it
+            # never stalls the event loop (#19) -- but the batch *loop* itself
+            # runs here, on this coroutine, so store_in_weaviate can heartbeat
+            # with real per-batch progress instead of going dark for the whole
+            # document's embed (#298: a 60k-chunk document could otherwise
+            # never finish inside any activity budget short enough to also
+            # catch a genuinely wedged worker fast).
+            from src.services.embedder import embed_texts_with_progress
 
             chunk_texts = [c.content for c in chunks]
-            vectors = await asyncio.to_thread(embed_texts, chunk_texts)
+            vectors = await embed_texts_with_progress(
+                chunk_texts, on_batch_done=_heartbeat_embed_progress
+            )
 
             # Single ingest timestamp for this store call (#42): all chunks of a
             # document share one ingested_at so freshness is consistent per store.
@@ -535,6 +723,20 @@ class WeaviateService:
                         "content_risk_reasons": content_risk_reasons,
                         "chunking_strategy": chunking_strategy,
                     }
+
+                    # Conversation turn attribution (#306): promote from
+                    # chunk.metadata, same pattern as content_risk above --
+                    # ONLY set for a chunk that actually came from
+                    # chunk_conversation (metadata carries "turn_id"). An
+                    # ordinary document chunk never gets these properties set
+                    # at all, so it reads as "not a conversation chunk"
+                    # rather than a misleading turn_index=0/role="".
+                    if chunk_meta.get("turn_id") is not None:
+                        properties["turn_index"] = chunk_meta.get("turn_index")
+                        properties["turn_id"] = chunk_meta.get("turn_id")
+                        properties["role"] = chunk_meta.get("role")
+                        properties["turn_ts"] = chunk_meta.get("turn_ts") or ""
+                        properties["client"] = chunk_meta.get("client") or ""
 
                     # Generate deterministic UUID
                     chunk_uuid = uuid.uuid5(
@@ -626,6 +828,20 @@ class WeaviateService:
             f"{workspace_id}:{user_id}:{document_id}:{chunk_index}",
         )
 
+        # #311 item 4: fetch the collection and assert (or adopt) its
+        # persisted embedding identity BEFORE re-embedding -- a mismatch
+        # raises here, failing fast without wasting a network round-trip on
+        # an embed call whose result could never be safely written anyway.
+        # store_chunks_with_tenant already did this check via
+        # ensure_workspace_collection when the document was first ingested;
+        # re-checking here (cheaply short-circuited by _collection_cache) is
+        # what protects a standalone edit reaching a fresh WeaviateService
+        # instance that never called ensure_workspace_collection.
+        collection = self.client.collections.get(collection_name)
+        if collection_name not in self._collection_cache:
+            self._check_or_stamp_collection_identity(collection, collection_name)
+            self._collection_cache.add(collection_name)
+
         # Re-embed the new content. embed_text does blocking HTTP to the TEI
         # sidecar, so offload it to a thread -- same reasoning as the batch
         # embed in store_chunks_with_tenant (#19): otherwise this stalls the
@@ -634,7 +850,6 @@ class WeaviateService:
 
         vector = await asyncio.to_thread(embed_text, content)
 
-        collection = self.client.collections.get(collection_name)
         tenant_collection = collection.with_tenant(tenant_name)
 
         tenant_collection.data.update(
