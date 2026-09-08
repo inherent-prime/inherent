@@ -1,6 +1,8 @@
 """Application settings using Pydantic Settings for environment variable management."""
 
 from functools import lru_cache
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 from typing import Literal
 
 from inh_contracts.defaults import DEFAULT_MONGODB_URI, DEFAULT_S3_BUCKET, DEFAULT_S3_REGION
@@ -8,6 +10,15 @@ from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.config.constants import DEFAULT_DATABASE_NAME, ERROR_BASE_URL
+
+try:
+    # Single source of truth: the installed package version (pyproject.toml),
+    # mirroring inh-ingestion-svc. A hardcoded literal here silently drifted to
+    # 0.2.0 while pyproject said 0.3.0, and `whoami` now reports this value to
+    # users and agents over both REST and MCP.
+    SERVICE_VERSION = _pkg_version("inh-public-api-svc")
+except PackageNotFoundError:  # pragma: no cover - only when running uninstalled
+    SERVICE_VERSION = "0.0.0+local"
 
 
 class Settings(BaseSettings):
@@ -39,7 +50,7 @@ class Settings(BaseSettings):
     mcp_port: int = 8001
     log_level: str = "INFO"
     environment: str = "development"
-    version: str = "0.2.0"
+    version: str = SERVICE_VERSION
 
     # Database (reads + document/eval writes; not a read-only role)
     database_url: str = f"postgresql://postgres:postgres@localhost:5432/{DEFAULT_DATABASE_NAME}"
@@ -197,6 +208,11 @@ class Settings(BaseSettings):
         description="Enable HSTS header in production",
     )
     api_key_header_name: str = "X-API-Key"
+    admin_api_enabled: bool = Field(
+        default=False,
+        alias="ADMIN_API_ENABLED",
+        description="Expose read-only whole-stack admin listings for local operators only",
+    )
 
     # RFC 7807 error `type` base URL (#222). The retired `.systems` domain used
     # to be hardcoded straight into src/config/constants.py, so a domain change

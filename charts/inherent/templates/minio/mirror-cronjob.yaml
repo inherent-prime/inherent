@@ -1,0 +1,71 @@
+{{- if and .Values.minio.enabled .Values.minio.mirror.enabled }}
+# DR: hourly mirror of the MinIO bucket to Azure Blob (GRS) — RPO <=1h (#325); see
+# modules/dr's dr_summary output ("object_storage_minio": RPO <= 24h).
+#
+# DEVIATION from build-spec wording ("nightly `mc mirror` minio→azure blob"):
+# `mc` (MinIO Client) speaks the S3 API on both source and destination; Azure
+# Blob Storage does not expose an S3-compatible endpoint, so `mc mirror`
+# cannot target it directly. rclone has first-class backends for both S3
+# (used here against MinIO) and azureblob, so this Job uses `rclone sync`
+# instead — same mirror mechanism the spec calls for, correct tool.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: inh-minio-mirror
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inherent.labels" . | nindent 4 }}
+    {{- include "inherent.selectorLabels" (dict "component" "minio-mirror") | nindent 4 }}
+spec:
+  schedule: {{ .Values.minio.mirror.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 3600
+      template:
+        metadata:
+          labels:
+            {{- include "inherent.labels" . | nindent 12 }}
+            {{- include "inherent.selectorLabels" (dict "component" "minio-mirror") | nindent 12 }}
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: mirror
+              image: "{{ .Values.minio.mirror.rcloneImage.repository }}:{{ .Values.minio.mirror.rcloneImage.tag }}"
+              env:
+                {{- if .Values.secrets.s3.name }}
+                - name: RCLONE_CONFIG_MINIO_TYPE
+                  value: "s3"
+                - name: RCLONE_CONFIG_MINIO_PROVIDER
+                  value: "Minio"
+                - name: RCLONE_CONFIG_MINIO_ENDPOINT
+                  value: "http://minio:9000"
+                - name: RCLONE_CONFIG_MINIO_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.secrets.s3.name }}
+                      key: {{ .Values.secrets.s3.accessKeyField }}
+                - name: RCLONE_CONFIG_MINIO_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.secrets.s3.name }}
+                      key: {{ .Values.secrets.s3.secretKeyField }}
+                {{- end }}
+                - name: RCLONE_CONFIG_AZUREBLOB_TYPE
+                  value: "azureblob"
+                - name: RCLONE_CONFIG_AZUREBLOB_CONNECTION_STRING
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ required "minio.mirror.azureBlob.connectionStringSecretRef.name is required when minio.mirror.enabled=true" .Values.minio.mirror.azureBlob.connectionStringSecretRef.name }}
+                      key: {{ .Values.minio.mirror.azureBlob.connectionStringSecretRef.key }}
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+                  rclone sync "minio:{{ .Values.minio.bucket }}" "azureblob:{{ required "minio.mirror.azureBlob.container is required when minio.mirror.enabled=true" .Values.minio.mirror.azureBlob.container }}" \
+                    --checksum --transfers 8 --stats 1m
+{{- end }}

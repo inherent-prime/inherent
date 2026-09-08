@@ -10,6 +10,10 @@ import pytest
 from src.config.settings import Settings
 from src.models.document import DocumentChunk
 from src.services.database import DatabaseService
+from tests.compose_marker_gate import pytest_collection_modifyitems, pytest_configure
+
+__all__ = ["pytest_collection_modifyitems", "pytest_configure"]
+
 
 # Use local Docker PostgreSQL for testing
 TEST_DATABASE_URL = os.getenv(

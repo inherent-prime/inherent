@@ -1,0 +1,21 @@
+{{- if .Values.temporal.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: temporal
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inherent.labels" . | nindent 4 }}
+    {{- include "inherent.selectorLabels" (dict "component" "temporal") | nindent 4 }}
+spec:
+  # ClusterIP, never exposed externally — see build spec "Never expose: ...
+  # Temporal ...". Name MUST stay "temporal" — TEMPORAL_HOST=temporal:7233
+  # is hardcoded in the ingestion env contract (compose parity).
+  type: ClusterIP
+  selector:
+    {{- include "inherent.selectorLabels" (dict "component" "temporal") | nindent 4 }}
+  ports:
+    - name: grpc
+      port: 7233
+      targetPort: grpc
+{{- end }}

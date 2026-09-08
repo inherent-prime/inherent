@@ -1,0 +1,24 @@
+{{- if .Values.minio.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inherent.labels" . | nindent 4 }}
+    {{- include "inherent.selectorLabels" (dict "component" "minio") | nindent 4 }}
+spec:
+  # ClusterIP, never exposed externally — see build spec "Never expose: ...
+  # MinIO ...". Name MUST stay "minio" — AWS_S3_ENDPOINT=http://minio:9000
+  # is hardcoded across public-api and ingestion env (compose parity).
+  type: ClusterIP
+  selector:
+    {{- include "inherent.selectorLabels" (dict "component" "minio") | nindent 4 }}
+  ports:
+    - name: s3
+      port: 9000
+      targetPort: s3
+    - name: console
+      port: 9001
+      targetPort: console
+{{- end }}

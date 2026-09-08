@@ -24,7 +24,7 @@ jobs:
   # Docs-only / agent-notes-only PRs (README, docs/, AGENTS.md, .memory/, ...)
   # cannot break the service matrix below, so they should not pay its cost
   # (Postgres service container + lint/format/typecheck/security/test/coverage
-  # x3 services). A workflow-level `paths-ignore` would be the obvious fix, but
+  # x4 packages). A workflow-level `paths-ignore` would be the obvious fix, but
   # `service-checks`/`root-tests` are not themselves the registered required
   # check -- "Required tests before merge" is -- and skipping this workflow at
   # the trigger level would leave THAT check unregistered and the PR stuck
@@ -145,6 +145,17 @@ jobs:
             # Actual measured on CI run 31661196233 (main@bc6d56b): 99.53%.
             # floor(99.53) - 1 = 98.
             cov_fail_under: 98
+          - service: inh-cli
+            path: services/inh-cli
+            python-version: "3.11"
+            lint: uv run ruff check src tests
+            format: uv run black --check src tests
+            typecheck: uv run mypy src
+            security: uv run bandit -c pyproject.toml -r src
+            test: uv run pytest
+            # Actual measured locally on 2026-08-30: 90.9%.
+            # floor(90.9) - 1 = 89.
+            cov_fail_under: 89
 
     services:
       postgres:
