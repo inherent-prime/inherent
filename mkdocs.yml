@@ -73,7 +73,7 @@ nav:
   - Home: index.md
   - Getting Started:
       - Local quickstart: getting-started/local.md
-      - Production (Hetzner + Terraform): getting-started/production.md
+      - Production (Hetzner + Terraform): getting-started/deploy-hetzner.md
       - Laptop VM test: getting-started/local-vm-test.md
   - Guides:
       - Access-control model: access-control.md

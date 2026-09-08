@@ -1,11 +1,14 @@
 [project]
 name = "inh-contracts"
-version = "2.2.0"
-description = "Shared contracts (Weaviate naming + versioned event schemas) consumed by the ingestion and public-api services"
+version = "2.3.0"
+description = "Shared contracts (Weaviate naming, versioned event schemas, embedding provider abstraction) consumed by the ingestion and public-api services"
 readme = "Readme.md"
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2",
+    # Embedding provider HTTP adapters (#311) -- matches the floor already
+    # required by inh-ingestion-svc so the resolved version can't drift.
+    "httpx>=0.25.0",
 ]
 
 [project.optional-dependencies]

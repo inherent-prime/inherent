@@ -744,9 +744,10 @@ wheels = [
 
 [[package]]
 name = "inh-contracts"
-version = "2.2.0"
+version = "2.3.0"
 source = { directory = "../inh-contracts" }
 dependencies = [
+    { name = "httpx" },
     { name = "pydantic" },
 ]
 
@@ -754,6 +755,7 @@ dependencies = [
 requires-dist = [
     { name = "bandit", extras = ["toml"], marker = "extra == 'dev'", specifier = "==1.9.3" },
     { name = "black", marker = "extra == 'dev'", specifier = "==24.10.0" },
+    { name = "httpx", specifier = ">=0.25.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = "==1.19.1" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.6.0" },
     { name = "pydantic", specifier = ">=2" },

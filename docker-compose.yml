@@ -296,6 +296,10 @@ services:
       EMBEDDING_ENABLED: "true"
       EMBEDDING_SERVICE_URL: http://text-embeddings-inference:80
       EMBEDDING_DIM: 384
+      # #311: must track the TEI sidecar's own --model-id (below) so the
+      # Weaviate collection model-identity guard stays self-consistent when
+      # an operator overrides EMBEDDING_MODEL_ID for the sidecar.
+      EMBEDDING_MODEL_ID: ${EMBEDDING_MODEL_ID:-BAAI/bge-small-en-v1.5}
       MONGODB_URI: mongodb://mongodb:27017
       MONGODB_DB_NAME: main
       LOG_LEVEL: INFO
@@ -354,6 +358,11 @@ services:
       AWS_S3_REGION: ${AWS_REGION:-us-east-1}
       EMBEDDING_SERVICE_URL: http://text-embeddings-inference:80
       EMBEDDING_DIM: 384
+      # #311: must track the TEI sidecar's own --model-id (see
+      # text-embeddings-inference above) so the Weaviate collection
+      # model-identity guard stays self-consistent when an operator
+      # overrides EMBEDDING_MODEL_ID for the sidecar.
+      EMBEDDING_MODEL_ID: ${EMBEDDING_MODEL_ID:-BAAI/bge-small-en-v1.5}
       # Rate limiting is ON by default for local/dev parity with the release
       # stack. CI's compose e2e (integration + retrieval evals + throughput
       # benchmarks) deliberately bursts far past any per-minute limit on the
@@ -373,6 +382,20 @@ services:
       # `ENABLE_DIVERSIFICATION=false docker compose up -d --force-recreate
       # inh-public-api-svc`.
       ENABLE_DIVERSIFICATION: ${ENABLE_DIVERSIFICATION:-true}
+      # Off by default (#295) -- a self-hosted stack must never advertise an
+      # authorization server it does not run, so `make dev` / `make
+      # quickstart` boot with OAuth disabled exactly like the code default.
+      # The compose-integration CI job (.github/workflows/integration.yml)
+      # opts this in, alongside OAUTH_AUTHORIZATION_SERVER and
+      # OAUTH_RESOURCE_IDENTIFIER below, so
+      # tests/integration/test_compose_mcp_oauth.py can exercise the real
+      # RFC 9728 discovery handshake against this container over the wire --
+      # the same `${VAR:-default}` opt-in pattern RATE_LIMIT_ENABLED uses
+      # above. A local operator who wants to poke at the OAuth path by hand
+      # sets the same three vars before `docker compose up`.
+      OAUTH_ENABLED: ${OAUTH_ENABLED:-false}
+      OAUTH_AUTHORIZATION_SERVER: ${OAUTH_AUTHORIZATION_SERVER:-}
+      OAUTH_RESOURCE_IDENTIFIER: ${OAUTH_RESOURCE_IDENTIFIER:-}
       LOG_LEVEL: INFO
     depends_on:
       postgres-init:

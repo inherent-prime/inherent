@@ -188,7 +188,7 @@ activity with its own timeout and retry policy:
 | Extract text | `extract_text` | 5 min | 3 (2–30s), **unless non-retryable** | Propagates (or fails on attempt 1 for deterministic errors, §7) |
 | Chunk text | `chunk_text` | 2 min | 2 (1–10s) | Propagates |
 | Store PostgreSQL | `store_in_postgresql` | 60s | 5 (2–30s) | Propagates → workflow marks the document `failed` + dead-letters, then raises so Temporal close status is Failed (#230) |
-| Store Weaviate (parallel with PG) | `store_in_weaviate` | scales with chunk count for **serial** batch worst-case (one-batch min ≈130s covers per-batch retries; cap 15m; `weaviate_store_budget.py` + `embedding_defaults`, #228) | 5 (5–60s, #229) | Same failure path as PG; activity embeds under bounded parallel batch concurrency (`EMBEDDING_MAX_CONCURRENCY` default 2, #231 phase 1) but the timeout always budgets serial completion so lowering concurrency cannot under-budget. **Residual (#229):** activity-level Temporal retries still re-embed the whole document — no durable checkpoint yet. |
+| Store Weaviate (parallel with PG) | `store_in_weaviate` | scales with chunk count for **serial** batch worst-case (one-batch min ≈130s covers per-batch retries; cap 2h; `weaviate_store_budget.py` + `embedding_defaults`, #228, cap raised #298) + `heartbeat_timeout` ≈200s (#298) | 5 (5–60s, #229) | Same failure path as PG; activity embeds under bounded parallel batch concurrency (`EMBEDDING_MAX_CONCURRENCY` default 2, #231 phase 1) but the timeout always budgets serial completion so lowering concurrency cannot under-budget. **#298:** the activity now heartbeats real per-batch embedding progress (`weaviate.py`'s `store_chunks_with_tenant` / `embedder.embed_texts_with_progress`), paired with `heartbeat_timeout` on this call site — a worker that stops advancing is caught in roughly one batch's worst-case retry window instead of waiting out StartToClose, which is what made raising the StartToClose cap from 15m to 2h safe (a 60,215-chunk document needs well over 15m even with zero retries; it hit the old cap on every attempt). **Residual (#229):** activity-level Temporal retries still re-embed the whole document from scratch — heartbeating detects a stall faster, it does not make the retry resumable; no durable checkpoint yet. |
 | Update workspace stats | `update_workspace_stats` | 15s | 3 (1–5s) | Propagates |
 | Publish completion | `publish_completion` | 15s | 3 (1–10s) | Best-effort — logged, never flips a complete ingestion to failed |
 | Record dead-letter (on failure) | `record_dead_letter` | 15s | 2 (1–5s) | Best-effort — must never mask the original error |
@@ -293,20 +293,24 @@ stale run instead of raising `WorkflowAlreadyStartedError` and stalling
 behind it.
 
 **Terminating a Temporal workflow does not stop its already-dispatched
-activities.** Temporal only interrupts a running activity via a heartbeat
-round-trip; this codebase heartbeats nothing (`docs/developer/learnings.md`
-#110: `grep -rn heartbeat src/` returns nothing). Termination closes the
-*workflow* execution and stops delivering it new workflow tasks — but a
-`store_in_postgresql` / `store_in_weaviate` activity the terminated run
-already dispatched keeps running on the worker, unaware, and can commit
-**after** the newer run's write. Without a guard, a superseded run's late
-write silently reverts the document to stale content while the newer run
-already reported `status='processed'`.
+activities.** Termination closes the *workflow* execution and stops
+delivering it new workflow tasks server-side — it does not notify any
+already-dispatched activity at all, heartbeating or not, so this is
+unaffected by #298 below. A `store_in_postgresql` / `store_in_weaviate`
+activity the terminated run already dispatched keeps running on the worker,
+unaware, and can commit **after** the newer run's write. Without a guard, a
+superseded run's late write silently reverts the document to stale content
+while the newer run already reported `status='processed'`.
 
 The fix is an **application-level fencing token**, not a cancellation
-mechanism — cheaper to reason about correctly than wiring heartbeats through
-every activity (`docs/developer/learnings.md` #110). Two columns on
-`processed_documents`, added across two migrations:
+mechanism — cheaper to reason about correctly than relying on termination
+reaching in-flight activity work (`docs/developer/learnings.md` #110).
+(`store_in_weaviate` now heartbeats, #298 below — but only for a different
+purpose, detecting a worker that has *stopped making progress within its
+own attempt*, delivered via `heartbeat_timeout`. That is orthogonal to
+termination, which never asks a running activity to cancel in the first
+place, so the fencing token above is still what's load-bearing here.) Two
+columns on `processed_documents`, added across two migrations:
 
 - **`active_run_id`** (migration `016_active_run_fencing.sql`) — the run
   currently allowed to write. `create_pending_document`
@@ -662,11 +666,14 @@ diagnostic, not the document's status of record.
   is unmerged as of this writing; whether/when it lands, and whether the
   measured 15.7%/+11% deltas it self-reports hold after eval-gate review, is
   not something the current codebase can confirm.
-- **The embedding model's actual `max_input_length`.** `embedder.py`'s
-  `truncate=True` comment names 256 tokens (all-MiniLM-L6-v2), but the
-  configured/deployed model per `docker-compose.yml` and
-  `docs/reference/configuration.md` is `BAAI/bge-small-en-v1.5` (384-dim).
-  The two models may have different real input-length ceilings; this page
-  states the *mechanism* (TEI truncates silently) as fact, and does not
-  claim a specific token count is what's enforced in the deployed stack
-  today.
+- **The embedding model's actual `max_input_length`.** The `truncate=True`
+  comment in `inh_contracts.embedding.tei_provider` (#311 moved the TEI wire
+  adapter out of each service's `embedder.py` into the shared
+  `inh-contracts` package) deliberately no longer names a specific token
+  count or model — an earlier version of this comment named 256 tokens
+  (all-MiniLM-L6-v2) while the configured/deployed model per
+  `docker-compose.yml` and `docs/reference/configuration.md` is
+  `BAAI/bge-small-en-v1.5` (384-dim), and the two models have different real
+  input-length ceilings. This page states the *mechanism* (TEI truncates
+  silently) as fact, and does not claim a specific token count is what's
+  enforced in the deployed stack today.

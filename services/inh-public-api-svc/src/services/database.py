@@ -419,6 +419,78 @@ class DatabaseService:
             row = result.fetchone()
             return str(row.document_id) if row else None
 
+    # --- Conversations (#306) ------------------------------------------------
+
+    async def get_document_id_by_external_id(
+        self, workspace_id: str, external_id: str
+    ) -> str | None:
+        """Resolve a conversation's `processed_documents.document_id` from its
+        caller-supplied `external_id` (#306, migration 020).
+
+        Scoped to `document_type = 'conversation'` AND `workspace_id` so a
+        conversation in a workspace the caller can't see -- or an ordinary
+        file document whose (unrelated) `external_id` column happens to be
+        NULL, never matching here anyway -- reads as not-found rather than
+        leaking cross-workspace existence. Mirrors
+        `get_document_id_by_content_hash`'s shape.
+        """
+        async with self.session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT document_id
+                    FROM processed_documents
+                    WHERE workspace_id = :workspace_id
+                      AND external_id = :external_id
+                      AND document_type = 'conversation'
+                    """
+                ),
+                {"workspace_id": workspace_id, "external_id": external_id},
+            )
+            row = result.fetchone()
+            return str(row.document_id) if row else None
+
+    async def get_conversation(self, workspace_id: str, external_id: str) -> dict | None:
+        """Return a conversation's stats for `GET /v1/conversations/{external_id}`.
+
+        `turn_count`/`last_flushed_at` come from `processed_documents.metadata`
+        (ConversationMemoryWorkflow stamps both on every flush, see
+        StoreDocumentInput.metadata's docstring in inh-ingestion-svc) -- no
+        dedicated columns needed for either. Returns None when no
+        conversation with this `(workspace_id, external_id)` exists (never
+        distinguishes "wrong workspace" from "no such conversation").
+        """
+        async with self.session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT document_id, workspace_id, external_id, status,
+                           chunk_count, metadata, created_at, updated_at
+                    FROM processed_documents
+                    WHERE workspace_id = :workspace_id
+                      AND external_id = :external_id
+                      AND document_type = 'conversation'
+                    """
+                ),
+                {"workspace_id": workspace_id, "external_id": external_id},
+            )
+            row = result.fetchone()
+            if not row:
+                return None
+
+            metadata = row.metadata or {}
+            return {
+                "document_id": str(row.document_id),
+                "workspace_id": str(row.workspace_id),
+                "external_id": str(row.external_id),
+                "status": row.status,
+                "chunk_count": row.chunk_count or 0,
+                "turn_count": metadata.get("turn_count", 0),
+                "last_flushed_at": metadata.get("last_flushed_at"),
+                "created_at": row.created_at,
+                "updated_at": row.updated_at,
+            }
+
     async def create_or_reset_pending_document(
         self,
         *,
@@ -974,6 +1046,34 @@ class DatabaseService:
             raise
         return doc is not None
 
+    async def get_document_count_for_workspaces(self, workspace_ids: list[str]) -> int:
+        """Total live document count across ``workspace_ids`` (#309).
+
+        Backs the ``max_documents`` entitlement check
+        (``src/mcp_server/quotas.py``): a plain ``COUNT(*)`` against
+        ``processed_documents`` -- the same authoritative table
+        ``get_documents_multi_workspace`` below counts against, NOT the
+        denormalized ``workspace_metadata.document_count`` column
+        ``list_workspaces`` displays (that counter is maintained
+        best-effort for a fast listing summary and is not the row a quota
+        decision should be pinned to). Returns 0 for an empty
+        ``workspace_ids`` list without a query, same short-circuit
+        ``get_documents_multi_workspace`` uses.
+        """
+        if not workspace_ids:
+            return 0
+        async with self.session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT COUNT(*) FROM processed_documents
+                    WHERE workspace_id = ANY(:workspace_ids)
+                """
+                ),
+                {"workspace_ids": workspace_ids},
+            )
+            return result.scalar() or 0
+
     # Multi-workspace document queries
     async def get_documents_multi_workspace(
         self,
@@ -1225,19 +1325,28 @@ class DatabaseService:
         top_score: float | None,
         quality_verdict: str | None,
         latency_ms: float,
+        transport: str = "rest",
     ) -> None:
-        """Record one captured search event (called from the capture background task)."""
+        """Record one captured search event (called from the capture background task).
+
+        ``transport`` (#241) records which surface produced the event --
+        ``"rest"`` or ``"mcp"`` -- so analytics can tell them apart. Defaults
+        to ``"rest"`` (migration 018's column default) purely so a caller that
+        predates #241 still compiles; every call site in this codebase passes
+        it explicitly (see ``src/services/eval_capture.py``).
+        """
         async with self.session() as session:
             await session.execute(
                 text(
                     """
                     INSERT INTO eval_query_events (
                         event_id, workspace_id, user_id, query_text, search_mode,
-                        result_doc_ids, result_chunk_ids, top_score, quality_verdict, latency_ms
+                        result_doc_ids, result_chunk_ids, top_score, quality_verdict,
+                        latency_ms, transport
                     ) VALUES (
                         :event_id, :workspace_id, :user_id, :query_text, :search_mode,
                         CAST(:result_doc_ids AS jsonb), CAST(:result_chunk_ids AS jsonb),
-                        :top_score, :quality_verdict, :latency_ms
+                        :top_score, :quality_verdict, :latency_ms, :transport
                     ) ON CONFLICT (event_id) DO NOTHING
                     """
                 ),
@@ -1252,6 +1361,7 @@ class DatabaseService:
                     "top_score": top_score,
                     "quality_verdict": quality_verdict,
                     "latency_ms": latency_ms,
+                    "transport": transport,
                 },
             )
             await session.commit()

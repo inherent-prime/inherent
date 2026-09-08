@@ -25,11 +25,13 @@ from src.models.citation import Citation
 from src.models.document import Document, DocumentChunk
 from src.models.search import SearchResponse, SearchResult
 
+# Computed at import time, never a hardcoded date (#332): a literal
+# ingested_at value silently expires once it ages past
+# settings.freshness_max_age_days, turning a green test red on a calendar
+# boundary rather than on a code change.
 FRESH_INGESTED_AT = _dt.datetime.now(_dt.UTC).isoformat()
 
 pytestmark = pytest.mark.asyncio
-
-FRESH_INGESTED_AT = _dt.datetime.now(_dt.UTC).isoformat()
 
 
 def _key(*, permissions: list[str], user_id: str = "user-1") -> APIKeyInfo:
