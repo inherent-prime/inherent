@@ -9,7 +9,7 @@ State lives in **Hetzner Object Storage** (S3-compatible) — same backend style
 prod/CI, with a dedicated laptop state key.
 
 For long-lived production deploys (stable state key, firewall lockdown), see
-[production.md](production.md) and [infra/README.md](https://github.com/inherent-prime/inherent/blob/main/infra/README.md).
+[production.md](production.md) and [infra/hetzner/README.md](https://github.com/inherent-prime/inherent/blob/main/infra/hetzner/README.md).
 
 ## Prerequisites
 
@@ -61,7 +61,7 @@ Do not put tokens or S3 keys in Terraform files. The `hcloud` provider reads
 ### 2. Configure remote state (`backend.hcl`)
 
 ```bash
-cd infra
+cd infra/hetzner
 cp backend.hcl.example backend.hcl   # only if you do not already have one
 ```
 
@@ -83,7 +83,7 @@ skip_requesting_account_id  = true
 use_path_style              = true
 ```
 
-Init (from `infra/`):
+Init (from `infra/hetzner/`):
 
 ```bash
 terraform init -input=false -reconfigure -backend-config=backend.hcl
@@ -160,7 +160,7 @@ Notes:
   Compose (`POSTGRES_PWD`). Release compose **hardcodes** worker
   `TEMPORAL_HOST` / `TEMPORAL_NAMESPACE` / `TEMPORAL_TASK_QUEUE` — see Temporal
   section below.
-- `terraform.tfvars` and `backend.hcl` are gitignored under `infra/`.
+- `terraform.tfvars` and `backend.hcl` are gitignored under `infra/hetzner/`.
 
 ### 4. Plan and apply
 
@@ -202,7 +202,7 @@ ssh "root@${SERVER_IPV4}" \
 Protected Public API routes need a workspace + API key. From **repository root**:
 
 ```bash
-export SERVER_IPV4="$(cd infra && terraform output -raw server_ipv4)"
+export SERVER_IPV4="$(cd infra/hetzner && terraform output -raw server_ipv4)"
 export API_KEY="ink_local_$(openssl rand -hex 16)"
 
 ssh "root@${SERVER_IPV4}" \
@@ -236,7 +236,7 @@ uv run pytest -m compose
 Always destroy when the test is done (same env vars + `backend.hcl` as apply):
 
 ```bash
-cd infra
+cd infra/hetzner
 # reload AWS_* / HCLOUD_TOKEN if this is a new shell (step 1)
 terraform destroy
 # confirm yes
@@ -297,7 +297,7 @@ Prefer a **versioned** `inherent_version` (e.g. `0.4.x` after a known-good publi
 | Doc | When |
 | --- | --- |
 | [production.md](production.md) | Long-lived VM + stable Object Storage state key |
-| [infra/README.md](https://github.com/inherent-prime/inherent/blob/main/infra/README.md) | Full infra layout + CI e2e secrets |
+| [infra/hetzner/README.md](https://github.com/inherent-prime/inherent/blob/main/infra/hetzner/README.md) | Full infra layout + CI e2e secrets |
 | [testing.md](../testing.md) | CI Hetzner e2e vs local compose tests |
 | [deploy/production.md](../deploy/production.md) | Secrets / Temporal hardening checklist |
 | [.env.example](https://github.com/inherent-prime/inherent/blob/main/.env.example) | Full env var reference |

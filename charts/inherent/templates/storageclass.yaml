@@ -1,0 +1,30 @@
+{{- if or .Values.weaviate.persistence.createZrsStorageClass .Values.minio.persistence.useZrsClass }}
+# Premium_ZRS isn't one of AKS's built-in storage classes (only
+# managed-csi / managed-csi-premium, both LRS) — needed for the enable_ha
+# prod profile so weaviate's (and optionally minio's) PV survives a
+# single-zone outage. SHARED by both StatefulSets: rendered exactly once
+# here, gated on EITHER weaviate.persistence.createZrsStorageClass=true or
+# minio.persistence.useZrsClass=true (rendering it twice, once per
+# component, would either duplicate the object or require each component to
+# gate on the other's flag too). weaviate.persistence.storageClassName /
+# minio.persistence.storageClassName are ignored in favor of this class's
+# name (weaviate.persistence.zrsStorageClassName — minio intentionally
+# reuses weaviate's name rather than declaring its own, since it's the same
+# StorageClass object) whenever a component's own flag is true — see
+# weaviate/statefulset.yaml and minio/statefulset.yaml.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.weaviate.persistence.zrsStorageClassName }}
+  labels:
+    {{- include "inherent.labels" . | nindent 4 }}
+provisioner: disk.csi.azure.com
+parameters:
+  skuname: Premium_ZRS
+  cachingMode: ReadOnly
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+# Retain, not Delete: this StorageClass backs the vector store's data disk —
+# an accidental PVC/StatefulSet deletion must not silently drop the volume.
+reclaimPolicy: Retain
+{{- end }}

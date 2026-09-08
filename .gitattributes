@@ -1,0 +1,49 @@
+# Git line-ending and binary-handling policy for inherent.
+#
+# Baseline: normalize all text to LF in repo, checkout as LF everywhere
+# (matches .editorconfig and Linux/Docker execution requirements).
+# Binary fixtures marked explicitly to prevent EOL corruption.
+# Lock files and generated content marked for diff readability.
+
+# ---- Baseline text handling ----
+* text=auto eol=lf
+
+# ---- Explicit binary (corruption risk if not marked) ----
+# PDFs are incorrectly auto-detected as text by git ls-files --eol;
+# marking as binary prevents accidental EOL normalization.
+*.pdf binary
+*.docx binary
+*.xlsx binary
+*.pptx binary
+*.png binary
+
+# ---- Shell and executable scripts (must keep LF; CRLF breaks shebang) ----
+*.sh text eol=lf
+Dockerfile text eol=lf
+Makefile text eol=lf
+scripts/git-hooks/pre-commit text eol=lf
+scripts/git-hooks/post-merge text eol=lf
+
+# ---- Python entry points with exec bit (shebang must stay LF) ----
+scripts/validate_env.py text eol=lf
+services/inh-ingestion-svc/scripts/migrate_weaviate.py text eol=lf
+services/inh-ingestion-svc/scripts/publish_test_message.py text eol=lf
+services/inh-ingestion-svc/scripts/setup_env.py text eol=lf
+
+# ---- Lock files: hide diffs, mark as generated ----
+uv.lock linguist-generated -diff
+.terraform.lock.hcl linguist-generated -diff
+
+# ---- Generated documentation ----
+docs/_generated/** linguist-generated -diff
+
+# ---- Text fixtures (real text, used in tests; must be readable) ----
+*.csv text eol=lf
+*.srt text eol=lf
+*.vtt text eol=lf
+
+# ---- Eval corpora (test data, not source) ----
+*.jsonl linguist-generated -diff
+
+# ---- API collections (vendor code, not part of language stats) ----
+*.bru linguist-vendored

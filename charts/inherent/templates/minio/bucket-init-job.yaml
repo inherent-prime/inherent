@@ -1,0 +1,60 @@
+{{- if .Values.minio.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: inh-minio-bucket-init
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inherent.labels" . | nindent 4 }}
+    {{- include "inherent.selectorLabels" (dict "component" "minio-bucket-init") | nindent 4 }}
+  annotations:
+    # post-install/post-upgrade, NOT pre-install: the minio StatefulSet+
+    # Service are ordinary chart resources, so they don't exist yet during a
+    # pre-install hook (nothing for `mc alias set` to connect to on a fresh
+    # install). This relies on modules/apps' helm_release running with
+    # wait=true (the terraform-provider-helm default) so minio's pod is
+    # already Ready by the time this hook fires — do not set wait=false.
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 6
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        {{- include "inherent.labels" . | nindent 8 }}
+        {{- include "inherent.selectorLabels" (dict "component" "minio-bucket-init") | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: bucket-init
+          image: "{{ .Values.minio.mcImage.repository }}:{{ .Values.minio.mcImage.tag }}"
+          env:
+            {{- if .Values.secrets.s3.name }}
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.s3.name }}
+                  key: {{ .Values.secrets.s3.accessKeyField }}
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.s3.name }}
+                  key: {{ .Values.secrets.s3.secretKeyField }}
+            {{- end }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              # Wait for the minio StatefulSet's Service to answer before
+              # configuring an alias against it (Job has no depends_on/
+              # condition:service_healthy the way compose does).
+              until mc alias set local http://minio:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"; do
+                echo "waiting for minio..."; sleep 3;
+              done
+              # mc mb --ignore-existing: idempotent, safe on every upgrade re-run.
+              mc mb --ignore-existing local/{{ .Values.minio.bucket }}
+              echo "bucket '{{ .Values.minio.bucket }}' ready."
+{{- end }}

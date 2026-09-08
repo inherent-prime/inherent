@@ -133,19 +133,30 @@ services:
       - inherent-oss
 
   s3rver:
-    image: node:20-alpine
+    # Built, not `npx`-at-startup (#353). The old bare node:20-alpine ran
+    # `npx s3rver ...`, downloading from npm on every container start while
+    # health probes were already counting -- `up --wait` tore the stack down
+    # mid-download. `up --build` finishes the build before starting a
+    # container, so a slow registry now costs build time instead of failing
+    # the lane. The release compose cannot do this (no build context on a
+    # pip-installed `inherent up`) and keeps the npx form with a wide budget.
+    build:
+      context: docker/s3rver
     container_name: inherent-oss-s3rver
     restart: unless-stopped
     ports:
       - "19000:9000"
-    command: npx s3rver -d /data -a 0.0.0.0 -p 9000 --no-vhost-buckets --configure-bucket inherent-documents
+    command: ["-d", "/data", "-a", "0.0.0.0", "-p", "9000", "--no-vhost-buckets", "--configure-bucket", "inherent-documents"]
     volumes:
       - s3_data:/data
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:9000"]
       interval: 10s
       timeout: 5s
+      # s3rver is already installed in the image, so this only has to cover
+      # process start -- no npm download races the probe here.
       retries: 5
+      start_period: 15s
     networks:
       - inherent-oss
 
@@ -350,6 +361,8 @@ services:
       # exercise the ingestion→search path unthrottled. Rate-limit behavior has
       # its own offline coverage (tests/integration/test_rate_limiting.py).
       RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+      # Whole-stack listings are safe only on this local single-operator stack.
+      ADMIN_API_ENABLED: "true"
       # On by default since 2026-08-06 (#146, see settings.py and
       # docs/advanced-indexes.md) -- this Compose default must track
       # settings.py's default or this env var silently overrides it and

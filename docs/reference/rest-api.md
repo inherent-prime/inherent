@@ -39,6 +39,29 @@ ACL or clearance parameter. See the
 
 ## Endpoints
 
+### Identity
+
+| Method | Path | Permission | Purpose |
+| --- | --- | --- | --- |
+| GET | `/v1/whoami` | Any active key | Return the key id/name, owner, binding, authoritative workspace set, engine version, and reached endpoint. Never returns key material or hashes |
+
+`workspace_id` is the key's binding (`null` for a user-scoped key).
+`workspace_ids` comes from the same authorization rule used by REST and MCP.
+
+### Local admin listings
+
+`ADMIN_API_ENABLED=false` (default) hides both routes with `404`. Set it to
+`true` only on a local single-operator stack. When enabled, any valid API key
+can list the whole stack; these routes intentionally do not apply tenant
+scoping and therefore must remain disabled in SaaS.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/v1/admin/workspaces` | Page workspace id/name/owner and document count |
+| GET | `/v1/admin/keys` | Page key metadata, prefix, scope, permissions, status, and timestamps; never returns a key or hash |
+
+Both accept `page` (default 1) and `page_size` (default 20, capped at 100).
+
 ### Health & observability (no auth)
 
 | Method | Path | Purpose |
