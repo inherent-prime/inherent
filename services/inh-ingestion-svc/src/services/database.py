@@ -942,14 +942,35 @@ class DatabaseService:
                     "filename": message.filename,
                     "original_filename": message.original_filename,
                     "content_type": message.content_type,
+                    # size_bytes (retry-idempotency follow-up): unlike
+                    # chunk_count/text_length below, this is NOT zeroed for
+                    # append -- `chk_size_bytes CHECK (size_bytes > 0)`
+                    # (migration 001) forbids it outright, and the INSERT
+                    # would fail with a constraint violation before the
+                    # dedicated post-insert step ever got a chance to fix it
+                    # up. A brand new row's very first flush is exactly this
+                    # call's contribution, so writing the true value here is
+                    # already correct; see the post-insert step (and
+                    # `row_was_inserted` there) for how it avoids ALSO adding
+                    # it again for that same call.
                     "size_bytes": message.size_bytes,
                     "storage_backend": message.storage_backend,
                     "storage_path": message.storage_path,
                     "storage_bucket": message.storage_bucket,
                     "storage_url": message.storage_url,
                     "status": DocumentStatus.PROCESSED.value,
-                    "chunk_count": len(chunks),
-                    "text_length": text_length,
+                    # append (retry-idempotency follow-up): 0, not
+                    # len(chunks)/text_length -- for append, the dedicated
+                    # idempotent step further down (after the chunk insert,
+                    # using its ACTUAL rowcount) is the only place
+                    # chunk_count/text_length are ever incremented, for a
+                    # brand new row exactly like an existing one. Setting
+                    # these to their full values here too would double them
+                    # for a document's very first flush. append=False is
+                    # unaffected: the full values here are that branch's
+                    # only writer of these columns, unchanged from before.
+                    "chunk_count": 0 if append else len(chunks),
+                    "text_length": 0 if append else text_length,
                     "processing_time_ms": processing_time_ms,
                     "active_run_id": workflow_run_id,
                     "created_at": now,
@@ -972,29 +993,22 @@ class DatabaseService:
                 # claim for any later write in the same run (e.g. a retry).
                 stmt = pg_insert(self.processed_documents).values(**insert_values)
 
-                # append (#306): grow instead of overwrite. SQLAlchemy column
-                # arithmetic (Column + literal) compiles to
-                # "chunk_count = processed_documents.chunk_count + :n" in the
-                # UPDATE, which is what makes this safe against the SAME row
-                # being appended to repeatedly -- each flush adds only what
-                # THIS flush wrote, on top of whatever was already there.
+                # append (#306): chunk_count/text_length/size_bytes are
+                # deliberately NOT set here for append. It is not safe to
+                # grow any of the three via "+ len(chunks)" / "+ text_length"
+                # / "+ message.size_bytes" in THIS statement, because that
+                # arithmetic assumes every byte/char/chunk in this call is
+                # new -- untrue on a Temporal retry replaying the same
+                # staged chunks, which conflict-skip in the chunk insert
+                # below and contribute 0 new rows. Only the chunk insert's
+                # ACTUAL rowcount (not knowable before it runs) can tell
+                # whether this call contributed anything, so all three
+                # columns are instead grown together in the dedicated step
+                # after that insert. Omitting the keys here just leaves the
+                # columns untouched by THIS UPDATE until that step corrects
+                # them.
                 update_set: dict = {
                     "status": DocumentStatus.PROCESSED.value,
-                    "chunk_count": (
-                        self.processed_documents.c.chunk_count + len(chunks)
-                        if append
-                        else len(chunks)
-                    ),
-                    "text_length": (
-                        self.processed_documents.c.text_length + text_length
-                        if append
-                        else text_length
-                    ),
-                    "size_bytes": (
-                        self.processed_documents.c.size_bytes + message.size_bytes
-                        if append
-                        else message.size_bytes
-                    ),
                     "processing_time_ms": processing_time_ms,
                     "tenant_id": tenant_id,
                     "active_run_id": workflow_run_id,
@@ -1004,6 +1018,15 @@ class DatabaseService:
                     "document_type": document_type,
                     "external_id": external_id,
                 }
+                if not append:
+                    # append=False (DocumentIngestionWorkflow's path):
+                    # unchanged from before -- an absolute overwrite is
+                    # already idempotent (a retry deletes and re-inserts the
+                    # same chunks either way, see the `if not append:` delete
+                    # above), so these stay set directly in this statement.
+                    update_set["chunk_count"] = len(chunks)
+                    update_set["text_length"] = text_length
+                    update_set["size_bytes"] = message.size_bytes
                 if metadata is not None:
                     update_set["metadata"] = metadata
 
@@ -1014,7 +1037,20 @@ class DatabaseService:
                         self.processed_documents.c.active_run_id.is_(None)
                         | (self.processed_documents.c.active_run_id == workflow_run_id)
                     ),
-                ).returning(self.processed_documents.c.id)
+                ).returning(
+                    self.processed_documents.c.id,
+                    # (xmax = 0) is the standard Postgres idiom for telling
+                    # an INSERT ... ON CONFLICT DO UPDATE's two branches
+                    # apart from its RETURNING output: true only for a row
+                    # that this statement itself inserted (xmax unset,
+                    # nothing has superseded it yet), false for a row that
+                    # already existed and went through the DO UPDATE branch
+                    # instead. Needed below solely to keep `size_bytes`
+                    # idempotent on append despite it being unable to use the
+                    # zero-then-grow trick (see its CHECK constraint note in
+                    # insert_values above).
+                    text("(xmax = 0) AS row_was_inserted"),
+                )
 
                 result = session.execute(stmt)
                 row = result.first()
@@ -1033,6 +1069,7 @@ class DatabaseService:
                 # Already consumed via result.first() above -- do not call
                 # .scalar_one() again on the same Result (single-use cursor).
                 doc_id: int = row[0]  # type: ignore[assignment]
+                row_was_inserted: bool = bool(row[1])
 
                 # append (#306): skip the destructive delete entirely -- a
                 # previous flush's chunks must survive this one. This is the
@@ -1058,46 +1095,35 @@ class DatabaseService:
                     # remote storage_url; NULL when neither is known.
                     source_uri = message.storage_path or message.storage_url
 
-                    # append (#306): renumber this batch's chunk_index values to
-                    # CONTINUE from this document's current max instead of using
-                    # `chunk.chunk_index` verbatim -- the incoming chunks' own
-                    # chunk_index is relative to THEIR batch (a fresh flush's
-                    # chunks are typically produced starting back at 0), and
-                    # inserting that unchanged collides with a prior flush's
-                    # rows on document_chunks' (processed_document_id,
-                    # chunk_index) unique constraint the moment a second flush
-                    # lands. Read the max HERE -- inside this same
-                    # session/transaction, after the (append-mode-skipped)
-                    # delete above and immediately before the insert below --
-                    # so a concurrent flush that already committed its own
-                    # chunks earlier in this same window is reflected, and
-                    # nothing else can slip a colliding row in between this
-                    # read and our insert. MAX() is NULL for a document with no
-                    # chunks yet (this document's very first append), which is
-                    # why the offset is 0 then, not 1 -- `+ 1` only applies
-                    # when a max actually exists.
+                    # append (#306, retry-idempotency follow-up): `chunk.
+                    # chunk_index` is used VERBATIM, never renumbered here --
+                    # it is ALREADY the global, continuing index for this
+                    # document, stamped once by chunk_conversation via
+                    # `get_document_chunk_count` (see that activity's module
+                    # docstring, "Chunk indexing (append mode)") before any
+                    # chunk in this batch was produced. Recomputing it here
+                    # from a live MAX(chunk_index) query used to be how this
+                    # continuation happened, but that made the write
+                    # NON-idempotent under Temporal's activity retry
+                    # (`store_in_postgresql`'s `retry_policy=RetryPolicy(
+                    # maximum_attempts=5)`): `store_in_postgresql` reads its
+                    # chunks from staging keyed by `workflow_run_id` (stable
+                    # across a retry), so a retry after a lost ack replays
+                    # the SAME staged chunks: with a live MAX() recompute,
+                    # attempt 2 sees attempt 1's already-committed rows and
+                    # re-inserts the identical content again at a FRESH,
+                    # non-colliding offset -- silent duplication, since the
+                    # unique constraint below never had a chance to fire.
+                    # Using the deterministic, input-derived index instead
+                    # makes a retry's insert collide with attempt 1's rows on
+                    # `uq_document_chunks_doc_idx` -- turned into a no-op by
+                    # `on_conflict_do_nothing` below rather than a hard
+                    # constraint-violation failure of the whole workflow.
                     #
                     # append=False (DocumentIngestionWorkflow's path) is left
-                    # byte-identical to before: chunks were just deleted above,
-                    # so `chunk.chunk_index` is used verbatim and indices start
-                    # whatever value the caller supplied (0 in every existing
-                    # caller).
-                    # Typed `int` (not `int | None`) and defaulted to 0 rather
-                    # than left unset on the append=False branch: the value is
-                    # unused there (the dict below picks `chunk.chunk_index`),
-                    # but an Optional here makes `next_chunk_index + i` a mypy
-                    # error that only inh-ingestion-svc's own `mypy src` run
-                    # catches -- `make type-check` covers public-api only.
-                    next_chunk_index: int = 0
-                    if append:
-                        max_chunk_index = session.execute(
-                            select(func.max(self.document_chunks.c.chunk_index)).where(
-                                self.document_chunks.c.processed_document_id == doc_id
-                            )
-                        ).scalar()
-                        next_chunk_index = (
-                            0 if max_chunk_index is None else int(max_chunk_index) + 1
-                        )
+                    # byte-identical to before: chunks were just deleted
+                    # above, so `chunk.chunk_index` was already used verbatim
+                    # (unchanged by this comment update).
 
                     # Built as new dicts (never `chunk.chunk_index = ...`) so
                     # the caller's own DocumentChunk objects are never mutated
@@ -1112,7 +1138,7 @@ class DatabaseService:
                             "document_id": message.document_id,
                             "workspace_id": message.workspace_id,
                             "tenant_id": tenant_id,
-                            "chunk_index": (next_chunk_index + i if append else chunk.chunk_index),
+                            "chunk_index": chunk.chunk_index,
                             "content": chunk.content,
                             # Prefer the model-aware estimate computed by the
                             # chunk activity; fall back to the same estimate if
@@ -1139,9 +1165,110 @@ class DatabaseService:
                             # fresh ingested_at, so a refresh resets staleness.
                             "ingested_at": now,
                         }
-                        for i, chunk in enumerate(chunks)
+                        for chunk in chunks
                     ]
-                    session.execute(self.document_chunks.insert(), chunk_values)
+                    # ON CONFLICT DO NOTHING (retry-idempotency follow-up):
+                    # `chunk_index` is now a deterministic function of the
+                    # input (see the comment above), so a Temporal retry that
+                    # replays the SAME staged chunks produces the SAME
+                    # `(processed_document_id, chunk_index)` pairs as the
+                    # already-committed attempt. Without this, that collision
+                    # would raise `uq_document_chunks_doc_idx`'s unique
+                    # constraint violation and fail the whole workflow
+                    # instead of silently no-op'ing the redundant rows.
+                    # `.rowcount` on the result reflects only the rows that
+                    # were ACTUALLY inserted (conflicts are skipped, not
+                    # counted) -- exactly what the chunk_count adjustment
+                    # below needs to also be idempotent under a retry.
+                    insert_result = session.execute(
+                        pg_insert(self.document_chunks).on_conflict_do_nothing(
+                            index_elements=["processed_document_id", "chunk_index"]
+                        ),
+                        chunk_values,
+                    )
+                    inserted_chunk_count = insert_result.rowcount or 0
+
+                    if append:
+                        # append (#306): chunk_count/text_length/size_bytes
+                        # must GROW by exactly how much THIS call actually
+                        # contributed, not by `len(chunks)`/`text_length`/
+                        # `message.size_bytes` unconditionally -- the
+                        # previous `chunk_count = chunk_count + len(chunks)`
+                        # (and the equivalent for text_length/size_bytes)
+                        # double-counted on a retry (attempt 2 replays the
+                        # same staged chunks, all of which conflict-skip
+                        # above, so the correct increment is 0, not
+                        # len(chunks)/text_length/size_bytes again).
+                        #
+                        # `inserted_chunk_count` is the gate for all three
+                        # because the chunk insert's ACTUAL rowcount is the
+                        # only signal, not knowable before it runs, that
+                        # distinguishes a genuinely new flush from a replayed
+                        # retry -- text_length and size_bytes have no
+                        # row-level dedup key of their own, but on the one
+                        # caller that uses append=True (ConversationMemory-
+                        # Workflow), `chunks` is derived from the very same
+                        # redacted-turn data that produces text_length/
+                        # size_bytes for that call (see chunk_conversation.py
+                        # and conversation_memory.py's flush step): the
+                        # workflow already returns before calling store at
+                        # all when a flush would yield zero chunks (empty
+                        # redacted_turns, or chunk_output.chunk_count == 0),
+                        # so `chunks` is never empty here while text_length/
+                        # size_bytes are non-zero. That makes
+                        # `inserted_chunk_count` a safe proxy for "this
+                        # call's payload is new" for text_length/size_bytes
+                        # too, not just chunk_count -- reusing it here (one
+                        # UPDATE, not three separate ones) keeps that
+                        # invariant explicit instead of inventing an
+                        # independent, unverifiable dedup signal for the
+                        # other two columns.
+                        #
+                        # Applied as its own statement, after the insert
+                        # above, because only the insert's actual rowcount
+                        # makes this idempotent; `insert_values`/`update_set`
+                        # below correspondingly never set an absolute value
+                        # for any of the three columns on append (see their
+                        # own comments), so this is the ONLY place append's
+                        # chunk_count/text_length are written -- and, for a
+                        # row that already existed before this call, the
+                        # ONLY place size_bytes is written too -- for both a
+                        # brand new document row and one already carrying
+                        # prior flushes' data.
+                        if inserted_chunk_count:
+                            session.execute(
+                                self.processed_documents.update()
+                                .where(self.processed_documents.c.id == doc_id)
+                                .values(
+                                    chunk_count=(
+                                        self.processed_documents.c.chunk_count
+                                        + inserted_chunk_count
+                                    ),
+                                    text_length=(
+                                        self.processed_documents.c.text_length + text_length
+                                    ),
+                                    # size_bytes is the one column of the
+                                    # three `insert_values` could NOT zero
+                                    # out above (chk_size_bytes CHECK forbids
+                                    # a 0 row even transiently) -- it already
+                                    # wrote this call's true message.size_bytes
+                                    # there when `row_was_inserted` (this call
+                                    # created the row from nothing), so
+                                    # growing it again here would double-count
+                                    # exactly the bug being fixed, just moved
+                                    # from "every retry" to "every document's
+                                    # first flush". Only add it when the row
+                                    # already existed (a later flush on top of
+                                    # prior ones, where `update_set` above
+                                    # deliberately left size_bytes untouched).
+                                    size_bytes=(
+                                        self.processed_documents.c.size_bytes
+                                        if row_was_inserted
+                                        else self.processed_documents.c.size_bytes
+                                        + message.size_bytes
+                                    ),
+                                )
+                            )
 
                 logger.info(
                     "Stored document in PostgreSQL",

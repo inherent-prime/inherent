@@ -18,6 +18,7 @@ import pytest
 
 from src.services.redaction_patterns import (
     RedactionDetectorError,
+    _redact_api_keys,
     _shannon_entropy,
     redact_text,
 )
@@ -81,6 +82,61 @@ class TestApiKeyDetector:
         assert out == text
         assert counts == {}
 
+    # -----------------------------------------------------------------
+    # Regression: NO alternative in the alternation had a leading anchor,
+    # so any of them could match a key-shaped substring in the MIDDLE of
+    # an unrelated word (e.g. "sk-" inside "task-...", or "AKIA" inside
+    # "xAKIA..."), destroying benign text around the match. Fixed by
+    # wrapping the whole alternation behind one leading lookbehind. Tested
+    # against `_redact_api_keys` directly (not `redact_text`) so the
+    # unrelated high-entropy-token catch-all -- which legitimately fires
+    # on these same random-looking strings once the api_key detector
+    # stops touching them -- can't be mistaken for a regression here.
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "task-01k3v9z8qjq2wj0000000abcdefgh",
+            "desk-ant-icipationabcdefghijklmnopqrstuvwxyz",
+            "xAKIAABCDEFGHIJKLMNOPtrailing",
+        ],
+    )
+    def test_mid_word_match_leaves_benign_text_untouched(self, text):
+        out, count = _redact_api_keys(text)
+
+        assert out == text
+        assert count == 0
+
+    def test_dash_preceded_key_still_redacted(self):
+        secret = "sk-" + "a" * 25
+        text = f"--api-key={secret}"
+        out, counts = redact_text(text)
+
+        assert secret not in out
+        assert out == "--api-key=[redacted:api_key]"
+        assert counts.get("api_key") == 1
+
+    def test_equals_preceded_key_still_redacted(self):
+        secret = "sk-" + "a" * 25
+        text = f"token={secret}"
+        out, counts = redact_text(text)
+
+        assert secret not in out
+        assert out == "token=[redacted:api_key]"
+        assert counts.get("api_key") == 1
+
+    def test_lone_dash_preceded_key_still_redacted(self):
+        """A real key legitimately preceded by a single dash (e.g. a CLI
+        flag value glued to its dash) must still redact -- the fix's
+        lookbehind excludes '-' from the "blocked" character class on
+        purpose."""
+        secret = "sk-" + "a" * 25
+        text = f"-{secret}"
+        out, counts = redact_text(text)
+
+        assert secret not in out
+        assert out == "-[redacted:api_key]"
+        assert counts.get("api_key") == 1
+
 
 class TestJwtDetector:
     def test_jwt_redacted(self):
@@ -102,6 +158,47 @@ class TestJwtDetector:
 
         assert out == text
         assert "jwt" not in counts
+
+    # -----------------------------------------------------------------
+    # Regression: the trailing `\b` needs a word/non-word transition, but
+    # '-' is itself a non-word char -- when the signature ends in '-'
+    # followed by another non-word char (e.g. a space), `\b` isn't
+    # satisfied there, so the greedy match backtracks off the trailing
+    # dash(es) and they print raw next to the marker instead of being
+    # redacted with the rest of the token.
+    @pytest.mark.parametrize(
+        "trailing_dashes",
+        ["-", "---"],
+    )
+    def test_signature_ending_in_dash_fully_redacted(self, trailing_dashes):
+        jwt = (
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+            ".eyJzdWIiOiIxMjM0NTY3ODkwIn0"
+            f".dozjgNryP4J3jVmNHl0w5N{trailing_dashes}"
+        )
+        text = f"token={jwt} end"
+        out, counts = redact_text(text)
+
+        assert jwt not in out
+        assert trailing_dashes not in out
+        assert out == "token=[redacted:jwt] end"
+        assert counts.get("jwt") == 1
+
+    def test_signature_ending_in_underscore_still_fully_redacted(self):
+        """A trailing '_' does NOT leak (it's a word char, so the original
+        `\\b` was always satisfied there) -- guards against "fixing" this
+        case into a regression."""
+        jwt = (
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+            ".eyJzdWIiOiIxMjM0NTY3ODkwIn0"
+            ".dozjgNryP4J3jVmNHl0w5N_"
+        )
+        text = f"token={jwt} end"
+        out, counts = redact_text(text)
+
+        assert jwt not in out
+        assert out == "token=[redacted:jwt] end"
+        assert counts.get("jwt") == 1
 
 
 class TestPrivateKeyDetector:

@@ -516,3 +516,51 @@ async def test_embed_texts_with_progress_stops_dispatch_when_cancelled(monkeypat
 
     # Only the in-flight batch was dispatched -- batches 2-5 never started.
     assert dispatched == ["chunk-0"]
+
+
+async def test_embed_texts_with_progress_cancels_siblings_when_a_batch_raises(monkeypatch):
+    """A batch's own `embed_batch_with_retry` raising (retries exhausted,
+    non-retryable error) must ALSO stop not-yet-started sibling batches from
+    being dispatched -- not just external cancellation (the test above).
+
+    `asyncio.gather(*coros)` propagates the FIRST exception to the awaiter
+    but does NOT cancel the Tasks it created for the other coroutines; left
+    alone they keep running (and, if not yet started, keep getting
+    dispatched) to completion, each holding a to_thread worker slot and a
+    TEI connection open for an activity attempt that has already failed.
+    This is a resource-waste fix, not a correctness fix -- a late heartbeat
+    from an orphaned batch is harmless (`activity.heartbeat` checks
+    `activity.done` before queuing and silently drops it)."""
+    import asyncio
+
+    from src.services import embedder as emb
+
+    monkeypatch.setenv("EMBEDDING_BATCH_SIZE", "1")
+    monkeypatch.setenv("EMBEDDING_MAX_CONCURRENCY", "1")  # strictly serial
+
+    dispatched: list[str] = []
+
+    def failing_post(inputs):
+        dispatched.append(inputs[0])
+        if inputs[0] == "chunk-0":
+            raise RuntimeError("simulated embed failure (retries exhausted)")
+        return [[0.0] * emb._embedding_dim() for _ in inputs]
+
+    monkeypatch.setattr(
+        emb, "embed_batch_with_retry", lambda _p, inputs, **_kw: failing_post(inputs)
+    )
+
+    with pytest.raises(RuntimeError, match="simulated embed failure"):
+        await emb.embed_texts_with_progress([f"chunk-{i}" for i in range(5)])
+
+    # Give any ORPHANED sibling Tasks a chance to actually run -- without
+    # the fix, `embed_texts_with_progress` raises back to us immediately
+    # once chunk-0 fails, but gather() leaves the other Tasks alive in the
+    # background; they only reveal themselves once the event loop gets a
+    # further chance to schedule them, which this yield provides.
+    await asyncio.sleep(0.05)
+
+    # Only the failing batch was dispatched -- batches 2-5 (queued behind
+    # the sole concurrency slot, never started) were cancelled instead of
+    # being let to run one after another in the background.
+    assert dispatched == ["chunk-0"]

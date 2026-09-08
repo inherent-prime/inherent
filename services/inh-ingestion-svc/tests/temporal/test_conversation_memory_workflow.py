@@ -25,6 +25,7 @@ sensitive to timer-skipping edge cases.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from typing import Any
 
 import pytest
@@ -98,7 +99,8 @@ async def mock_redact_turns_noop(input: RedactTurnsInput) -> RedactTurnsOutput:
 
     return RedactTurnsOutput(
         redacted_turns=[
-            RedactedTurn(turn_id=t.turn_id, text=t.text, role=t.role) for t in input.turns
+            RedactedTurn(turn_id=t.turn_id, text=t.text, role=t.role, original_index=i)
+            for i, t in enumerate(input.turns)
         ],
         dropped_turn_ids=[],
         redaction_counts={},
@@ -287,4 +289,83 @@ async def test_duplicate_turn_id_is_a_no_op():
             await handle.result()
 
     # Only ONE turn ever reached the redact/chunk/store pipeline.
+    assert len(chunker.calls[0].redacted_turns) == 1
+
+
+@pytest.mark.asyncio
+async def test_duplicate_turn_id_does_not_extend_idle_finalize_deadline():
+    """A duplicate turn_id signal (MQ redelivery / client retry) must NOT
+    push out the idle-finalize deadline -- `idle_finalize_seconds` counts
+    "no NEW turns" (module docstring), and a rejected duplicate is not a new
+    turn.
+
+    Regression test for the bug where `add_turn` stamped
+    `_last_activity_time = workflow.now()` BEFORE the duplicate-`turn_id`
+    check returned early, so even a no-op redelivery reset the clock the
+    idle-finalize wait consumes.
+
+    Timeline (turn1 real at t=0, duplicate at t=15, debounce flush at
+    t=30, then idle-wait to finalize):
+      - Fixed:  elapsed-at-flush = 30 - 0  = 30 -> remaining = 170 -> finalize 170s after the flush
+      - Buggy:  elapsed-at-flush = 30 - 15 = 15 -> remaining = 185 -> finalize 185s after the flush
+    Measured via `workflow.now()` timestamps the workflow itself stamps
+    onto its own activity inputs (the flush's `last_flushed_at` and the
+    finalize's `publish_completion` timestamp) rather than the test
+    environment's wall clock -- `env.get_current_time()` does not reliably
+    reflect the workflow's simulated time once a run has completed, but
+    these workflow-authored timestamps always do.
+    """
+    chunker = _RecordingChunkConversation()
+    store = _RecordingStore()
+    publisher = _RecordingPublishCompletion()
+
+    flush_idle_seconds = 30
+    idle_finalize_seconds = 200
+
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with Worker(
+            env.client,
+            task_queue=TASK_QUEUE,
+            workflows=[ConversationMemoryWorkflow],
+            activities=_activities(chunker, store, publisher),
+        ):
+            handle = await env.client.start_workflow(
+                ConversationMemoryWorkflow.run,
+                _input(
+                    # Never crossed by "hello there" alone -- turn1 flushes
+                    # via the flush_idle_seconds debounce timeout instead of
+                    # the size threshold, so it sits buffered for a while,
+                    # giving the duplicate a window to (wrongly) bump the
+                    # clock before the flush-triggered idle-branch recompute.
+                    flush_char_threshold=100_000,
+                    flush_idle_seconds=flush_idle_seconds,
+                    idle_finalize_seconds=idle_finalize_seconds,
+                ),
+                id="conv-dup-idle-test-1",
+                task_queue=TASK_QUEUE,
+                start_signal="add_turn",
+                start_signal_args=[_turn(turn_id="t1", text="hello there")],
+            )
+
+            # Redelivery of the SAME turn_id partway through the debounce
+            # wait -- a genuine duplicate, must be a no-op.
+            await env.sleep(15)
+            await handle.signal(
+                ConversationMemoryWorkflow.add_turn, _turn(turn_id="t1", text="hello there")
+            )
+
+            await handle.result()
+
+    flush_ts = datetime.fromisoformat(store.pg_calls[0].metadata["last_flushed_at"])
+    finalize_ts = datetime.fromisoformat(publisher.calls[0].timestamp)
+    idle_wait_seconds = (finalize_ts - flush_ts).total_seconds()
+
+    # Fixed behavior waits ~170s after the flush; the pre-fix bug stretches
+    # it to ~185s. 178s sits squarely between the two predictions.
+    assert idle_wait_seconds < 178, (
+        f"idle-finalize waited {idle_wait_seconds:.1f}s after the flush -- the duplicate "
+        "signal appears to have extended the idle-finalize deadline (expected ~170s, not ~185s)"
+    )
+
+    # The duplicate itself must still be a no-op on the actual pipeline.
     assert len(chunker.calls[0].redacted_turns) == 1

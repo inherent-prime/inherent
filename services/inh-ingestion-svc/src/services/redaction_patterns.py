@@ -75,18 +75,21 @@ class RedactionDetectorError(Exception):
 # `redaction_patterns_extra` rather than waiting on a code change here.
 _API_KEY_PATTERN = re.compile(
     r"""
-    sk-proj-[A-Za-z0-9_-]{20,}                 # OpenAI project key
-    | sk-ant-[A-Za-z0-9_-]{20,}                # Anthropic key
-    | sk-[A-Za-z0-9]{20,}                      # OpenAI legacy / Stripe-shaped sk-*
-    | sk_live_[A-Za-z0-9]{20,}                 # Stripe live secret key
-    | sk_test_[A-Za-z0-9]{20,}                 # Stripe test secret key
-    | AKIA[0-9A-Z]{16}                         # AWS access key ID
-    | ghp_[A-Za-z0-9]{36}                      # GitHub personal access token
-    | gh[oisur]_[A-Za-z0-9]{36}                # GitHub OAuth/app/server/refresh tokens
-    | github_pat_[A-Za-z0-9_]{22,}             # GitHub fine-grained PAT
-    | glpat-[A-Za-z0-9_-]{20}                  # GitLab personal access token
-    | xox[baprs]-[A-Za-z0-9-]{10,}             # Slack tokens
-    | AIza[0-9A-Za-z_-]{35}                    # Google API key
+    (?<![A-Za-z0-9_])                          # a key never starts in the middle of a word
+    (?:
+        sk-proj-[A-Za-z0-9_-]{20,}                 # OpenAI project key
+        | sk-ant-[A-Za-z0-9_-]{20,}                # Anthropic key
+        | sk-[A-Za-z0-9]{20,}                      # OpenAI legacy / Stripe-shaped sk-*
+        | sk_live_[A-Za-z0-9]{20,}                 # Stripe live secret key
+        | sk_test_[A-Za-z0-9]{20,}                 # Stripe test secret key
+        | AKIA[0-9A-Z]{16}                         # AWS access key ID
+        | ghp_[A-Za-z0-9]{36}                      # GitHub personal access token
+        | gh[oisur]_[A-Za-z0-9]{36}                # GitHub OAuth/app/server/refresh tokens
+        | github_pat_[A-Za-z0-9_]{22,}             # GitHub fine-grained PAT
+        | glpat-[A-Za-z0-9_-]{20}                  # GitLab personal access token
+        | xox[baprs]-[A-Za-z0-9-]{10,}             # Slack tokens
+        | AIza[0-9A-Za-z_-]{35}                    # Google API key
+    )
     """,
     re.VERBOSE,
 )
@@ -107,7 +110,9 @@ def _redact_api_keys(text: str) -> tuple[str, int]:
 # JWT: three base64url segments joined by '.' (header.payload.signature).
 # Real JWTs' base64url-encoded header always starts "eyJ" (the base64 of
 # '{"'), which keeps this from firing on arbitrary dotted text.
-_JWT_PATTERN = re.compile(r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b")
+_JWT_PATTERN = re.compile(
+    r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}(?![A-Za-z0-9_-])"
+)
 
 
 def _redact_jwts(text: str) -> tuple[str, int]:

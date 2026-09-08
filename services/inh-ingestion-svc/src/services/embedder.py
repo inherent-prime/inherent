@@ -236,10 +236,23 @@ async def embed_texts_with_progress(
 
     Cancellation also becomes observable between batches: if the enclosing
     activity task is cancelled (e.g. heartbeat_timeout expiring server-side),
-    ``asyncio.gather`` below raises into this coroutine and any batch not
-    yet started is never dispatched. Before this, the whole document's embed
-    ran as one opaque ``asyncio.to_thread(embed_texts, ...)`` call that could
-    not be interrupted at any granularity once started (#298).
+    the cancellation propagates into every still-running/not-yet-started
+    batch Task below, so none of them keeps a to_thread worker slot or a TEI
+    connection alive after this coroutine has given up. Before this, the
+    whole document's embed ran as one opaque
+    ``asyncio.to_thread(embed_texts, ...)`` call that could not be
+    interrupted at any granularity once started (#298).
+
+    The same cancel-the-siblings handling also fires when a batch's own
+    ``embed_batch_with_retry`` raises (retries exhausted, non-retryable
+    error): the first exception is what this coroutine raises to its caller
+    either way, but without explicitly cancelling the other in-flight/
+    pending batch Tasks they would otherwise keep running to completion on
+    their own -- burning a to_thread worker slot and a TEI connection for a
+    document this activity attempt has already failed. This is a resource-
+    waste fix, not a correctness fix: a late heartbeat from an orphaned
+    batch is harmless (``activity.heartbeat`` checks ``activity.done``
+    before queuing and silently drops it).
 
     Args:
         texts: Chunk texts to embed, one per output vector (order preserved).
@@ -288,7 +301,27 @@ async def embed_texts_with_progress(
         if on_batch_done is not None:
             on_batch_done(completed, total)
 
-    await asyncio.gather(*(_run(item) for item in batches))
+    # Explicit Tasks (not bare coroutines passed to gather) so each batch is
+    # independently cancellable: plain `asyncio.gather(*(coro for ...))`
+    # schedules the coroutines as Tasks internally, but without a handle to
+    # them there is no way to cancel the SIBLINGS once one of them raises --
+    # gather only propagates the first exception to this coroutine's caller,
+    # it does not cancel the rest (see module docstring above). External
+    # cancellation of THIS coroutine (e.g. heartbeat_timeout) already
+    # propagated into gather's own Tasks before this change; the addition
+    # here is cancelling siblings when the failure originates from a batch
+    # exception instead.
+    tasks = [asyncio.ensure_future(_run(item)) for item in batches]
+    try:
+        await asyncio.gather(*tasks)
+    except BaseException:
+        for t in tasks:
+            t.cancel()
+        # Swallow the resulting CancelledErrors (and any other sibling
+        # outcome) -- we only need every Task to have actually finished
+        # unwinding before re-raising, not their results.
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
 
     out: list[list[float]] = [[0.0] * dim for _ in texts]
     for j, i in enumerate(keep_idx):

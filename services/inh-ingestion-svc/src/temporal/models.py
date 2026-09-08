@@ -486,6 +486,14 @@ class RedactedTurn:
     # Per-turn counts by redaction_type (e.g. {"api_key": 1, "jwt": 2}),
     # empty when nothing in this turn matched any detector.
     redaction_counts: dict[str, int] = field(default_factory=dict)
+    # This turn's position in the ORIGINAL, pre-drop batch passed to
+    # `redact_turns` (0-based) -- NOT its position in `redacted_turns`
+    # itself, which is a filtered list once any turn is dropped (per-turn
+    # failure, see redact.py's module docstring). `chunk_conversation`
+    # stamps this onto every chunk's `turn_index` instead of re-deriving it
+    # from `enumerate(redacted_turns)`, which would shift every surviving
+    # turn after a drop down by the number of drops before it.
+    original_index: int = 0
 
 
 @dataclass

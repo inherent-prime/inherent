@@ -123,7 +123,7 @@ async def _redact_turns_inner(input: RedactTurnsInput) -> RedactTurnsOutput:
     dropped_turn_ids: list[str] = []
     batch_counts: dict[str, int] = {}
 
-    for turn in input.turns:
+    for original_index, turn in enumerate(input.turns):
         try:
             redacted_text, counts = redact_text(turn.text, extra_patterns)
         except RedactionDetectorError as exc:
@@ -151,6 +151,7 @@ async def _redact_turns_inner(input: RedactTurnsInput) -> RedactTurnsOutput:
                 text=redacted_text,
                 role=turn.role,
                 redaction_counts=counts,
+                original_index=original_index,
             )
         )
         for redaction_type, n in counts.items():

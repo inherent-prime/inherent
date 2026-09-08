@@ -200,14 +200,19 @@ class ConversationMemoryWorkflow:
         ever appends to the buffer, it never sets workspace_id/external_id
         (those come from `ConversationMemoryInput`, see `run()`).
         """
-        self._last_activity_time = workflow.now()
-
         if turn.turn_id in self._seen_turn_ids:
             workflow.logger.debug(
                 "ConversationMemoryWorkflow: duplicate turn_id ignored (no-op)",
                 turn_id=turn.turn_id,
             )
             return
+
+        # Set only AFTER the dedupe check above returns early: a redelivered
+        # signal (MQ at-least-once, or a client retry) must not push out the
+        # idle-finalize deadline consumed in run()'s idle-wait branch --
+        # idle_finalize_seconds counts "no NEW turns" (see module docstring),
+        # and a duplicate is by definition not a new turn.
+        self._last_activity_time = workflow.now()
 
         self._seen_turn_ids[turn.turn_id] = None
         if len(self._seen_turn_ids) > _SEEN_TURN_IDS_BOUND:

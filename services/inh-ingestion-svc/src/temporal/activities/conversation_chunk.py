@@ -127,7 +127,14 @@ async def _chunk_conversation_inner(input: ChunkConversationInput) -> ChunkConve
     # content_risk/chunking_strategy, extended here rather than forked).
     chunks_dicts: list[dict] = []
     chunk_index = start_index
-    for turn_index, turn in enumerate(input.redacted_turns):
+    for turn in input.redacted_turns:
+        # `turn.original_index` is this turn's position in the ORIGINAL
+        # pre-drop batch (redact.py stamps it) -- NOT its position in this
+        # (possibly filtered) `redacted_turns` list. Re-deriving it from
+        # `enumerate` here would shift every surviving turn after a drop
+        # down by the number of turns dropped before it (see #307's
+        # per-turn drop contract in redact.py's module docstring).
+        turn_index = turn.original_index
         meta = turn_meta_by_id.get(turn.turn_id)
         ts = meta.ts if meta is not None else ""
         client = meta.client if meta is not None else None

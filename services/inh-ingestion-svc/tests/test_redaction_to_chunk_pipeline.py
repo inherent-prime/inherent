@@ -208,6 +208,78 @@ class TestCredentialNeverReachesChunks:
         assert secret_that_triggers_failure not in all_chunk_text
         assert "bad-turn" not in {c["turn_id"] for c in staged_chunks}
 
+    async def test_dropped_turn_does_not_shift_surviving_turn_indices(self, monkeypatch):
+        """Regression: `turn_index` must be the turn's position in the
+        ORIGINAL batch, not its position in the post-drop `redacted_turns`
+        list. With turns t0..t3 and t1 forced to fail, t2/t3 must keep
+        their original indices 2/3 -- re-deriving the index from
+        `enumerate(redacted_turns)` would instead shift them down to 1/2
+        because t1 was dropped ahead of them."""
+        monkeypatch.setattr("src.config.settings.get_settings", lambda: _settings(), raising=True)
+
+        import src.services.redaction_patterns as redaction_patterns
+
+        secret_that_triggers_failure = "TRIGGER_BOOM_a1b2c3d4e5f6g7h8i9j0k1l2m3n4"
+        real_entropy_detector = redaction_patterns._redact_high_entropy_tokens
+
+        def _flaky(text: str):
+            if "TRIGGER_BOOM" in text:
+                raise ValueError("simulated detector crash")
+            return real_entropy_detector(text)
+
+        monkeypatch.setattr(redaction_patterns, "_redact_high_entropy_tokens", _flaky)
+
+        audit_db = _mock_db()
+        monkeypatch.setattr(
+            "src.temporal.shared_services.get_db_service", lambda: audit_db, raising=True
+        )
+
+        redact_output = await redact_turns(
+            RedactTurnsInput(
+                turns=[
+                    RedactTurnInput(turn_id="t0", text="turn zero"),
+                    RedactTurnInput(turn_id="t1", text=f"secret: {secret_that_triggers_failure}"),
+                    RedactTurnInput(turn_id="t2", text="turn two"),
+                    RedactTurnInput(turn_id="t3", text="turn three"),
+                ],
+                workflow_run_id="run-pipeline-3",
+                workspace_id="ws-pipeline",
+                document_id="conv-ws-pipeline-conv3",
+            )
+        )
+        assert redact_output.dropped_turn_ids == ["t1"]
+        assert [t.turn_id for t in redact_output.redacted_turns] == ["t0", "t2", "t3"]
+
+        chunk_db = _mock_db()
+        mock_staging = _mock_staging()
+        monkeypatch.setattr(
+            "src.temporal.shared_services.get_db_service", lambda: chunk_db, raising=True
+        )
+        monkeypatch.setattr(
+            "src.temporal.shared_services.get_staging_service",
+            lambda: mock_staging,
+            raising=True,
+        )
+
+        chunk_output = await chunk_conversation(
+            ChunkConversationInput(
+                workflow_run_id="run-pipeline-3",
+                document_id="conv-ws-pipeline-conv3",
+                workspace_id="ws-pipeline",
+                redacted_turns=redact_output.redacted_turns,
+                turn_meta=[
+                    ConversationTurnMeta(turn_id="t0", ts="2026-08-31T00:00:00Z"),
+                    ConversationTurnMeta(turn_id="t2", ts="2026-08-31T00:00:02Z"),
+                    ConversationTurnMeta(turn_id="t3", ts="2026-08-31T00:00:03Z"),
+                ],
+            )
+        )
+        assert chunk_output.chunk_count == 3
+
+        _, staged_chunks = mock_staging.write_chunks.call_args[0]
+        turn_index_by_id = {c["turn_id"]: c["turn_index"] for c in staged_chunks}
+        assert turn_index_by_id == {"t0": 0, "t2": 2, "t3": 3}
+
 
 class TestChunkConversationTurnAwareChunking:
     """chunk_conversation-specific behavior, independent of redact_turns."""
@@ -235,8 +307,10 @@ class TestChunkConversationTurnAwareChunking:
                 workflow_run_id="run-x",
                 document_id="conv-ws-x-conv1",
                 redacted_turns=[
-                    RedactedTurn(turn_id="t1", text="hello there", role="user"),
-                    RedactedTurn(turn_id="t2", text="general kenobi", role="assistant"),
+                    RedactedTurn(turn_id="t1", text="hello there", role="user", original_index=0),
+                    RedactedTurn(
+                        turn_id="t2", text="general kenobi", role="assistant", original_index=1
+                    ),
                 ],
                 turn_meta=[
                     ConversationTurnMeta(turn_id="t1", ts="t1"),
@@ -276,8 +350,12 @@ class TestChunkConversationTurnAwareChunking:
                 workflow_run_id="run-y",
                 document_id="conv-ws-y-conv1",
                 redacted_turns=[
-                    RedactedTurn(turn_id="long-turn", text=long_turn_text, role="user"),
-                    RedactedTurn(turn_id="short-turn", text="ok", role="assistant"),
+                    RedactedTurn(
+                        turn_id="long-turn", text=long_turn_text, role="user", original_index=0
+                    ),
+                    RedactedTurn(
+                        turn_id="short-turn", text="ok", role="assistant", original_index=1
+                    ),
                 ],
                 turn_meta=[
                     ConversationTurnMeta(turn_id="long-turn", ts="t1"),
