@@ -338,6 +338,8 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Added
 
+- **Release-gated PyPI wheels and CLI adopter-path smoke proof (#284, #285).** `inherent` and its shared contract dependency publish through OIDC approval, while the PR smoke lane installs the wheel into a clean virtual environment and exercises locally built engine images end to end. An image-only release tag (CLI version unchanged) now publishes `inh-contracts` without the `inherent` wheel build blocking it; the clean-venv wheel install check is now a real gate in front of PyPI publish, not a sibling job; `workflow_dispatch` runs off a tag route to TestPyPI instead of production PyPI by default; and CLI↔engine version-drift detection uses `packaging.version` so it no longer silently disables itself on PEP 440 prerelease builds (`0.7.0rc1`). `inherent up --engine-version` now hard-refuses a major-version mismatch unless passed `--force`, matching #284's acceptance criteria; `inh-contracts` publishes its normal sdist + wheel pair again (only the CLI needs the wheel-only build, for its force-included Compose file).
+
 - **Shared `EmbeddingProvider` abstraction: provider choice, auth, and a
   Weaviate model-identity guard (#311).** inh-ingestion-svc and
   inh-public-api-svc each carried their own TEI-only HTTP client with

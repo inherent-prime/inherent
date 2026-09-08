@@ -165,12 +165,41 @@ def test_up_no_detach_and_registry(inherent_home, runner, monkeypatch) -> None:
         httpx.MockTransport(lambda req: httpx.Response(200, json={}, request=req)),
     )
     result = runner.invoke(
-        app, ["up", "--no-detach", "--registry", "ghcr.io/example", "--engine-version", "1.2.3"]
+        app, ["up", "--no-detach", "--registry", "ghcr.io/example", "--engine-version", "0.8.5"]
     )
     assert result.exit_code == 0, result.output
     assert seen["args"] == ["up"]
     assert seen["capture"] is False
     assert seen["env"]["INHERENT_REGISTRY"] == "ghcr.io/example"
+    assert seen["env"]["INHERENT_VERSION"] == "0.8.5"
+
+
+def test_up_refuses_major_version_mismatch_without_force(
+    inherent_home, runner, monkeypatch
+) -> None:
+    monkeypatch.setattr("inh_cli.stack.preflight_docker", lambda: None)
+    result = runner.invoke(app, ["up", "--engine-version", "1.2.3"])
+    assert result.exit_code == 2
+    assert "--force" in result.output
+
+
+def test_up_allows_major_version_mismatch_with_force(inherent_home, runner, monkeypatch) -> None:
+    seen = {}
+
+    def fake_run(args, **kwargs):
+        seen["env"] = kwargs.get("env")
+        return subprocess.CompletedProcess(["docker"], 0, stdout="", stderr="")
+
+    monkeypatch.setattr("inh_cli.stack.preflight_docker", lambda: None)
+    monkeypatch.setattr("inh_cli.stack.run_compose", fake_run)
+    monkeypatch.setattr("inh_cli.stack.compose_ps", lambda **_: PS_PAYLOAD)
+    monkeypatch.setattr(
+        client_mod,
+        "_transport",
+        httpx.MockTransport(lambda req: httpx.Response(200, json={}, request=req)),
+    )
+    result = runner.invoke(app, ["up", "--engine-version", "1.2.3", "--force"])
+    assert result.exit_code == 0, result.output
     assert seen["env"]["INHERENT_VERSION"] == "1.2.3"
 
 

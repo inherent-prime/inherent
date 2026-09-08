@@ -44,18 +44,22 @@ VPC or run it locally with one command.
 
 ## Quickstart
 
-Prerequisites: Docker, Python 3.11+, `uv`.
+Prerequisites: Docker, Python 3.11+.
+
+```bash
+pip install inherent
+inherent up
+inherent connect claude --print
+```
+
+`inherent up` pulls the version-matched engine images, waits for health, and
+stores local credentials in `~/.inherent/`.
+
+Contributing from a checkout instead?
 
 ```bash
 git clone https://github.com/inherent-prime/inherent.git && cd inherent
 make quickstart   # .env, install, Compose stack, dev workspace + API key, health check
-```
-
-No checkout? Run from published images:
-
-```bash
-curl -O https://raw.githubusercontent.com/inherent-prime/inherent/main/docker-compose.release.yml
-INHERENT_VERSION=latest docker compose -f docker-compose.release.yml up -d
 ```
 
 Then follow [Getting Started Locally](docs/getting-started/local.md) for the

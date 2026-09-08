@@ -577,6 +577,7 @@ dependencies = [
     { name = "click" },
     { name = "httpx" },
     { name = "inh-contracts" },
+    { name = "packaging" },
     { name = "rich" },
     { name = "typer" },
 ]
@@ -617,6 +618,7 @@ requires-dist = [
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27.2" },
     { name = "inh-contracts", directory = "../inh-contracts" },
     { name = "mypy", marker = "extra == 'dev'", specifier = "==1.19.1" },
+    { name = "packaging", specifier = ">=24" },
     { name = "playwright", marker = "extra == 'dev'", specifier = ">=1.49.0" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.6.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = "==9.0.2" },

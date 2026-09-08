@@ -43,6 +43,18 @@ The seeded `ink_dev_local_key_001` is a **dev convenience** — create your own
 workspace and API keys (see [§8](#8-provision-workspaces-and-api-keys)) before
 exposing the stack to anything real.
 
+## CLI clients
+
+Point client-only commands at this deployment without writing local config:
+
+```bash
+export INHERENT_URL=https://memory.example.com
+export INHERENT_API_KEY=ink_<key>
+inherent --json whoami
+```
+
+`inherent up`, key creation, and key revocation manage a local stack only.
+
 ## Pre-flight Checklist
 
 - [ ] Strong secrets set: `POSTGRES_PASSWORD`, `WEAVIATE_API_KEY`, `INGESTION_API_KEY`
