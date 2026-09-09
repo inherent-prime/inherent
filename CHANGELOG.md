@@ -5,6 +5,8 @@ All notable changes to Inherent are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-09-09
+
 ### Fixed
 
 - **Conversations are exempt from the `is_stale` freshness rule (#306
