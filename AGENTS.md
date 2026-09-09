@@ -10,6 +10,7 @@
 - Always raise PRs against `main`
 - No commit should be without a Github Issue. If there is no issue or adhoc work, make sure to create an issue with details and then proceed to write the code.
 - Always create branch names and commit messages following conventional commits principles. Don't use model-name-feature-random patterns, keep it simple so that it conveys exactly what is going on here.
+- Always write in pointers and summarize in 10 words when you are explaining or reporting the work
 
 ## Mandatory Quality Gates (ALL agents must follow)
 
