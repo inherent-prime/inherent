@@ -1113,7 +1113,9 @@ async def _handle_create_chunk(key_info: APIKeyInfo, arguments: dict) -> list[Te
             error=str(exc),
         )
         return [
-            TextContent(type="text", text="Error: Failed to create the chunk. Please try again later.")
+            TextContent(
+                type="text", text="Error: Failed to create the chunk. Please try again later."
+            )
         ]
     if not outcome.found or outcome.chunk is None:
         return [TextContent(type="text", text=f"Error: Document '{document_id}' not found")]
@@ -1162,7 +1164,9 @@ async def _handle_edit_chunk(key_info: APIKeyInfo, arguments: dict) -> list[Text
             error=str(exc),
         )
         return [
-            TextContent(type="text", text="Error: Failed to update the chunk. Please try again later.")
+            TextContent(
+                type="text", text="Error: Failed to update the chunk. Please try again later."
+            )
         ]
     if not outcome.found or outcome.chunk is None:
         return [TextContent(type="text", text="Error: Chunk not found")]
@@ -1207,7 +1211,9 @@ async def _handle_delete_chunk(key_info: APIKeyInfo, arguments: dict) -> list[Te
             error=str(exc),
         )
         return [
-            TextContent(type="text", text="Error: Failed to delete the chunk. Please try again later.")
+            TextContent(
+                type="text", text="Error: Failed to delete the chunk. Please try again later."
+            )
         ]
     if not outcome.found:
         return [TextContent(type="text", text="Error: Chunk not found")]

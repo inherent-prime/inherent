@@ -1089,8 +1089,7 @@ class DatabaseService:
                         .select_from(self.document_chunks)
                         .where(
                             self.document_chunks.c.processed_document_id == doc_id,
-                            self.document_chunks.c.metadata["chunk_source"].astext
-                            == "manual_api",
+                            self.document_chunks.c.metadata["chunk_source"].astext == "manual_api",
                         )
                     ).scalar_one()
                     if manual_chunks:
