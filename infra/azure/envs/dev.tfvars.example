@@ -1,0 +1,47 @@
+# Dev/eval preset: single-zone, no DR, small SKUs — cheapest way to stand up the full
+# cloud-native stack (still AKS + managed data services, not the single-VM Hetzner path).
+# terraform apply -var-file=envs/dev.tfvars.example
+
+environment = "dev"
+
+enable_ha      = false
+enable_dr      = false
+pg_geo_replica = false
+
+ingress_profile = "nginx"
+
+inherent_version = "0.6.0"
+
+# CHANGE ME — root main.tf's guardrail precondition fails the plan without one of these.
+api_hostname         = "api-dev.example.com" # CHANGE ME
+letsencrypt_email    = "ops@example.com"     # CHANGE ME — cert-manager ACME contact
+alert_email_address  = "ops@example.com"     # CHANGE ME — falls back to letsencrypt_email if left empty
+
+deployer_ip_ranges = [] # CHANGE ME to the deployer's egress IP/CIDR if Terraform runs outside the VNet
+
+aks_sku_tier       = "Standard"
+log_retention_days = 14 # shorter than prod's 30 — dev/eval doesn't need the same audit window
+
+aks_system_vm_size = "Standard_D2s_v5"
+aks_user_vm_size   = "Standard_D2s_v5"
+aks_user_min_count = 1
+aks_user_max_count = 2
+api_replicas_min   = 1
+api_replicas_max   = 2
+worker_replicas    = 1
+
+pg_sku           = "B_Standard_B2s"
+pg_storage_mb    = 32768
+cosmos_mongo_sku = "M10"
+# Standard, not Basic: Basic-tier Azure Cache for Redis does not support the
+# maxmemory-policy configuration (Azure's own docs list it Standard/Premium only) —
+# modules/data hardcodes maxmemory_policy = "noeviction", required for Redis Streams
+# durability (MQ_BACKEND=redis), so Basic isn't a safe cost-cut even in dev.
+redis_sku        = "Standard"
+redis_family     = "C"
+redis_capacity   = 0
+weaviate_disk_gb = 16
+minio_disk_gb    = 32
+
+embedding_profile = "tei" # self-hosted, no external dependency
+storage_profile   = "minio"

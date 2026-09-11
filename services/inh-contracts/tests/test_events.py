@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from inh_contracts.events import (
     CONTRACT_VERSION,
+    ConversationTurnMessage,
     DocumentCompletionMessage,
     DocumentUploadMessage,
 )
@@ -158,3 +159,104 @@ def test_completion_message_round_trip() -> None:
     dumped = msg.model_dump()
     restored = DocumentCompletionMessage(**dumped)
     assert restored.model_dump() == dumped
+
+
+# ---------------------------------------------------------------------------
+# ConversationTurnMessage (#306)
+# ---------------------------------------------------------------------------
+
+CANONICAL_CONVERSATION_TURN_KEYS_V1 = {
+    "event_type",
+    "workspace_id",
+    "user_id",
+    "external_id",
+    "turn_id",
+    "role",
+    "text",
+    "ts",
+    "client",
+    "timestamp",
+    "contract_version",
+}
+
+
+def _canonical_conversation_turn_event() -> dict:
+    return {
+        "event_type": "conversation.turn",
+        "workspace_id": "507f1f77bcf86cd799439012",
+        "user_id": "507f1f77bcf86cd799439013",
+        "external_id": "conv-abc123",
+        "turn_id": "turn-0001",
+        "role": "user",
+        "text": "What's the capital of France?",
+        "ts": "2026-08-31T10:30:00Z",
+        "client": "agent-cli",
+        "timestamp": "2026-08-31T10:30:05Z",
+        "contract_version": CONTRACT_VERSION,
+    }
+
+
+def test_conversation_turn_canonical_key_set_matches_model_fields() -> None:
+    assert set(ConversationTurnMessage.model_fields.keys()) == CANONICAL_CONVERSATION_TURN_KEYS_V1
+
+
+def test_conversation_turn_round_trip_lossless() -> None:
+    event = _canonical_conversation_turn_event()
+    msg = ConversationTurnMessage(**event)
+    dumped = msg.model_dump()
+
+    assert set(dumped.keys()) == CANONICAL_CONVERSATION_TURN_KEYS_V1
+    assert dumped == event
+    assert dumped["contract_version"] == "1.0.0"
+
+
+def test_conversation_turn_without_contract_version_defaults() -> None:
+    event = _canonical_conversation_turn_event()
+    del event["contract_version"]
+
+    msg = ConversationTurnMessage(**event)
+    assert msg.contract_version == "1.0.0"
+
+
+def test_conversation_turn_client_is_optional() -> None:
+    event = _canonical_conversation_turn_event()
+    del event["client"]
+
+    msg = ConversationTurnMessage(**event)
+    assert msg.client is None
+
+
+@pytest.mark.parametrize("role", ["user", "assistant"])
+def test_conversation_turn_role_accepts_both_values(role: str) -> None:
+    event = _canonical_conversation_turn_event()
+    event["role"] = role
+    msg = ConversationTurnMessage(**event)
+    assert msg.role == role
+
+
+def test_conversation_turn_rejects_invalid_role() -> None:
+    event = _canonical_conversation_turn_event()
+    event["role"] = "system"
+
+    with pytest.raises(ValidationError, match="role"):
+        ConversationTurnMessage(**event)
+
+
+def test_conversation_turn_rejects_empty_text() -> None:
+    """Empty text is never a meaningful turn -- reject at the contract
+    boundary rather than letting an empty turn ride all the way to
+    redact_turns/chunk_conversation."""
+    event = _canonical_conversation_turn_event()
+    event["text"] = ""
+
+    with pytest.raises(ValidationError, match="text"):
+        ConversationTurnMessage(**event)
+
+
+@pytest.mark.parametrize("field", ["turn_id", "external_id", "workspace_id", "user_id"])
+def test_conversation_turn_requires_identity_fields(field: str) -> None:
+    event = _canonical_conversation_turn_event()
+    del event[field]
+
+    with pytest.raises(ValidationError, match=field):
+        ConversationTurnMessage(**event)

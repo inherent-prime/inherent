@@ -14,6 +14,47 @@ future or hosted-only.
 datastore on an internal network (the release stack already binds them to
 loopback).
 
+## Running From Published Images
+
+The two custom services are public images —
+`ghcr.io/inherent-prime/ingestion-svc` and `ghcr.io/inherent-prime/public-api-svc`
+— no registry login is needed to pull. Override the source with the
+`INHERENT_REGISTRY` / `INHERENT_VERSION` env vars to pin a version or point at
+a private mirror.
+
+The stack initializes the database automatically: an init container runs the
+ingestion image in `SERVICE_MODE=migrate`, applying the SQL migrations baked
+into the image (idempotent and non-destructive — safe to restart).
+
+The embedding service (`text-embeddings-inference`) is **amd64-only**; on
+Apple Silicon / arm64 it runs under emulation (slower first start). Run the
+full stack on an amd64 host for production-like performance.
+
+Seed a local dev workspace + API key with the bootstrap script (needs no
+checkout — it only talks to the running containers via `docker exec`):
+
+```bash
+curl -O https://raw.githubusercontent.com/inherent-prime/inherent/main/scripts/dev/bootstrap.sh
+PG_CONTAINER=inherent-oss-postgres MONGO_CONTAINER=inherent-oss-mongodb \
+  bash bootstrap.sh
+```
+
+The seeded `ink_dev_local_key_001` is a **dev convenience** — create your own
+workspace and API keys (see [§8](#8-provision-workspaces-and-api-keys)) before
+exposing the stack to anything real.
+
+## CLI clients
+
+Point client-only commands at this deployment without writing local config:
+
+```bash
+export INHERENT_URL=https://memory.example.com
+export INHERENT_API_KEY=ink_<key>
+inherent --json whoami
+```
+
+`inherent up`, key creation, and key revocation manage a local stack only.
+
 ## Pre-flight Checklist
 
 - [ ] Strong secrets set: `POSTGRES_PASSWORD`, `WEAVIATE_API_KEY`, `INGESTION_API_KEY`
@@ -58,8 +99,13 @@ Set `ENVIRONMENT=production` before exposing the API to anything real.
 The demo stores document blobs in `s3rver`, a Node-based S3 mock, with
 credentials defaulting to `S3RVER`. Replace it with real S3-compatible storage.
 
-The application supports `s3`, `gcs`, and `azure` backends
-(`services/inh-ingestion-svc/src/temporal/models.py`). To switch:
+The application implements only `s3`-compatible and `local` storage backends.
+`services/inh-ingestion-svc/src/temporal/models.py` also defines `gcs` and
+`azure` as enum values, but neither has a client implementation — setting
+`STORAGE_BACKEND=gcs` or `azure` fails at runtime. Native Azure Blob support is
+tracked in [#329](https://github.com/inherent-prime/inherent/issues/329); until
+then, Azure deployments run MinIO (S3-compatible) on-cluster — see
+[Deploy to Azure](azure.md). To switch to real S3-compatible storage:
 
 1. Remove the `s3rver` service and the `depends_on: s3rver` entries from your
    compose file.
@@ -150,8 +196,10 @@ services.
 
 Inherent has **no key-management REST API** today — application keys are stored
 as an SHA-256 hash in the PostgreSQL `api_keys` table plus a workspace record in
-MongoDB. The `bootstrap.sh` script creates both. Run it with your own values
-instead of the seeded defaults:
+MongoDB. The release stack's one-shot `bootstrap` service creates one principal
+from `INHERENT_API_KEY`, `INHERENT_WORKSPACE_ID`, and `INHERENT_USER_ID`; it
+must complete before the public API starts. Set deployment-specific values.
+For a checkout-based deployment, `bootstrap.sh` creates the same two records:
 
 ```bash
 API_KEY=ink_<your-strong-key> WORKSPACE_ID=<your-workspace> \

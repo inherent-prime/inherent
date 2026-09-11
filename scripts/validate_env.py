@@ -287,6 +287,27 @@ def _check_consistency(ing: Any, pub: Any, report: Report) -> None:
             "Vectors written by ingestion will be unreadable by public-api search."
         )
 
+    # #311: same severity class as the EMBEDDING_DIM check above -- both feed
+    # the Weaviate collection model-identity guard (WeaviateService /
+    # SearchService), which hard-errors on a mismatch. Catching the
+    # misconfiguration here, before either service starts, is strictly
+    # better than discovering it as a runtime EmbeddingIdentityMismatchError
+    # on the first write or query.
+    if ing.embedding_model_id != pub.embedding_model_id:
+        report.error(
+            f"EMBEDDING_MODEL_ID mismatch: ingestion={ing.embedding_model_id}, "
+            f"public-api={pub.embedding_model_id}. Both services must agree, or the "
+            "Weaviate model-identity guard will hard-error on writes/queries once they "
+            "disagree with a collection's persisted identity."
+        )
+
+    if ing.embedding_provider != pub.embedding_provider:
+        report.warn(
+            f"EMBEDDING_PROVIDER differs: ingestion={ing.embedding_provider}, "
+            f"public-api={pub.embedding_provider}. Both should talk to the same embedding "
+            "backend so EMBEDDING_MODEL_ID/EMBEDDING_DIM describe the same vector space."
+        )
+
 
 def _resolve_public_api_overrides(report: Report) -> dict[str, str | None]:
     """Decide which env values to override before loading public-api Settings.

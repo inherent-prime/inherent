@@ -118,6 +118,17 @@ async def test_returned_event_id_matches_the_row_that_was_written() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rest_capture_records_rest_transport() -> None:
+    """REST search events are tagged transport='rest' (#241): the captured
+    row must say which surface produced it, and REST must keep saying
+    'rest' now that MCP shares the same capture helper."""
+    db = AsyncMock()
+    await _call_search(AsyncMock(return_value=db))
+
+    assert db.insert_eval_event.call_args.kwargs["transport"] == "rest"
+
+
+@pytest.mark.asyncio
 async def test_no_event_id_when_the_capture_write_fails() -> None:
     """A failed capture yields no id, never a dangling one.
 
@@ -171,6 +182,7 @@ async def test_record_query_event_reports_durability() -> None:
                 user_id="u-1",
                 request=SearchRequest(query="q"),
                 response=_response(),
+                transport="rest",
             )
             is True
         )
@@ -184,6 +196,7 @@ async def test_record_query_event_reports_durability() -> None:
                 user_id="u-1",
                 request=SearchRequest(query="q"),
                 response=_response(),
+                transport="rest",
             )
             is False
         )

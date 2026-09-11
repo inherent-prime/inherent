@@ -12,9 +12,11 @@ from src.temporal.activities.chunk_edit import (
 )
 from src.temporal.activities.cleanup import cleanup_staging
 from src.temporal.activities.completion import publish_completion
+from src.temporal.activities.conversation_chunk import chunk_conversation
 from src.temporal.activities.dead_letter import record_dead_letter, resolve_dead_letter_jobs
 from src.temporal.activities.extract import extract_text
 from src.temporal.activities.fetch import fetch_document
+from src.temporal.activities.redact import redact_turns
 from src.temporal.activities.status import create_pending_document, set_document_status
 from src.temporal.activities.store import store_in_postgresql, store_in_weaviate
 from src.temporal.activities.tenant import ensure_tenant_ready, update_workspace_stats
@@ -38,4 +40,7 @@ __all__ = [
     "update_chunk_postgresql",
     "update_chunk_weaviate",
     "record_chunk_edit_weaviate_failure",
+    # Conversation ingestion activities (#306, #307)
+    "redact_turns",
+    "chunk_conversation",
 ]

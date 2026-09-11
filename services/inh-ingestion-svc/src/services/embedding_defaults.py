@@ -12,6 +12,18 @@ therefore uses these defaults and always budgets for **serial** batch
 completion (one batch at a time). That way lowering ``EMBEDDING_MAX_CONCURRENCY``
 cannot reintroduce #228 underestimation; raising concurrency only finishes
 earlier inside the same budget.
+
+#311: the batching/retry constants below (everything except the two STORE_*
+budget constants) now have a twin copy in ``inh_contracts.embedding.defaults``
+-- that package is the actual shared source of truth ``embedder.py`` builds
+its provider from. The values here are deliberately NOT imported from there:
+``weaviate_store_budget.py`` (the consumer of these constants) is imported
+inside the Temporal *workflow sandbox*, and ``inh_contracts.embedding``'s
+package ``__init__`` transitively imports httpx/threading -- exactly what
+"stdlib + embedding_defaults only" above is protecting against. Instead,
+``tests/test_embedding_defaults_contract.py`` pins the two copies equal, the
+same anti-drift pattern already used for the URL/dim defaults in
+``tests/test_settings_config_dedup_contract.py``.
 """
 
 from __future__ import annotations
@@ -35,5 +47,30 @@ BATCH_RETRY_SLEEP_BUDGET_S = 10
 # Weaviate write + fencing + lineage after embeddings finish.
 STORE_FIXED_OVERHEAD_SECONDS = 30
 
-# Hard cap so a pathological multi-thousand-chunk doc cannot pin a worker slot.
-STORE_MAX_TIMEOUT_SECONDS = 900
+# Ceiling on store_in_weaviate's StartToClose so one document cannot pin a
+# worker slot indefinitely (#228, raised for #298 -- see below).
+#
+# Originally 900s (15m), sized off the same worst-case-serial-retries model
+# as the rest of this budget. That model breaks down at real-world scale: a
+# 60,215-chunk document (#298's repro) needs well over 15 minutes of wall
+# clock to embed on CPU TEI even with *zero* retries, so every attempt hit
+# this ceiling and was cancelled deterministically -- retries changed
+# nothing, because a flat StartToClose has no way to tell "still making
+# progress, just slow" from "hung".
+#
+# store_in_weaviate now heartbeats real per-batch progress (#298:
+# weaviate.py's store_chunks_with_tenant), and its execute_activity call in
+# document_ingestion.py pairs that with a heartbeat_timeout (weaviate_store_
+# budget.weaviate_store_heartbeat_timeout). That is what makes raising this ceiling safe
+# instead of just moving the same failure further out: a worker that stops
+# advancing (crash, deadlock, network partition) is now caught by
+# heartbeat_timeout in roughly one worst-case batch, independent of how
+# large this ceiling is. This constant's job shrinks to "how long may a
+# document that IS legitimately progressing hold a worker slot" -- a much
+# larger number is fine because a stalled one no longer waits it out.
+#
+# 7200s (2h) comfortably covers #298's 60,215-chunk document at realistic
+# (non-worst-case-retry-storm) CPU TEI throughput, while still bounding
+# worst-case slot occupancy to a fixed, operationally-sane window rather
+# than removing the ceiling outright.
+STORE_MAX_TIMEOUT_SECONDS = 7200

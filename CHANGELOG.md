@@ -5,8 +5,171 @@ All notable changes to Inherent are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-09-09
+
+### Fixed
+
+- **Conversations are exempt from the `is_stale` freshness rule (#306
+  follow-up).** `is_stale` (#42) compares a chunk's `ingested_at` against
+  `FRESHNESS_MAX_AGE_DAYS`, a rule written for documents whose chunks are all
+  re-stamped together — a re-upload or refresh resets every chunk at once, so
+  an old timestamp really does mean "nothing re-ingested since". A
+  conversation does not have that shape: `ConversationMemoryWorkflow` appends
+  each flush's NEW chunks (`append=True`) and leaves earlier flushes' chunks
+  untouched by design, so an active conversation's opening turns would age
+  past the threshold and read `is_stale=true` while nothing about them is
+  stale — with no re-upload or refresh path to clear the flag. The shared
+  `SearchService._compute_is_stale` now takes optional `content_type` /
+  `document_type` signals and resolves a conversation chunk to
+  `is_stale=False` at any age, on BOTH read paths (`POST /v1/search` and
+  `GET /v1/documents/{id}/lineage`, which already shared this method). The
+  search query selects the chunk's `content_type` property so the signal
+  reaches it. File documents are unchanged: a caller passing neither signal
+  gets the pre-existing behavior exactly. `CONVERSATION_CONTENT_TYPE` moved to
+  the shared `inh_contracts.conversation` module (alongside the
+  `document_type` values) so the writing service (`inh-ingestion-svc`) and the
+  reading service (`inh-public-api-svc`) cannot drift.
+
+### Added
+
+- **Conversation ingestion: `/v1/conversations` API + signal-driven
+  `ConversationMemoryWorkflow` (#306).** A conversation is append-only and
+  grows, which `POST /v1/documents` cannot serve without either flooding the
+  embedding pipeline with per-turn documents or re-chunking/re-embedding the
+  whole history on every turn. `inh-public-api-svc` adds
+  `POST /v1/conversations/{external_id}/turns` (202, batch append, idempotent
+  per `turn_id`), `GET /v1/conversations/{external_id}` (turn/chunk counts,
+  last flush time), and `DELETE /v1/conversations/{external_id}` (cascades
+  chunks + vectors, reusing `delete_document_everywhere` unmodified) —
+  `src/api/v1/conversations.py` / `src/services/conversation_intake.py` /
+  `src/models/conversation.py`. POST publishes ONE MQ message PER TURN to the
+  new `core.conversation.turn.v1` topic (`ConversationTurnMessage`,
+  `inh_contracts.events`, mirroring `DocumentUploadMessage`) — public-api
+  still never talks to Temporal directly.
+  `inh-ingestion-svc`'s new `ConversationMemoryWorkflow`
+  (`src/temporal/workflows/conversation_memory.py`) is signaled via
+  `signal_with_start` with `WorkflowIDConflictPolicy.USE_EXISTING` (not
+  `TERMINATE_EXISTING` like the document path — a later turn must add itself
+  to the running conversation, never kill and restart it), buffers turns, and
+  flushes on a size-or-idle debounce (`wait_condition`, both configurable) —
+  the embedding-pipeline protection this issue exists for. Each flush runs
+  `redact_turns` (#307) → `chunk_conversation` (new, turn-aware: never splits
+  across a turn boundary, stamps `turn_index`/`role`/`ts`/`client` per chunk)
+  → `store_in_postgresql`/`store_in_weaviate` with a new `append=True` mode
+  (`StoreDocumentInput.append`, threaded through
+  `DatabaseService.store_processed_document` and the Weaviate store path) →
+  `update_workspace_stats`. `append=True` is additive growth (skip the
+  destructive full-replace delete; grow `chunk_count`/`text_length`/
+  `size_bytes` instead of overwriting them) so previously-flushed turns
+  survive every later flush; `append=False` (the default) is byte-identical
+  to `DocumentIngestionWorkflow`'s existing behavior. `continue_as_new` fires
+  every 500 turns; 24h with no new turns finalizes the conversation and
+  publishes `core.document.processed.v1`. `chunk_conversation` reads turn
+  text ONLY from `redact_turns`'s output, never the workflow's raw
+  pre-redaction buffer — the flush pipeline ordering is a security property,
+  not just an ordering convenience. Migration `020_conversation_documents.sql`
+  adds `document_type`/`external_id` (+ a partial unique index on
+  `(workspace_id, external_id)`) to `processed_documents`, which had neither
+  before this.
+- **Per-identity entitlements and quotas in the MCP dispatcher, keyed off
+  the `Principal` seam (#309).** Any valid key previously got unlimited
+  access to every HTTP-exposed MCP tool — #213's rate limiting bounds a
+  connection, not an identity's budget, so plan tiering on a hosted
+  deployment was decorative and one runaway self-hosted agent loop could
+  exhaust the box for every other tenant. `src/services/entitlements.py`
+  adds an `Entitlements` value (`calls_per_month` / `writes_per_day` /
+  `calls_per_minute` / `max_documents` / `upgrade_url`, all optional —
+  absent means unlimited) behind a pluggable `EntitlementsProvider`; the
+  shipped `NullEntitlementsProvider` returns unlimited for every principal,
+  so an API-key caller with no entitlement record configured is byte-for-
+  byte unchanged (no plan names or tier values ship in this repo — a
+  deployment wires in its own provider via `set_entitlements_provider`).
+  `src/mcp_server/quotas.py` enforces the configured limits in both
+  `call_tool` and `_call_tool_oauth`, after the existing permission/scope
+  check and before the handler runs, reusing #213's own
+  `TokenBucketRateLimiter` (Redis-backed when configured, in-memory
+  otherwise) for the three time-windowed limits rather than a second
+  limiter; `max_documents` is checked against a live `COUNT(*)` on
+  `processed_documents` and applies only to `upload_document` — never to
+  `delete_document` / `refresh_stale_source`, which don't increase the
+  count and would otherwise trap a caller at the cap with no way back
+  under it. A denial is `isError=True` with `structuredContent.error_class
+  == "quota_exceeded"` naming the limit, its value, the reset time (`null`
+  for `max_documents`, which has no time window), and an operator
+  `upgrade_url` when configured — the same shape `_call_tool_oauth`'s
+  `insufficient_scope` result already uses, since the MCP SDK's
+  `StreamableHTTPSessionManager(json_response=True)` has no status-code
+  override reachable from inside `tools/call`, the same constraint #295's
+  scope check already documented. Any infrastructure failure (entitlements
+  lookup, rate-limiter backend, the document-count query) fails OPEN with a
+  loud `logger.error` rather than locking out every caller on a sink blip;
+  only a genuinely observed over-limit fails closed. Per-call usage is
+  published via a fire-and-forget `asyncio.create_task`, so a metering sink
+  can never add latency to, or fail, a tool call.
+- **`redact_turns` Temporal activity: non-retryable, per-turn credential
+  redaction ahead of conversation ingestion (#307).** Conversations
+  captured from an assistant contain credentials by default — API keys
+  pasted for debugging, connection strings, bearer tokens, private keys —
+  and once embedded that material is in the vector store, in search
+  results, and in every agent context that retrieves it, with no remedy
+  after the fact. `services/inh-ingestion-svc/src/services/
+  redaction_patterns.py` adds a pattern-based detector registry (API-key
+  prefixes, JWTs, PEM private-key blocks, connection strings with embedded
+  credentials, and a high-entropy-token catch-all), extensible by
+  self-hosters via the new `REDACTION_PATTERNS_EXTRA` setting.
+  `src/temporal/activities/redact.py`'s `redact_turns` activity applies it
+  per turn: a turn whose own redaction pass raises is dropped (not the
+  whole batch) and audited to the new `redaction_audit` table (migration
+  `019_redaction_audit.sql`, `DatabaseService.record_redaction_failure`) —
+  by construction that audit row can never carry raw turn text, only
+  `turn_id`, which detector fired, and an error class/message. Two
+  independent non-retryable guards (`ApplicationError(non_retryable=True)`
+  plus the documented caller contract of `RetryPolicy(maximum_attempts=1)`)
+  keep a redaction failure from ever being retried, since retrying risks
+  storing the raw turn on a later attempt. Ships standalone and inert —
+  wired into no workflow yet, changing no existing pipeline's behaviour —
+  ahead of the conversation-ingestion workflow (#306) that will consume it.
+- **`/mcp` can now serve as an RFC 9728 OAuth 2.1 resource server, flag-gated
+  off by default (#295).** MCP clients (Claude Code included) discover an
+  authorization server via `WWW-Authenticate: Bearer` + a
+  `GET /.well-known/oauth-protected-resource` metadata document instead of
+  guessing — the prerequisite for a browser-popup sign-in flow, ahead of a
+  hosted OAuth rollout via Clerk. Everything is inert unless
+  `OAUTH_ENABLED=true` (default `false`): with it off, `/mcp`'s 401 and the
+  well-known route's absence are byte-identical to before this change — a
+  self-hosted stack must never advertise an authorization server it doesn't
+  run. With it on: `/mcp`'s 401 advertises `ApiKey` and `Bearer` together
+  (never silently dropping the scheme existing clients use); a presented
+  bearer token is verified against the configured authorization server's
+  JWKS (signature, `iss`, `exp`, and non-negotiably `aud` — a token minted
+  for a different resource is rejected, not warned about, per RFC 8707 Sec
+  2); an expired token is always 401, never 403; a token missing a tool's
+  required scope gets the spec's `insufficient_scope` shape as a JSON-RPC
+  `tools/call` result (HTTP 200, `isError: true`,
+  `structuredContent.error: "insufficient_scope"`) rather than an HTTP 403 —
+  the Streamable HTTP transport has no way to attach a custom status code to
+  a parsed `tools/call` response, so a per-tool scope check (which needs the
+  tool name inside that parsed body) cannot raise a transport-level
+  challenge the way the connection-level 401 above does; see
+  `src/mcp_server/http_transport.py`'s `_call_tool_oauth` docstring.
+  `X-API-Key` /
+  `Bearer ink_...` auth is completely unchanged, on `/mcp` and REST alike. A
+  new `Principal` abstraction (`src/services/auth.py`) is the seam #309's
+  per-identity entitlements/quotas will build on; #295 itself stops at
+  authentication — executing a tool call as an OAuth-authenticated identity
+  needs the account-linking work the commercial platform owns, not this
+  repo, so a validated OAuth caller gets an honest "not yet available"
+  rather than a guessed workspace. See `docs/reference/mcp-tools.md`
+  (#295).
+
 ### Changed
 
+- **`infra/` is now segregated per cloud provider: `infra/hetzner/` and
+  `infra/azure/` (#338, #355).** The Hetzner Terraform root moved from the
+  flat `infra/` directory into `infra/hetzner/` unchanged — remote state
+  keys are unaffected (they live in `backend.hcl`, not the path) — and
+  `infra/README.md` became a per-provider index. Operator commands change
+  from `cd infra` to `cd infra/hetzner`.
 - **Retrieval-eval golden corpus grown from 13 to 50 gated queries, closing
   the eval gate's ~7.7pp blind spot (#265).** #236 correctly derived the
   gate's per-metric tolerance as `max(EVAL_GATE_TOLERANCE,
@@ -46,6 +209,72 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Fixed
 
+- **Documents stored before #208 keep stale `text/markdown` content_type for
+  files like Dockerfile/Makefile/README/.gitignore/archive.tar.gz — backfilled
+  to `text/plain` to match the #208 fix (#288).** #208 changed the MCP fallback
+  for extensionless/unregistered-extension uploads from `text/markdown` to
+  `text/plain`, but only affected new uploads — existing documents retained the
+  wrong label, so a caller filtering `content_type = "text/markdown"` still got
+  Dockerfiles and tarballs. The correct type is now derived from the filename
+  for all affected documents via `scripts/backfill_stale_content_type.py`, which
+  syncs both Postgres and Weaviate in one pass. No re-indexing is required:
+  both types use the same extractor and chunking hint.
+- **`store_in_weaviate` no longer fails deterministically on chunk-heavy
+  documents on CPU TEI (#298).** #239 scaled `store_in_weaviate`'s
+  `StartToClose` with chunk count but capped it at 15 minutes so one
+  pathological document couldn't pin a worker slot forever — a 60,215-chunk
+  document (real-world repro, #298) needs well over 15 minutes to embed even
+  with zero retries, so it hit that cap on every attempt and never
+  completed. `store_chunks_with_tenant` now embeds via
+  `embedder.embed_texts_with_progress`, which drives the batch loop on the
+  event loop instead of one opaque blocking call, so `store_in_weaviate` can
+  heartbeat real per-batch progress; the activity's `execute_activity` call
+  pairs that with a `heartbeat_timeout` (~2× one batch's worst-case retry
+  window) so a worker that genuinely stops advancing is still caught in
+  roughly that same window, independent of document size. That is what makes
+  it safe to raise the StartToClose cap 15m → 2h
+  (`STORE_MAX_TIMEOUT_SECONDS`, `embedding_defaults.py`) instead of just
+  moving the same indeterminate hang further out. See
+  `docs/developer/learnings.md` #298 for the chunked-continuation
+  alternative considered and rejected.
+- **`s3rver` no longer installs itself at container start (#353).** It ran
+  `npx s3rver` on a bare `node:20-alpine`, downloading from npm on every
+  start while health probes were already counting against a `10s x 5 = 50s`
+  budget; a slow registry pushed it past that and `up --wait` tore the whole
+  stack down, failing the required `E2E smoke` gate on four unrelated
+  branches. The dev/CI stack now builds `docker/s3rver`, so the install
+  happens at build time and cannot race a probe. The release compose has no
+  build context (a pip-installed `inherent up` runs it from a wheel), so it
+  keeps `npx` with the version pinned to `s3rver@3.7.1` and the same
+  `90s + 12 x 10s` budget `text-embeddings-inference` uses. Both are pinned
+  to an exact version: a floating `s3rver` changed the S3 implementation
+  under every integration and E2E run with no commit.
+- **`inh-public-api-svc` reports its installed package version instead of a
+  hardcoded `0.2.0` (#278).** The literal had drifted from `pyproject.toml`, so
+  `/health/ready`, the OpenAPI document, and the new `whoami` surfaces all
+  published a stale number.
+- **`BOOTSTRAP_ACTION=create` now ensures the key's workspace exists (#277).**
+  It previously skipped MongoDB entirely, so a key created against a new
+  workspace id reported `workspace_ids: []` from `whoami` and failed every
+  request with `403`. An existing workspace is never renamed.
+- **A `403` from the API is no longer reported as a rejected key (#281).**
+  The CLI collapsed `401` and `403` into "API key rejected", so a
+  workspace-scope error told users to rotate a working key instead of passing
+  `--workspace`. The server's problem+json detail is now shown as-is.
+- **Table output no longer parses document content as Rich markup (#281).**
+  A search snippet containing `[bold]` or `[/]` had those spans silently
+  deleted, and a malformed tag raised `MarkupError`.
+- **`inherent docs show` prints one field per row (#281).** Eleven columns on
+  a single row elided every value at normal terminal widths.
+- **`inherent status --json` reports a real `engine_version` (#280).** It read
+  `/health`, which carries only `status` and `service`; the version lives on
+  `/health/ready`.
+- **`inherent up` names the engine version when its images are missing
+  (#280).** The default tag is the CLI's own version, so an unpublished
+  engine failed with a raw registry manifest error.
+- **`inherent connect` leaves no backup when nothing changes (#283).** A
+  re-run against the same stack wrote a fresh timestamped backup every time,
+  each holding a plaintext API key.
 - **Dead-letter rows left at `pending` for a document that later succeeded no
   longer read as broken, and can no longer replay a stale payload (#287).**
   #249 made a successful ingestion resolve that document's dead-letter rows,
@@ -63,6 +292,52 @@ All notable changes to Inherent are documented here. The format follows
   reads the same `DEAD_LETTER_UNRESOLVED_STATUSES` constant as the resolve, so
   the two cannot drift apart and silently reopen the replay hole.
 
+- **MCP `search_documents` / `search_memory` now mint an eval capture
+  `event_id`, so `report_feedback` is usable over MCP (#241).**
+  `record_query_event` was called only from the REST search handler
+  (`src/api/v1/search.py`) — a single-workspace MCP search returned
+  `{query, results, workspaces_searched}` and nothing else, while
+  `report_feedback`'s schema told the agent to "pass the event_id from the
+  search response." No MCP tool ever produced one, so the evals flywheel was
+  dead on the surface the product tells customers to use
+  (`claude mcp add --transport http`). The mint-record-stamp sequence now
+  lives in one shared helper, `eval_capture.capture_search_event`, which both
+  REST and MCP call for a single-workspace search — not a second,
+  independently-written capture call on the MCP side, so a field added to
+  capture in the future cannot land on one transport and silently miss the
+  other. A single-workspace `search_documents` / `search_memory` result now
+  carries `event_id` in its structured payload (`null` when capture is
+  disabled or the write failed, exactly like REST's `SearchResponse.event_id`
+  today); a multi-workspace fan-out still carries none, matching REST's own
+  single-workspace-only capture scope. REST's request/response shape and
+  captured fields are unchanged. Captured events also record which transport
+  produced them (`eval_query_events.transport`, migration 018, backfilled
+  `'rest'` for pre-existing rows), so analytics can tell MCP traffic from
+  REST traffic. **Capture is opt-in at the shared `_run_search` call site,
+  not an implicit side effect of calling it** (review finding): only
+  `search_documents` / `search_memory` request capture; `get_citations`
+  shares the identical retrieval path but never does, since it is a citation
+  *view* and has never returned an `event_id` an agent could attach feedback
+  to — minting one there would only have double-counted the query in MCP
+  analytics and permanently depressed MCP feedback-rate metrics with events
+  no agent could ever judge. Also disclosed: `eval_query_events.quality_verdict`
+  is always `NULL` for `transport='mcp'` rows and never reflects a fallback —
+  REST populates it from the adaptive quality gate that runs before its own
+  capture, and that gate does not exist on the MCP retrieval path. Record
+  *shape* cannot drift between the two transports (one shared
+  `capture_search_event` call, one field list); record *inputs* already do,
+  and that asymmetry is now pinned by a test and documented in
+  `docs/developer/search-sequence.md` and `docs/reference/mcp-tools.md`
+  rather than obscured by a test that patched the difference away.
+
+### Security
+
+- **The OpenAPI schema is no longer served outside development (#279).**
+  `docs_url` and `redoc_url` were already gated, but the unauthenticated
+  `/openapi.json` still listed every route — including the flag-gated
+  `/v1/admin/*` surface, whose 404-not-403 design exists precisely so its
+  existence is not confirmable.
+
 ### Added
 
 - **Chunk CRUD on public-API REST + MCP (#133).** Agents can append, edit, and
@@ -72,15 +347,126 @@ All notable changes to Inherent are documented here. The format follows
   is Option A — append at `max(chunk_index)+1`, delete leaves gaps
   (`chunk_index` is a stable id). Write routes use `/index/{chunk_index}` so
   they cannot collide with `GET` by BIGSERIAL `id`. Writes run synchronously
-  in public-api (PG + Weaviate with `embed_passage` / TEI `truncate`); empty
-  content is rejected on both surfaces. Vector failure compensates (Create
-  rolls back PG; Update restores prior content only if this request's hash is
-  still on the row; Delete aborts before PG). Create scans `content_risk`
-  rather than writing `"none"`. PG delete is workspace-scoped and aborts (no
-  `chunk_count` decrement) when `DELETE` rowcount ≠ 1 under concurrent races.
-  Failure parity pinned in `test_failure_parity.py`. MCP surface is stdio 17
-  / HTTP 13.
+  in public-api (PG + Weaviate via the shared `EmbeddingProvider` from #311);
+  empty content is rejected on both surfaces. Vector failure compensates
+  (Create rolls back PG; Update restores prior content only if this request's
+  hash is still on the row; Delete aborts before PG). Create scans
+  `content_risk` rather than writing `"none"`. PG delete is workspace-scoped
+  and aborts (no `chunk_count` decrement) when `DELETE` rowcount ≠ 1 under
+  concurrent races. A concurrent edit is refused (not silently overwritten)
+  by carrying the prior content_hash forward; ingestion's reprocess path logs
+  CRITICAL instead of silently discarding chunks created here; a Weaviate 204
+  on merge-update no longer trips the create/update success check as a
+  failure. `chunk_count` upper-bound checks in inh-ingestion-svc now ask the
+  database instead of trusting a monotonic counter, since append/hard-delete
+  leaves gaps. Failure parity pinned in `test_failure_parity.py`. MCP surface
+  is stdio 19 / HTTP 15 (16/12 baseline on `main` + this PR's 3 write tools).
 
+- **Release-gated PyPI wheels and CLI adopter-path smoke proof (#284, #285).** `inherent` and its shared contract dependency publish through OIDC approval, while the PR smoke lane installs the wheel into a clean virtual environment and exercises locally built engine images end to end. An image-only release tag (CLI version unchanged) now publishes `inh-contracts` without the `inherent` wheel build blocking it; the clean-venv wheel install check is now a real gate in front of PyPI publish, not a sibling job; `workflow_dispatch` runs off a tag route to TestPyPI instead of production PyPI by default; and CLI↔engine version-drift detection uses `packaging.version` so it no longer silently disables itself on PEP 440 prerelease builds (`0.7.0rc1`). `inherent up --engine-version` now hard-refuses a major-version mismatch unless passed `--force`, matching #284's acceptance criteria; `inh-contracts` publishes its normal sdist + wheel pair again (only the CLI needs the wheel-only build, for its force-included Compose file).
+
+- **Shared `EmbeddingProvider` abstraction: provider choice, auth, and a
+  Weaviate model-identity guard (#311).** inh-ingestion-svc and
+  inh-public-api-svc each carried their own TEI-only HTTP client with
+  divergent behavior — only the ingestion write path retried transient
+  failures; the public-api query path (`embed_query`) had none at all. Both
+  now build their client through one `EmbeddingProvider` interface in the
+  shared `inh-contracts` package (mirroring the existing `BaseMQService` /
+  `create_mq_service()` pattern), with `TEIProvider` (default, non-negotiable
+  — `make up`/docker-compose with no new env vars behaves exactly as before)
+  and a new `OpenAICompatibleProvider`. `EMBEDDING_PROVIDER` selects the
+  backend; switching is an env change only, with no call-site changes in
+  `weaviate.py` or `search.py`. `EMBEDDING_API_KEY` adds
+  `Authorization: Bearer` auth (never logged, and a key accidentally
+  embedded in `EMBEDDING_SERVICE_URL` is redacted before that URL is
+  logged) — TEI still works with no key set. The ingestion write path's
+  exponential-backoff-with-jitter retry (4xx except 429 fails fast; total
+  sleep time is now an *enforced* ceiling, not just an estimate) is shared
+  by both paths, closing the query-path retry gap — with independently
+  tuned wall-clock budgets, since the query path sits inside a synchronous,
+  user-facing request while the ingestion path embeds in a background
+  Temporal activity: `inh-public-api-svc`'s query embed defaults to 2
+  attempts × 5s timeout + 2s sleep budget (12s worst case, under the
+  incident's own 15s consumer ceiling), not the ingestion batch path's 3 ×
+  30s + 10s (100s, sized into `store_in_weaviate`'s StartToClose via
+  `weaviate_store_budget.py`) — the retry-budget constant alone bounds
+  cumulative sleep, not the attempts themselves, so reusing the batch
+  numbers on the query path (as first shipped) let retries there add up to
+  ~91.5s, blowing well past its own caller's ceiling. And a model-identity
+  mismatch on the query path now fails the whole request even inside a
+  multi-workspace search, instead of degrading to partial results for that
+  workspace. Separately — and highest severity — Weaviate collections are
+  created with `Configure.Vectorizer.none()` and never declare a dimension,
+  so querying with model A against a collection built with model B
+  previously returned plausible-looking noise with no error anywhere. The
+  active provider's identity (`EMBEDDING_MODEL_ID` + `EMBEDDING_DIM`) is now
+  persisted as each collection's Weaviate `description` and asserted on
+  every write (`WeaviateService`) and vector query (`SearchService`): a
+  mismatch is a hard error (`EmbeddingIdentityMismatchError`), always, never
+  a warning. An unstamped legacy collection is adopted (stamped) by the
+  write path only when it is verifiably EMPTY; a non-empty unstamped
+  collection is refused by default (`EmbeddingIdentityAdoptionRequiredError`)
+  rather than silently certified as matching the active provider, unless an
+  operator opts in via `EMBEDDING_ADOPT_UNSTAMPED_COLLECTIONS=true` after
+  confirming its vectors actually match. The read-only query path never
+  stamps or adopts, and now logs loudly (rather than staying silent) the
+  first time it queries a still-unstamped collection. See the "Embedding
+  provider & model-identity guard" section of `docs/reference/
+  configuration.md` for the wire formats, the full identity-guard policy,
+  and how to recover from a mismatch.
+
+- **MCP: `list_workspaces` tool returns caller's authorized workspaces and
+  enables discovery of valid `workspace_id` values (#297).** Agents can now
+  call `list_workspaces` to discover which workspaces an API key is authorized
+  for, fixing the previous pattern where workspace-targeted tools like
+  `upload_document` and `get_retrieval_health` required out-of-band knowledge
+  of a valid `workspace_id`. A workspace-scoped key sees exactly its one bound
+  workspace; a user-scoped key sees every workspace its owner owns. Response
+  includes `workspace_id`, `name` (from workspace metadata if present), 
+  `document_count`, and `is_scoped_binding` flag. Exported on both stdio and
+  HTTP transports with `read` permission.
+
+- **Azure cloud-native production Terraform target: AKS, HA, DR, one-click
+  deploy script, and docs (#338, #320).** `infra/azure/` provisions a full
+  production stack on AKS (3 zones, autoscaling node pools), Postgres
+  Flexible Server (zone-redundant HA), Cosmos DB for MongoDB (vCore), Azure
+  Cache for Redis (TLS, `noeviction`), Key Vault, and self-hosted TEI on AKS
+  as the default embedding path — an Azure OpenAI resource is provisioned
+  alongside it, one tfvar away, but stays inactive until the
+  `openai_compatible` provider path merges
+  ([#311](https://github.com/inherent-prime/inherent/issues/311),
+  [PR #314](https://github.com/inherent-prime/inherent/pull/314)) — with
+  MinIO on-cluster mirrored hourly to Blob Storage (GRS) for DR, keeping
+  object-storage RPO within the stack's ≤1h target — see
+  [#329](https://github.com/inherent-prime/inherent/issues/329) for native
+  Blob support. `scripts/deploy-azure.sh` bootstraps remote state and
+  applies the stack end to end; `docs/deploy/azure.md` documents every
+  layer, tfvar, and TCO estimate, and `docs/deploy/azure-dr-runbook.md` covers
+  zone/region-loss and PITR restore procedures. `ingress_profile = "appgw_waf"`
+  and least-privilege Postgres app roles remain tracked follow-ups under this
+  same epic.
+- **Installable `inherent` CLI groundwork with shared config, HTTP, and
+  agent-safe JSON output contracts (#276).**
+- **Checkout-free release bootstrap service that idempotently seeds one local
+  workspace and API key before the public API starts (#277).** `BOOTSTRAP_ACTION`
+  selects `seed` (start-up), `create` (mint an extra key, creating its
+  workspace only if absent and never renaming one), or `revoke` (by key prefix; refuses an ambiguous or unmatched
+  prefix rather than reporting a revocation that did not happen) — this is the
+  path `inherent keys create|revoke` uses so the CLI never opens a database.
+- **Authenticated `GET /v1/whoami` and MCP `whoami` identity surfaces using
+  the shared workspace-authorization rule (#278).**
+- **Flag-gated, read-only local admin listings for workspaces and API keys,
+  disabled by default for SaaS safety (#279).**
+
+- **`inherent up/down/status/logs/doctor` — one-command local stack lifecycle
+  from a pip-installed CLI, with secrets persisted at 0600 and service
+  counts taken from compose rather than hardcoded (#280).**
+- **`inherent docs/chunks/search` REST client commands that work against
+  local and remote stacks via `INHERENT_URL` / `INHERENT_API_KEY` (#281).**
+- **`inherent whoami/workspaces/keys` identity commands, with admin 404
+  fallback only for workspaces list and key writes local-only (#282).**
+- **`inherent connect claude|cursor` MCP config writer that merges into
+  existing agent config, backs up, and verifies `POST /mcp` initialize
+  (#283).**
 - **Evals: `POST /v1/evals/runs` accepts optional replay scoping, and
   `DELETE /v1/evals/events` an opt-in case purge (#250).** Run-replay was
   unscoped — `start_run` and `execute_run` each independently selected *every*

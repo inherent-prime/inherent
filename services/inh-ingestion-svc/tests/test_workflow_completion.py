@@ -254,6 +254,30 @@ class TestWeaviateStoreBudgetWiring:
         # #229: longer initial retry interval than the old 2s lockstep default.
         assert wv_kwargs[0]["retry_policy"].initial_interval == timedelta(seconds=5)
 
+    @pytest.mark.asyncio
+    async def test_store_in_weaviate_call_site_wires_heartbeat_timeout(self):
+        """#298: the workflow must pair a heartbeat_timeout with the
+        per-batch heartbeating store_chunks_with_tenant now does, and it
+        must be sized well under the StartToClose budget so a wedged worker
+        is caught long before the document's own (possibly hours-long)
+        budget would otherwise elapse."""
+        from src.temporal.weaviate_store_budget import weaviate_store_heartbeat_timeout
+        from src.temporal.workflows import document_ingestion
+
+        outputs = dict(HAPPY_OUTPUTS)
+        outputs["chunk_text"] = ChunkTextOutput(chunk_count=60_215)  # #298 repro scale
+        outputs["store_in_postgresql"] = StoreDocumentOutput(success=True, chunks_stored=60_215)
+        outputs["store_in_weaviate"] = StoreDocumentOutput(success=True, chunks_stored=60_215)
+        fake = FakeWorkflowModule(outputs)
+        wf = document_ingestion.DocumentIngestionWorkflow()
+        with patch.object(document_ingestion, "workflow", fake):
+            result = await wf.run(make_workflow_input())
+
+        assert result.success is True
+        wv_kwargs = fake.kwargs_for("store_in_weaviate")[0]
+        assert wv_kwargs["heartbeat_timeout"] == weaviate_store_heartbeat_timeout()
+        assert wv_kwargs["heartbeat_timeout"] < wv_kwargs["start_to_close_timeout"]
+
 
 class TestWorkflowPublishesCompletion:
     @pytest.mark.asyncio

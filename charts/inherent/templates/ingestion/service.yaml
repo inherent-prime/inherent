@@ -1,0 +1,28 @@
+{{- if .Values.ingestion.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: inh-ingestion
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inherent.labels" . | nindent 4 }}
+    {{- include "inherent.selectorLabels" (dict "component" "ingestion") | nindent 4 }}
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: {{ .Values.ingestion.metricsPort | quote }}
+    prometheus.io/path: "/metrics"
+spec:
+  # ClusterIP only, NOT on the ingress — shared static secret
+  # (INGESTION_API_KEY), fully privileged. See build spec: "Ingestion API
+  # (shared static secret, fully privileged): ClusterIP only, NOT on ingress".
+  type: ClusterIP
+  selector:
+    {{- include "inherent.selectorLabels" (dict "component" "ingestion") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.ingestion.apiPort }}
+      targetPort: http
+    - name: metrics
+      port: {{ .Values.ingestion.metricsPort }}
+      targetPort: metrics
+{{- end }}

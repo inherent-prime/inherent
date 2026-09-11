@@ -24,7 +24,7 @@ jobs:
   # Docs-only / agent-notes-only PRs (README, docs/, AGENTS.md, .memory/, ...)
   # cannot break the service matrix below, so they should not pay its cost
   # (Postgres service container + lint/format/typecheck/security/test/coverage
-  # x3 services). A workflow-level `paths-ignore` would be the obvious fix, but
+  # x4 packages). A workflow-level `paths-ignore` would be the obvious fix, but
   # `service-checks`/`root-tests` are not themselves the registered required
   # check -- "Required tests before merge" is -- and skipping this workflow at
   # the trigger level would leave THAT check unregistered and the PR stuck
@@ -55,8 +55,23 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
         run: |
           set -euo pipefail
-          git fetch origin "$BASE_REF"
-          git diff --name-only "origin/$BASE_REF...HEAD" > changed.txt
+          # Diff against `FETCH_HEAD`, not a remote-tracking ref. Nothing
+          # guarantees `origin/$BASE_REF` exists in this checkout -- `git
+          # fetch origin "$BASE_REF"` updates FETCH_HEAD, not necessarily
+          # `refs/remotes/origin/$BASE_REF` -- so the old form could abort on
+          # a missing ref or, worse, diff against a stale one and hand the
+          # filter below a wrong file list. An aborted step is caught by the
+          # `!= 'false'` fail-open conditions and by #303's empty-file check;
+          # a stale-but-valid diff is caught by neither.
+          #
+          # Fetch by the canonical upstream URL rather than the `origin`
+          # remote: on a `pull_request` event `GITHUB_REPOSITORY` is always
+          # the BASE repo (never the contributor's fork), so this resolves to
+          # the same place for fork and non-fork PRs alike, independent of how
+          # the checkout action configured `origin`.
+          UPSTREAM="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch "$UPSTREAM" "$BASE_REF"
+          git diff --name-only "FETCH_HEAD...HEAD" > changed.txt
           echo "Changed files:" && cat changed.txt
 
           # An allowlist of paths that cannot affect the running software
@@ -145,6 +160,17 @@ jobs:
             # Actual measured on CI run 31661196233 (main@bc6d56b): 99.53%.
             # floor(99.53) - 1 = 98.
             cov_fail_under: 98
+          - service: inh-cli
+            path: services/inh-cli
+            python-version: "3.11"
+            lint: uv run ruff check src tests
+            format: uv run black --check src tests
+            typecheck: uv run mypy src
+            security: uv run bandit -c pyproject.toml -r src
+            test: uv run pytest
+            # Actual measured locally on 2026-08-30: 90.9%.
+            # floor(90.9) - 1 = 89.
+            cov_fail_under: 89
 
     services:
       postgres:
@@ -249,6 +275,25 @@ jobs:
           uv run coverage report --include='src/temporal/activities/store.py' --fail-under=71
           uv run coverage report --include='src/temporal/activities/chunk.py' --fail-under=91
 
+      # Main-only: the coverage badge (see the `coverage-badge` job below)
+      # only ever reads the latest push-to-main numbers, so there is no
+      # reason to spend artifact storage/upload time on every PR run. The
+      # Test step above already wrote `.coverage` in this service's
+      # directory; `coverage json` re-reads it into a machine-readable
+      # summary (`totals.covered_lines` / `totals.num_statements`) without
+      # rerunning any tests.
+      - name: Export coverage summary
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        run: uv run coverage json -o coverage-summary.json
+
+      - name: Upload coverage summary
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.service }}
+          path: ${{ matrix.path }}/coverage-summary.json
+          retention-days: 7
+
       # #205: this step used to run unconditionally under `if: always()` and
       # unconditionally echo a "checks passed" line -- so a red job (a failed
       # Lint/Format/Type/Security/Test step above) still printed a green
@@ -345,3 +390,88 @@ jobs:
           else
             echo "All service checks passed."
           fi
+
+  # README trust-signal badge (docs/maintainers/readme-trim-plan.md #4): a
+  # single weighted-coverage number across all four services, published to a
+  # gist that shields.io's dynamic-badge endpoint reads.
+  #
+  # Main-only, not per-PR: a PR's coverage numbers are transient (they can
+  # regress and get fixed again before merge) and forking a PR cannot see
+  # `secrets.GIST_SECRET` anyway (GitHub withholds repo secrets from
+  # fork-triggered runs) -- publishing here would either no-op unpredictably
+  # or publish noise the badge shouldn't reflect. `main` is the one branch
+  # whose CI run is a merge-gate record, so it is the only trustworthy source
+  # for "what does main's coverage look like right now".
+  #
+  # Not a required check: it depends on an external gist (network flake,
+  # gist-owner token expiry) that has nothing to do with whether the code
+  # under test is correct, so it must never be able to block a merge --
+  # `required-tests` above only waits on `service-checks` / `root-tests`.
+  #
+  # No-ops (skips entirely, via the `vars.COVERAGE_GIST_ID != ''` guard)
+  # until the one-time setup in docs/maintainers/coverage-badge.md is done:
+  # a public gist seeded with `inherent-coverage.json`, the `COVERAGE_GIST_ID`
+  # repo variable, and a `GIST_SECRET` repo secret (a PAT with `gist` scope).
+  coverage-badge:
+    name: Publish coverage badge
+    runs-on: ubuntu-latest
+    needs: service-checks
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.COVERAGE_GIST_ID != ''
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Download coverage summaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-*
+          merge-multiple: false
+          path: coverage
+
+      # Weighted (not averaged) across services: summing covered/total lines
+      # first means a large service's coverage counts proportionally more
+      # than a small one's, matching how `cov_fail_under` already treats each
+      # service as its own floor rather than pretending they are equal-sized.
+      - name: Compute weighted coverage
+        id: coverage
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          from pathlib import Path
+
+          covered = 0
+          total = 0
+          for summary_path in sorted(Path("coverage").glob("*/coverage-summary.json")):
+              totals = json.loads(summary_path.read_text())["totals"]
+              covered += totals["covered_lines"]
+              total += totals["num_statements"]
+
+          if total == 0:
+              raise SystemExit("no coverage-summary.json files found under coverage/")
+
+          percent = round(100 * covered / total, 1)
+
+          if percent >= 90:
+              color = "brightgreen"
+          elif percent >= 80:
+              color = "green"
+          elif percent >= 70:
+              color = "yellowgreen"
+          elif percent >= 60:
+              color = "yellow"
+          else:
+              color = "orange"
+
+          print(f"percent={percent}")
+          print(f"color={color}")
+          PY
+
+      - name: Publish badge
+        uses: schneegans/dynamic-badges-action@v1.7.0
+        with:
+          auth: ${{ secrets.GIST_SECRET }}
+          gistID: ${{ vars.COVERAGE_GIST_ID }}
+          filename: inherent-coverage.json
+          label: coverage
+          message: ${{ steps.coverage.outputs.percent }}%
+          color: ${{ steps.coverage.outputs.color }}

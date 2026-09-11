@@ -1,0 +1,65 @@
+{{- if .Values.weaviate.backup.enabled }}
+# Enabling weaviate.backup.enabled turns on weaviate's ENABLE_MODULES=
+# backup-azure (see statefulset.yaml) -- the CAPABILITY to write a backup to
+# Blob. That module never triggers itself; something has to POST
+# /v1/backups/azure on a schedule, or "backups are enabled" is a no-op that
+# never actually produces a backup (the finding this CronJob fixes). This is
+# that trigger.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: inh-weaviate-backup
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inherent.labels" . | nindent 4 }}
+    {{- include "inherent.selectorLabels" (dict "component" "weaviate-backup") | nindent 4 }}
+spec:
+  schedule: {{ .Values.weaviate.backup.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 600
+      template:
+        metadata:
+          labels:
+            {{- include "inherent.labels" . | nindent 12 }}
+            {{- include "inherent.selectorLabels" (dict "component" "weaviate-backup") | nindent 12 }}
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: weaviate-backup
+              image: "{{ .Values.weaviate.backup.curlImage.repository }}:{{ .Values.weaviate.backup.curlImage.tag }}"
+              env:
+                - name: WEAVIATE_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ required "secrets.weaviate.name is required (WEAVIATE_API_KEY)" .Values.secrets.weaviate.name }}
+                      key: {{ .Values.secrets.weaviate.key }}
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -eu
+                  # One backup id per calendar day -- a second run on the
+                  # same day (e.g. a manual re-trigger) re-POSTs the same id,
+                  # which Weaviate's backup API rejects as already-exists
+                  # rather than silently double-writing; that's surfaced as
+                  # a non-2xx below and this Job fails loud rather than
+                  # masking it.
+                  BACKUP_ID="scheduled-$(date -u +%Y%m%d)"
+                  HTTP_CODE=$(curl -sS -o /tmp/backup-response.json -w '%{http_code}' \
+                    -X POST "http://weaviate:8080/v1/backups/azure" \
+                    -H "Authorization: Bearer ${WEAVIATE_API_KEY}" \
+                    -H "Content-Type: application/json" \
+                    -d "{\"id\": \"${BACKUP_ID}\"}")
+                  cat /tmp/backup-response.json
+                  echo
+                  if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+                    echo "weaviate backup request for '${BACKUP_ID}' failed with HTTP ${HTTP_CODE}" >&2
+                    exit 1
+                  fi
+                  echo "weaviate backup '${BACKUP_ID}' triggered (HTTP ${HTTP_CODE})."
+{{- end }}

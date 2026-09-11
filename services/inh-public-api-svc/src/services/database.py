@@ -267,7 +267,7 @@ class DatabaseService:
             result = await session.execute(
                 text(
                     """
-                    SELECT key_id, user_id, workspace_id, permissions, rate_limit,
+                    SELECT key_id, name, user_id, workspace_id, permissions, rate_limit,
                            expires_at, status
                     FROM api_keys
                     WHERE key_hash = :key_hash AND status = 'active'
@@ -293,6 +293,7 @@ class DatabaseService:
 
             return APIKeyInfo(
                 key_id=row.key_id,
+                name=row.name,
                 user_id=row.user_id,
                 workspace_id=row.workspace_id,
                 permissions=row.permissions if isinstance(row.permissions, list) else [],
@@ -300,6 +301,60 @@ class DatabaseService:
                 expires_at=row.expires_at,
                 status=row.status,
             )
+
+    async def list_admin_workspaces(self, *, offset: int, limit: int) -> list[dict[str, Any]]:
+        """List Mongo control-plane workspaces with cheap PostgreSQL document counts."""
+        from src.services.mongo_client import get_mongo_client
+
+        collection = get_mongo_client()[settings.mongodb_db_name]["workspaces"]
+        cursor = collection.find({}, {"_id": 1, "name": 1, "user_id": 1}).sort("_id", 1)
+        documents = await cursor.skip(offset).to_list(length=limit)
+        workspace_ids = [str(document["_id"]) for document in documents]
+        counts: dict[str, int] = {}
+        if workspace_ids:
+            async with self.session() as session:
+                result = await session.execute(
+                    text(
+                        """
+                        SELECT workspace_id, COUNT(*) AS document_count
+                        FROM processed_documents
+                        WHERE workspace_id = ANY(CAST(:workspace_ids AS text[]))
+                        GROUP BY workspace_id
+                        """
+                    ),
+                    {"workspace_ids": workspace_ids},
+                )
+                counts = {
+                    str(row.workspace_id): int(row.document_count) for row in result.fetchall()
+                }
+        return [
+            {
+                "workspace_id": str(document["_id"]),
+                "name": document.get("name"),
+                # A doc written by an older seeder may lack user_id; an admin
+                # listing must degrade, not 500, on one malformed row.
+                "user_id": str(document.get("user_id") or ""),
+                "document_count": counts.get(str(document["_id"]), 0),
+            }
+            for document in documents
+        ]
+
+    async def list_admin_keys(self, *, offset: int, limit: int) -> list[dict[str, Any]]:
+        """List only non-secret API-key columns for the local admin surface."""
+        async with self.session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT key_id, name AS key_name, key_prefix, workspace_id, user_id,
+                           permissions, status, created_at, last_used_at, expires_at
+                    FROM api_keys
+                    ORDER BY created_at DESC, key_id
+                    OFFSET :offset LIMIT :limit
+                    """
+                ),
+                {"offset": offset, "limit": limit},
+            )
+            return [dict(row._mapping) for row in result.fetchall()]
 
     # Document writes (upload lifecycle)
     async def get_document_id_by_filename(
@@ -363,6 +418,78 @@ class DatabaseService:
             )
             row = result.fetchone()
             return str(row.document_id) if row else None
+
+    # --- Conversations (#306) ------------------------------------------------
+
+    async def get_document_id_by_external_id(
+        self, workspace_id: str, external_id: str
+    ) -> str | None:
+        """Resolve a conversation's `processed_documents.document_id` from its
+        caller-supplied `external_id` (#306, migration 020).
+
+        Scoped to `document_type = 'conversation'` AND `workspace_id` so a
+        conversation in a workspace the caller can't see -- or an ordinary
+        file document whose (unrelated) `external_id` column happens to be
+        NULL, never matching here anyway -- reads as not-found rather than
+        leaking cross-workspace existence. Mirrors
+        `get_document_id_by_content_hash`'s shape.
+        """
+        async with self.session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT document_id
+                    FROM processed_documents
+                    WHERE workspace_id = :workspace_id
+                      AND external_id = :external_id
+                      AND document_type = 'conversation'
+                    """
+                ),
+                {"workspace_id": workspace_id, "external_id": external_id},
+            )
+            row = result.fetchone()
+            return str(row.document_id) if row else None
+
+    async def get_conversation(self, workspace_id: str, external_id: str) -> dict | None:
+        """Return a conversation's stats for `GET /v1/conversations/{external_id}`.
+
+        `turn_count`/`last_flushed_at` come from `processed_documents.metadata`
+        (ConversationMemoryWorkflow stamps both on every flush, see
+        StoreDocumentInput.metadata's docstring in inh-ingestion-svc) -- no
+        dedicated columns needed for either. Returns None when no
+        conversation with this `(workspace_id, external_id)` exists (never
+        distinguishes "wrong workspace" from "no such conversation").
+        """
+        async with self.session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT document_id, workspace_id, external_id, status,
+                           chunk_count, metadata, created_at, updated_at
+                    FROM processed_documents
+                    WHERE workspace_id = :workspace_id
+                      AND external_id = :external_id
+                      AND document_type = 'conversation'
+                    """
+                ),
+                {"workspace_id": workspace_id, "external_id": external_id},
+            )
+            row = result.fetchone()
+            if not row:
+                return None
+
+            metadata = row.metadata or {}
+            return {
+                "document_id": str(row.document_id),
+                "workspace_id": str(row.workspace_id),
+                "external_id": str(row.external_id),
+                "status": row.status,
+                "chunk_count": row.chunk_count or 0,
+                "turn_count": metadata.get("turn_count", 0),
+                "last_flushed_at": metadata.get("last_flushed_at"),
+                "created_at": row.created_at,
+                "updated_at": row.updated_at,
+            }
 
     async def create_or_reset_pending_document(
         self,
@@ -1265,6 +1392,34 @@ class DatabaseService:
             raise
         return doc is not None
 
+    async def get_document_count_for_workspaces(self, workspace_ids: list[str]) -> int:
+        """Total live document count across ``workspace_ids`` (#309).
+
+        Backs the ``max_documents`` entitlement check
+        (``src/mcp_server/quotas.py``): a plain ``COUNT(*)`` against
+        ``processed_documents`` -- the same authoritative table
+        ``get_documents_multi_workspace`` below counts against, NOT the
+        denormalized ``workspace_metadata.document_count`` column
+        ``list_workspaces`` displays (that counter is maintained
+        best-effort for a fast listing summary and is not the row a quota
+        decision should be pinned to). Returns 0 for an empty
+        ``workspace_ids`` list without a query, same short-circuit
+        ``get_documents_multi_workspace`` uses.
+        """
+        if not workspace_ids:
+            return 0
+        async with self.session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT COUNT(*) FROM processed_documents
+                    WHERE workspace_id = ANY(:workspace_ids)
+                """
+                ),
+                {"workspace_ids": workspace_ids},
+            )
+            return result.scalar() or 0
+
     # Multi-workspace document queries
     async def get_documents_multi_workspace(
         self,
@@ -1516,19 +1671,28 @@ class DatabaseService:
         top_score: float | None,
         quality_verdict: str | None,
         latency_ms: float,
+        transport: str = "rest",
     ) -> None:
-        """Record one captured search event (called from the capture background task)."""
+        """Record one captured search event (called from the capture background task).
+
+        ``transport`` (#241) records which surface produced the event --
+        ``"rest"`` or ``"mcp"`` -- so analytics can tell them apart. Defaults
+        to ``"rest"`` (migration 018's column default) purely so a caller that
+        predates #241 still compiles; every call site in this codebase passes
+        it explicitly (see ``src/services/eval_capture.py``).
+        """
         async with self.session() as session:
             await session.execute(
                 text(
                     """
                     INSERT INTO eval_query_events (
                         event_id, workspace_id, user_id, query_text, search_mode,
-                        result_doc_ids, result_chunk_ids, top_score, quality_verdict, latency_ms
+                        result_doc_ids, result_chunk_ids, top_score, quality_verdict,
+                        latency_ms, transport
                     ) VALUES (
                         :event_id, :workspace_id, :user_id, :query_text, :search_mode,
                         CAST(:result_doc_ids AS jsonb), CAST(:result_chunk_ids AS jsonb),
-                        :top_score, :quality_verdict, :latency_ms
+                        :top_score, :quality_verdict, :latency_ms, :transport
                     ) ON CONFLICT (event_id) DO NOTHING
                     """
                 ),
@@ -1543,6 +1707,7 @@ class DatabaseService:
                     "top_score": top_score,
                     "quality_verdict": quality_verdict,
                     "latency_ms": latency_ms,
+                    "transport": transport,
                 },
             )
             await session.commit()

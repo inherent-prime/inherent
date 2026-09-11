@@ -91,7 +91,7 @@ sequenceDiagram
 
     EP->>BG: schedule publish_audit_event<br/>(snippets, chunk_ids, risk counts, verdict, fallback)
     opt single-workspace scope and eval capture enabled for workspace
-        EP->>PG: await record_query_event (INSERT eval_query_events)
+        EP->>PG: await capture_search_event(transport="rest", …)<br/>— SAME shared helper MCP's search_documents / search_memory<br/>call for their own single-workspace search (#241)
         alt row is durable
             EP->>EP: response.event_id = event_id
         else capture failed
@@ -176,9 +176,10 @@ sequenceDiagram
 sequenceDiagram
     autonumber
     participant A as MCP client (agent)
-    participant T as _handle_search()<br/>mcp_server/server.py
+    participant T as _run_search() / _handle_search()<br/>mcp_server/server.py
     participant SS as SearchService
     participant PG as Postgres
+    participant CAP as eval_capture.capture_search_event()
 
     A->>T: call tool {query, workspace_id?, limit, min_score,<br/>search_mode, alpha, …} (api_key via transport)
     T->>T: _run_search(): empty query → "Error: Query is required"
@@ -192,9 +193,17 @@ sequenceDiagram
         T->>SS: search(workspace_id, user_id, request)
         Note over SS: identical internals — Diagram 2
         SS-->>T: results, tagged with workspace_id
+        opt caller requested capture, exactly one workspace resolved, and eval capture enabled
+            Note over T: capture is opt-in at this call site (#241 review) --<br/>only _handle_search (search_documents/search_memory) passes<br/>capture=True; get_citations shares this retrieval but never sets it,<br/>so it mints no orphan event
+            T->>CAP: capture_search_event(transport="mcp", workspace_id,<br/>user_id, request, response)
+            Note over CAP,PG: SAME shared helper REST calls (Diagram 1, #241) —<br/>mints event_id, awaits the INSERT, stamps response.event_id<br/>only when durable; never a dangling id (#240)
+            CAP->>PG: await record_query_event (INSERT eval_query_events,<br/>transport='mcp')
+            CAP->>PG: await purge_expired_events (retention) — awaited here,<br/>MCP has no BackgroundTasks queue to defer it onto
+        end
     end
     T->>T: sort by (-score, chunk_id, document_id), truncate to limit (#28)
-    T-->>A: markdown summary + structured JSON<br/>{workspace_id, chunk_id, document_id, document_name, content, score,<br/>score_source, is_stale, source_uri, content_hash}
+    T-->>A: markdown summary + structured JSON<br/>{workspace_id, chunk_id, document_id, document_name, content, score,<br/>score_source, is_stale, source_uri, content_hash} plus<br/>{query, results, workspaces_searched, event_id} at the top level
+    Note over T: event_id is null for a multi-workspace search,<br/>disabled capture, or a failed write — same contract as REST
 ```
 
 ## Behavioural invariants
@@ -214,10 +223,32 @@ sequenceDiagram
   workspace scope.
 - **MCP vs REST**: MCP searches workspaces sequentially (no semaphore/gather)
   and has no quality gate/fallback and no context-window expansion — those are
-  REST-endpoint features layered above `SearchService`.
-- **Eval capture is single-workspace only**: `event_id` / `record_query_event`
-  run only when the REST request resolved a single `workspace_id`. Multi-
-  workspace search never sets `event_id`.
+  REST-endpoint features layered above `SearchService`. Eval capture is the
+  exception: both transports share it (below). Because MCP never runs the
+  quality gate, **every `transport='mcp'` captured row has `quality_verdict =
+  NULL`** and never reflects a fallback substitution — REST's `quality_verdict`
+  is populated by the gate that runs before its own capture. Record *shape*
+  cannot drift between the transports (both write through the identical
+  `capture_search_event` call), but record *inputs* already differ at birth;
+  this is a stated, deliberate limitation (#241 review), not a bug — see
+  `test_mcp_capture_has_null_quality_verdict_that_rest_never_has` in
+  `tests/unit/test_mcp_search_capture.py`. Anyone segmenting eval analytics by
+  `quality_verdict` must account for it.
+- **Eval capture is single-workspace only, opt-in at the call site, and
+  shared by both transports (#241, #241 review finding 1)**: `event_id` /
+  `eval_capture.capture_search_event()` run only when the request resolved a
+  single `workspace_id` AND the caller asked to capture — REST's
+  `search_documents` route always asks, and on MCP only `_handle_search`
+  (`search_documents` / `search_memory`) passes `capture=True` to
+  `_run_search`; `get_citations` shares the same retrieval but leaves capture
+  at its default (`False`), since it is a citation *view*, not a user-facing
+  search an agent can attach feedback to, and minting an event it never
+  surfaces would just double-count the query. REST and MCP both call the ONE
+  `capture_search_event` helper rather than each minting the event
+  independently, so a field added to capture later cannot land on one
+  transport and miss the other. A multi-workspace search never sets
+  `event_id` on either transport. The captured row's `transport` column
+  (`'rest'` | `'mcp'`) records which surface produced it.
 - **Nothing after retrieval slows the response**: audit publishing, eval
   capture, and metrics are background/best-effort; a cold DB or down MQ never
   affects the serving path.
@@ -270,9 +301,16 @@ everything else.
 1. **Postgres — authorization first.** API-key validation and
    `get_user_workspace_ids(user_id)` decide which workspaces the fan-out may
    touch. Weaviate is never queried for a workspace Postgres didn't authorize.
-2. **TEI — query becomes a vector.** Same model as ingestion
-   (`EMBEDDING_MODEL_ID`, default `BAAI/bge-small-en-v1.5`, 384-dim), so
-   query↔chunk cosine comparison is meaningful. Keyword mode skips this.
+2. **Embedding provider — query becomes a vector.** Same provider/model as
+   ingestion (`EMBEDDING_PROVIDER`/`EMBEDDING_MODEL_ID`, default `tei` /
+   `BAAI/bge-small-en-v1.5`, 384-dim — see
+   [Embedding provider & model-identity guard](../reference/configuration.md#embedding-provider-model-identity-guard)),
+   so query↔chunk cosine comparison is meaningful. Before the vector query
+   runs, the target collection's persisted embedding identity is checked
+   against the active provider's — a mismatch is a hard error, not a warning
+   (#311), so a misconfigured model can't silently return noise instead of
+   real matches. Keyword mode skips both the embed call and the identity
+   check entirely.
 3. **Weaviate — the actual search.** `nearVector` / `hybrid` / `bm25` per
    workspace, scoped to collection + tenant. Ranking and scoring is purely
    Weaviate — Postgres plays no part.
