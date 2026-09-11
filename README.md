@@ -62,8 +62,9 @@ git clone https://github.com/inherent-prime/inherent.git && cd inherent
 make quickstart   # .env, install, Compose stack, dev workspace + API key, health check
 ```
 
-Then follow [Getting Started Locally](docs/getting-started/local.md) for the
-bootstrap step, endpoints, smoke test, and troubleshooting. Going live? Read
+`make quickstart` already seeds a dev workspace and API key (via `bootstrap`).
+Then follow [Getting Started Locally](docs/getting-started/local.md) for
+endpoints, a smoke test, and troubleshooting. Going live? Read
 [Taking Inherent to Production](docs/deploy/production.md) or
 [Deploy to Azure](docs/deploy/azure.md).
 

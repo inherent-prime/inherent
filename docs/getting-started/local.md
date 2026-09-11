@@ -493,6 +493,13 @@ boot. Watch logs until `Ready` appears:
 make logs SVC=text-embeddings-inference
 ```
 
+The embedding backend is swappable via `EMBEDDING_PROVIDER` (`tei` by
+default, or a hosted OpenAI-compatible API with `EMBEDDING_API_KEY`). A
+model-identity guard rejects queries against a Weaviate collection built
+with a different `(model_id, dimension)` pair than the active provider, so
+switching providers on an existing collection fails loudly instead of
+returning silent noise.
+
 ## Next Steps
 
 - Use [docs/examples/README.md](../examples/README.md) for endpoint-by-endpoint
