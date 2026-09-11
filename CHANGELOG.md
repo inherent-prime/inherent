@@ -340,6 +340,28 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Added
 
+- **Chunk CRUD on public-API REST + MCP (#133).** Agents can append, edit, and
+  hard-delete individual chunks on both surfaces: `POST` /
+  `PATCH` / `DELETE /v1/chunks/{document_id}/index/{chunk_index}` and MCP
+  `create_chunk` / `edit_chunk` / `delete_chunk` (write permission). Ordering
+  is Option A — append at `max(chunk_index)+1`, delete leaves gaps
+  (`chunk_index` is a stable id). Write routes use `/index/{chunk_index}` so
+  they cannot collide with `GET` by BIGSERIAL `id`. Writes run synchronously
+  in public-api (PG + Weaviate via the shared `EmbeddingProvider` from #311);
+  empty content is rejected on both surfaces. Vector failure compensates
+  (Create rolls back PG; Update restores prior content only if this request's
+  hash is still on the row; Delete aborts before PG). Create scans
+  `content_risk` rather than writing `"none"`. PG delete is workspace-scoped
+  and aborts (no `chunk_count` decrement) when `DELETE` rowcount ≠ 1 under
+  concurrent races. A concurrent edit is refused (not silently overwritten)
+  by carrying the prior content_hash forward; ingestion's reprocess path logs
+  CRITICAL instead of silently discarding chunks created here; a Weaviate 204
+  on merge-update no longer trips the create/update success check as a
+  failure. `chunk_count` upper-bound checks in inh-ingestion-svc now ask the
+  database instead of trusting a monotonic counter, since append/hard-delete
+  leaves gaps. Failure parity pinned in `test_failure_parity.py`. MCP surface
+  is stdio 19 / HTTP 15 (16/12 baseline on `main` + this PR's 3 write tools).
+
 - **Release-gated PyPI wheels and CLI adopter-path smoke proof (#284, #285).** `inherent` and its shared contract dependency publish through OIDC approval, while the PR smoke lane installs the wheel into a clean virtual environment and exercises locally built engine images end to end. An image-only release tag (CLI version unchanged) now publishes `inh-contracts` without the `inherent` wheel build blocking it; the clean-venv wheel install check is now a real gate in front of PyPI publish, not a sibling job; `workflow_dispatch` runs off a tag route to TestPyPI instead of production PyPI by default; and CLI↔engine version-drift detection uses `packaging.version` so it no longer silently disables itself on PEP 440 prerelease builds (`0.7.0rc1`). `inherent up --engine-version` now hard-refuses a major-version mismatch unless passed `--force`, matching #284's acceptance criteria; `inh-contracts` publishes its normal sdist + wheel pair again (only the CLI needs the wheel-only build, for its force-included Compose file).
 
 - **Shared `EmbeddingProvider` abstraction: provider choice, auth, and a

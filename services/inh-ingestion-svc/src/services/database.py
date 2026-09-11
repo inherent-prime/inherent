@@ -1077,6 +1077,31 @@ class DatabaseService:
                 # unmodified" vs "the store activities are destructive
                 # full-replace") resolves: extend, don't fork.
                 if not append:
+                    # Chunks created/edited via the public-api chunk CRUD
+                    # endpoints (#133) live in this same table with no
+                    # workflow/run marker, so the wholesale delete below
+                    # would silently discard them. There is no cross-service
+                    # lock preventing that here; at minimum make the loss
+                    # loud instead of silent so it can be
+                    # investigated/reconciled.
+                    manual_chunks = session.execute(
+                        select(func.count())
+                        .select_from(self.document_chunks)
+                        .where(
+                            self.document_chunks.c.processed_document_id == doc_id,
+                            self.document_chunks.c.metadata["chunk_source"].astext == "manual_api",
+                        )
+                    ).scalar_one()
+                    if manual_chunks:
+                        logger.critical(
+                            "Reprocessing is deleting chunks created via the "
+                            "public-api chunk CRUD endpoints; their content will "
+                            "be lost and replaced by re-chunked source content",
+                            document_id=message.document_id,
+                            workflow_run_id=workflow_run_id,
+                            manual_chunk_count=manual_chunks,
+                        )
+
                     # Delete existing chunks for this document (for re-processing)
                     session.execute(
                         self.document_chunks.delete().where(
@@ -1610,6 +1635,29 @@ class DatabaseService:
             ).fetchall()
 
             return [dict(row._mapping) for row in results]
+
+    async def chunk_index_exists(self, document_id: str, chunk_index: int) -> bool:
+        """Check whether a chunk row exists at ``chunk_index`` (#133 follow-up).
+
+        Chunks created via the public-api chunk CRUD endpoints can leave
+        gaps (hard-delete, no sibling re-index) or push ``chunk_count``
+        below ``max(chunk_index)``, so ``chunk_index < chunk_count`` is no
+        longer a reliable existence proxy in either direction. This is the
+        real check.
+        """
+        if not self.engine:
+            raise RuntimeError("Database not connected")
+
+        with self.get_session() as session:
+            row = session.execute(
+                select(self.document_chunks.c.id)
+                .where(
+                    self.document_chunks.c.document_id == document_id,
+                    self.document_chunks.c.chunk_index == chunk_index,
+                )
+                .limit(1)
+            ).first()
+            return row is not None
 
     async def get_document_chunks(
         self,

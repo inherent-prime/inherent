@@ -274,6 +274,7 @@ class TestChunkEditWorkspaceOwnership:
                 "chunk_count": 5,
             }
         )
+        mock_db_svc.chunk_index_exists = AsyncMock(return_value=True)
         mock_get_db.return_value = mock_db_svc
 
         resp = client.patch(
@@ -312,6 +313,7 @@ class TestChunkEditWorkspaceOwnership:
                 "chunk_count": 5,
             }
         )
+        mock_db_svc.chunk_index_exists = AsyncMock(return_value=False)
         mock_get_db.return_value = mock_db_svc
 
         resp = client.patch(

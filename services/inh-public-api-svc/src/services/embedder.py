@@ -186,9 +186,29 @@ def embed_query(text: str) -> tuple[float, ...]:
     -- but tuned to this path's own, much smaller wall-clock budget (PR #314
     review finding 2; see the module docstring's "Wall clock" note): the
     ingestion defaults alone would let retries here blow past the caller's
-    real timeout ceiling.
+    real timeout ceiling. Sized for short search queries — do not feed chunk
+    bodies through this cache; use :func:`embed_passage` for writes.
     """
     vec = embed_single(
         _provider(), text, max_retries=_batch_max_retries(), retry_budget_s=_retry_budget_s()
     )
     return tuple(vec)
+
+
+def embed_passage(text: str) -> list[float]:
+    """Embed a chunk body for Weaviate writes (#133).
+
+    Goes through the same shared ``EmbeddingProvider`` as :func:`embed_query`
+    (#311) -- ``TEIEmbeddingProvider.embed_batch`` always sends TEI
+    ``truncate: true`` unconditionally, so a real paragraph does not 413
+    against TEI's 256-token cap without this function needing a truncate
+    flag of its own. Reuses the query path's tuned (not the ingestion batch
+    path's ~100s worst-case) retry budget -- chunk writes run synchronously
+    inside a public-api HTTP request, the same wall-clock constraint
+    ``embed_query`` is tuned for, not a background Temporal activity. Not
+    LRU-cached: chunk bodies would pin up to 1024 full texts + vectors for
+    the process lifetime.
+    """
+    return embed_single(
+        _provider(), text, max_retries=_batch_max_retries(), retry_budget_s=_retry_budget_s()
+    )

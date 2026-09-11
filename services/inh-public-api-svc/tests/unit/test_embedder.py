@@ -1,13 +1,15 @@
-"""Unit tests for the query embedder (#311).
+"""Unit tests for the query/passage embedder (#311, #133).
 
 Mirrors inh-ingestion-svc's ``tests/test_embedder.py``: the actual HTTP/
 retry/batching logic lives once in ``inh_contracts.embedding`` (see that
-package's own tests for wire-format-fixture and retry-wall-clock coverage).
-These tests exercise this module's own job: env plumbing (dimension,
-provider selection, retry count), the ``embed_query`` behavior contract
-(zero-vector shortcut, lru_cache, retry pass-through -- this used to have
-ZERO retry, the exact ingestion/query divergence #311 closes), and that no
-embedding API key ever reaches a log line.
+package's own tests for wire-format-fixture, retry-wall-clock, and TEI
+``truncate: true`` coverage). These tests exercise this module's own job:
+env plumbing (dimension, provider selection, retry count), the
+``embed_query`` behavior contract (zero-vector shortcut, lru_cache, retry
+pass-through -- this used to have ZERO retry, the exact ingestion/query
+divergence #311 closes), the ``embed_passage`` behavior contract (chunk
+writes for #133 -- same provider/retry plumbing as ``embed_query``, but not
+LRU-cached), and that no embedding API key ever reaches a log line.
 """
 
 from __future__ import annotations
@@ -114,6 +116,81 @@ def test_embed_dim_overridable_via_env(monkeypatch):
     _install_fake(monkeypatch, dim=768)
     vec = embed_query("test")
     assert len(vec) == 768
+
+
+# --- embed_passage: chunk writes (#133) ----------------------------------------------------------
+
+
+def test_embed_passage_returns_correct_dim(monkeypatch):
+    from src.services.embedder import embed_passage
+
+    _install_fake(monkeypatch)
+    vec = embed_passage("A real paragraph that would exceed MiniLM's 256-token cap " * 20)
+    assert len(vec) == 384
+    assert isinstance(vec, list)
+
+
+def test_embed_passage_empty_is_zero_vector_no_http(monkeypatch):
+    from src.services.embedder import embed_passage
+
+    fake = _install_fake(monkeypatch)
+    vec = embed_passage("")
+    assert vec == [0.0] * 384
+    assert fake.calls == []
+
+
+def test_embed_passage_is_not_lru_cached(monkeypatch):
+    """Unlike embed_query, chunk bodies must not pin an LRU cache slot --
+    repeated calls with the same text must re-embed every time."""
+    from src.services.embedder import embed_passage
+
+    fake = _install_fake(monkeypatch)
+    embed_passage("same chunk body")
+    embed_passage("same chunk body")
+    assert len(fake.calls) == 2
+
+
+def test_embed_passage_retries_transient_failure(monkeypatch):
+    """Same retry mechanism as embed_query (#311 item 5), reused verbatim
+    for writes instead of reimplemented."""
+    from src.services.embedder import embed_passage
+
+    monkeypatch.setenv("EMBEDDING_BATCH_MAX_RETRIES", "3")
+    fake = _install_fake(monkeypatch)
+    calls = {"n": 0}
+    real_embed_batch = fake.embed_batch
+
+    def flaky(texts):
+        calls["n"] += 1
+        if calls["n"] < 2:
+            raise httpx.ReadTimeout("queue saturated", request=httpx.Request("POST", "/embed"))
+        return real_embed_batch(texts)
+
+    monkeypatch.setattr(fake, "embed_batch", flaky)
+    vec = embed_passage("a chunk body")
+    assert len(vec) == 384
+    assert calls["n"] == 2
+
+
+def test_embed_passage_uses_the_same_tuned_retry_budget_as_embed_query(monkeypatch):
+    """Chunk writes run synchronously inside a public-api HTTP request --
+    the same wall-clock constraint embed_query is tuned for (PR #314 review
+    finding 2), not the ingestion batch path's ~100s worst case. Proven by
+    observing the actual kwargs embed_single receives, not just the source."""
+    from src.services import embedder
+
+    captured: dict[str, object] = {}
+    real_embed_single = embedder.embed_single
+
+    def spy(provider, text, **kwargs):
+        captured.update(kwargs)
+        return real_embed_single(provider, text, **kwargs)
+
+    monkeypatch.setattr(embedder, "embed_single", spy)
+    _install_fake(monkeypatch)
+    embedder.embed_passage("a chunk body")
+    assert captured["max_retries"] == embedder._batch_max_retries()
+    assert captured["retry_budget_s"] == embedder._retry_budget_s()
 
 
 # --- retry parity with the ingestion write path (#311 item 5) -----------------------------------
