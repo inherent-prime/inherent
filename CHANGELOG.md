@@ -5,7 +5,7 @@ All notable changes to Inherent are documented here. The format follows
 
 ## [Unreleased]
 
-## [0.7.0] — 2026-09-09
+## [0.7.0] — 2026-09-11
 
 ### Fixed
 

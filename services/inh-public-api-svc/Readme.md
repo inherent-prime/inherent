@@ -62,7 +62,11 @@ MONGODB_URI=mongodb://localhost:27018 \
 uv run python -m src.main
 ```
 
-The MCP server uses stdio rather than an HTTP transport in the current implementation.
+The MCP server is exposed over two transports: stdio, and Streamable HTTP at
+`POST /mcp` (#220) in this same service process. 19 tools are available on
+stdio; 15 of those are exposed over HTTP. See
+[docs/reference/mcp-tools.md](../../docs/reference/mcp-tools.md) for the
+per-transport surface and why the four stdio-only tools are excluded.
 
 ## REST API Endpoints
 
@@ -113,6 +117,8 @@ The MCP server uses stdio rather than an HTTP transport in the current implement
 | `delete_document` | Permanently delete a document (vectors + chunks + stored bytes) |
 | `report_feedback` | Record a verdict on a captured search event (closes the evals feedback loop) |
 | `get_retrieval_health` | Retrieve the workspace's retrieval scorecard |
+| `whoami` | Identify the calling key: workspace, permissions, expiry (#278) |
+| `list_workspaces` | List the workspaces the calling key is authorized for (#297) |
 
 ## Validation Commands
 
