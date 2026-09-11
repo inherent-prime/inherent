@@ -589,20 +589,22 @@ def create_app(settings: Settings) -> FastAPI:
         # exists to close.
         document = await resolve_owned_document(db_svc, document_id, workspace_id)
 
-        # Reject an out-of-range chunk_index before doing any more work
-        # (#134 follow-up item 8): get_document_status already returned
-        # chunk_count for free, so this costs zero extra queries, and it
-        # saves a wasted embed_text round-trip (and, pre-the-#137-fix, a
-        # confusingly "successful" no-op) for a chunk that was never going
-        # to exist. NOTE: chunk_count is nullable (Column default=0, but the
-        # column itself allows NULL) and is legitimately 0 for a document
-        # that's still `pending`/`processing` -- every chunk_index 404s in
-        # that case, which is CORRECT (there is nothing to edit yet), not a
-        # symptom of the ownership guard above misfiring. This check only
-        # runs once ownership is already proven, so it is a distinct 404
-        # from the one above, not a workspace-scoping bug.
-        chunk_count = document.get("chunk_count") or 0
-        if chunk_index < 0 or chunk_index >= chunk_count:
+        # Reject a missing chunk_index before doing any more work (#134
+        # follow-up item 8): saves a wasted embed_text round-trip (and,
+        # pre-the-#137-fix, a confusingly "successful" no-op) for a chunk
+        # that was never going to exist. This check only runs once ownership
+        # is already proven, so it is a distinct 404 from the one above, not
+        # a workspace-scoping bug.
+        #
+        # NOTE (#133 follow-up): this used to compare chunk_index against
+        # chunk_count as a zero-query proxy for existence. Chunks created via
+        # the public-api chunk CRUD endpoints can leave gaps (hard-delete, no
+        # sibling re-index) or push chunk_count below max(chunk_index), so
+        # that proxy is no longer reliable in either direction -- it could
+        # both 404 a real chunk and let a stale gap index through. This does
+        # a real existence check instead.
+        if chunk_index < 0 or not await db_svc.chunk_index_exists(document_id, chunk_index):
+            chunk_count = document.get("chunk_count") or 0
             raise HTTPException(
                 status_code=404,
                 detail=(

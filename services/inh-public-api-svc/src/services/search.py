@@ -375,7 +375,7 @@ class SearchService:
                 },
             )
 
-        if response.status_code not in (200, 201):
+        if response.status_code not in (200, 201, 204):
             raise RuntimeError(
                 f"Weaviate chunk upsert failed ({response.status_code}): " f"{response.text[:500]}"
             )
@@ -423,10 +423,14 @@ class SearchService:
             )
             return
 
-        # Missing class (never ingested) — same "already clean" posture as
-        # delete_document_vectors.
+        # Missing class/tenant (never ingested, or a ghost document whose
+        # workspace tenant was never provisioned) — same "already clean"
+        # posture as delete_document_vectors.
         body = response.text
-        if collection_name in body and "could not find class" in body.lower():
+        body_lower = body.lower()
+        if (collection_name in body and "could not find class" in body_lower) or (
+            "tenant not found" in body_lower
+        ):
             return
 
         raise RuntimeError(f"Weaviate chunk delete failed ({response.status_code}): {body[:500]}")

@@ -21,6 +21,7 @@ still return its error response).
 
 import asyncio
 
+from src.models.document import DocumentChunk
 from src.services.database import DatabaseService
 from src.services.metrics import record_compensation_exhausted
 from src.utils import get_logger
@@ -152,6 +153,61 @@ async def delete_chunk_with_retry(
                 )
                 record_compensation_exhausted(operation)
     return False
+
+
+async def delete_chunk_row_with_retry(
+    database: DatabaseService,
+    document_id: str,
+    workspace_id: str,
+    chunk_index: int,
+    *,
+    operation: str,
+    attempts: int = MARK_FAILED_ATTEMPTS,
+    backoff_seconds: float = MARK_FAILED_BACKOFF_SECONDS,
+) -> DocumentChunk | None:
+    """Delete a chunk row on the mainline Delete path, retrying transient DB
+    failures with backoff (#133).
+
+    Unlike :func:`delete_chunk_with_retry` (a rollback compensation called
+    from an ``except`` block, where the caller is already failing), this is
+    the primary PG write after the Weaviate vector delete has already
+    succeeded. Exhaustion must not be swallowed: it re-raises the last error
+    after the loud CRITICAL log + metric so the caller still reports failure
+    instead of claiming a clean delete while the PG row survives without a
+    vector.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return await database.delete_document_chunk(document_id, workspace_id, chunk_index)
+        except Exception as exc:
+            last_exc = exc
+            if attempt < attempts:
+                logger.warning(
+                    "Chunk delete PG write failed; retrying",
+                    error=str(exc),
+                    document_id=document_id,
+                    chunk_index=chunk_index,
+                    operation=operation,
+                    attempt=attempt,
+                    attempts=attempts,
+                )
+                await asyncio.sleep(backoff_seconds * 2 ** (attempt - 1))
+            else:
+                logger.critical(
+                    "Chunk delete PG write exhausted retries — vector already "
+                    "deleted, PG row may survive without a vector; manual "
+                    "reconciliation required",
+                    error=str(exc),
+                    document_id=document_id,
+                    workspace_id=workspace_id,
+                    chunk_index=chunk_index,
+                    operation=operation,
+                    attempts=attempts,
+                )
+                record_compensation_exhausted(operation)
+    assert last_exc is not None
+    raise last_exc
 
 
 async def restore_chunk_content_with_retry(

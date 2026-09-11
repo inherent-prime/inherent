@@ -14,8 +14,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import httpx
+
 from src.models.document import DocumentChunk
 from src.services.compensation import (
+    delete_chunk_row_with_retry,
     delete_chunk_with_retry,
     restore_chunk_content_with_retry,
 )
@@ -58,7 +61,12 @@ async def create_chunk_everywhere(
     if not fields:
         return ChunkWriteOutcome(found=False)
 
-    chunk = await database.append_document_chunk(document_id, workspace_id, content)
+    chunk = await database.append_document_chunk(
+        document_id,
+        workspace_id,
+        content,
+        metadata={"chunk_source": "manual_api"},
+    )
     if chunk is None:
         # Race: document vanished between lookup and append.
         return ChunkWriteOutcome(found=False)
@@ -78,6 +86,21 @@ async def create_chunk_everywhere(
             source_uri=fields.get("storage_path") or fields.get("storage_url"),
             create=True,
         )
+    except httpx.TimeoutException:
+        # A client-side timeout means Weaviate may have already applied the
+        # write server-side before the response reached us — deleting the PG
+        # row here would orphan that vector as an undeletable ghost (its UUID
+        # is never revisited; retries append a new chunk_index). Leave the PG
+        # row in place and let the caller's 503 prompt a retry/reconcile
+        # instead of silently creating a ghost.
+        logger.critical(
+            "Chunk vector upsert timed out; write outcome unknown, PG row "
+            "left in place to avoid orphaning a possibly-created vector",
+            document_id=document_id,
+            workspace_id=workspace_id,
+            chunk_index=chunk.chunk_index,
+        )
+        raise
     except Exception:
         await delete_chunk_with_retry(
             database,
@@ -117,8 +140,18 @@ async def update_chunk_everywhere(
     if prior is None:
         return ChunkWriteOutcome(found=False)
 
-    updated = await database.update_document_chunk(document_id, workspace_id, chunk_index, content)
+    prior_content_hash = (prior.metadata or {}).get("content_hash")
+    updated = await database.update_document_chunk(
+        document_id,
+        workspace_id,
+        chunk_index,
+        content,
+        only_if_content_hash=prior_content_hash,
+    )
     if updated is None:
+        # Absent, or (when prior_content_hash was known) a concurrent writer
+        # already changed the content out from under this read — do not
+        # clobber that write with stale content.
         return ChunkWriteOutcome(found=False)
 
     content_hash = (updated.metadata or {}).get("content_hash") or ""
@@ -175,7 +208,13 @@ async def delete_chunk_everywhere(
     search = await get_search_service()
     await search.delete_chunk_vector(workspace_id, fields["user_id"], document_id, chunk_index)
 
-    deleted = await database.delete_document_chunk(document_id, workspace_id, chunk_index)
+    deleted = await delete_chunk_row_with_retry(
+        database,
+        document_id,
+        workspace_id,
+        chunk_index,
+        operation="chunk_delete_pg_row",
+    )
     if deleted is None:
         # Concurrent delete won — report not-found.
         return ChunkDeleteOutcome(found=False)

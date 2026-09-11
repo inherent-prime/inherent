@@ -1020,9 +1020,20 @@ async def _handle_create_chunk(key_info: APIKeyInfo, arguments: dict) -> list[Te
     from src.services.chunk_writes import create_chunk_everywhere
 
     database = await get_database()
-    outcome = await create_chunk_everywhere(
-        database, document_id, document.workspace_id, str(content)
-    )
+    try:
+        outcome = await create_chunk_everywhere(
+            database, document_id, document.workspace_id, str(content)
+        )
+    except Exception as exc:
+        logger.error(
+            "Chunk create failed after compensation attempt",
+            document_id=document_id,
+            workspace_id=document.workspace_id,
+            error=str(exc),
+        )
+        return [
+            TextContent(type="text", text="Error: Failed to create the chunk. Please try again later.")
+        ]
     if not outcome.found or outcome.chunk is None:
         return [TextContent(type="text", text=f"Error: Document '{document_id}' not found")]
 
@@ -1057,9 +1068,21 @@ async def _handle_edit_chunk(key_info: APIKeyInfo, arguments: dict) -> list[Text
     from src.services.chunk_writes import update_chunk_everywhere
 
     database = await get_database()
-    outcome = await update_chunk_everywhere(
-        database, document_id, document.workspace_id, chunk_index_int, str(content)
-    )
+    try:
+        outcome = await update_chunk_everywhere(
+            database, document_id, document.workspace_id, chunk_index_int, str(content)
+        )
+    except Exception as exc:
+        logger.error(
+            "Chunk update failed after compensation attempt",
+            document_id=document_id,
+            workspace_id=document.workspace_id,
+            chunk_index=chunk_index_int,
+            error=str(exc),
+        )
+        return [
+            TextContent(type="text", text="Error: Failed to update the chunk. Please try again later.")
+        ]
     if not outcome.found or outcome.chunk is None:
         return [TextContent(type="text", text="Error: Chunk not found")]
 
@@ -1090,9 +1113,21 @@ async def _handle_delete_chunk(key_info: APIKeyInfo, arguments: dict) -> list[Te
     from src.services.chunk_writes import delete_chunk_everywhere
 
     database = await get_database()
-    outcome = await delete_chunk_everywhere(
-        database, document_id, document.workspace_id, chunk_index_int
-    )
+    try:
+        outcome = await delete_chunk_everywhere(
+            database, document_id, document.workspace_id, chunk_index_int
+        )
+    except Exception as exc:
+        logger.error(
+            "Chunk deletion failed; chunk left intact",
+            document_id=document_id,
+            workspace_id=document.workspace_id,
+            chunk_index=chunk_index_int,
+            error=str(exc),
+        )
+        return [
+            TextContent(type="text", text="Error: Failed to delete the chunk. Please try again later.")
+        ]
     if not outcome.found:
         return [TextContent(type="text", text="Error: Chunk not found")]
 
