@@ -367,10 +367,14 @@ class SearchService:
                 },
             )
         else:
+            # Weaviate 1.27's merge-object PATCH does NOT accept `tenant` as a
+            # query param the way GET/DELETE do -- a multi-tenant class 422s
+            # with "request was without tenant" (reproduced live against
+            # Compose; see PR #248 review). `tenant` has to travel in the
+            # JSON body instead, alongside properties/vector.
             response = await client.request(
                 "PATCH",
                 f"/v1/objects/{collection_name}/{object_id}",
-                params={"tenant": tenant_name},
                 json={
                     "properties": {
                         "content": content,
@@ -380,6 +384,7 @@ class SearchService:
                         "content_risk_reasons": risk_reasons,
                     },
                     "vector": vector,
+                    "tenant": tenant_name,
                 },
             )
 

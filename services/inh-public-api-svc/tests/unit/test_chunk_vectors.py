@@ -123,8 +123,13 @@ class TestUpsertChunkVector:
         expected_uuid = chunk_vector_uuid(WS, USER, DOC, 2)
         coll = _get_workspace_collection_name(WS)
         assert call[0][1] == f"/v1/objects/{coll}/{expected_uuid}"
-        assert call.kwargs["params"] == {"tenant": _get_user_tenant_name(USER)}
+        # Weaviate 1.27's merge-object PATCH 422s on a multi-tenant class if
+        # `tenant` is sent as a query param the way GET/DELETE accept it --
+        # reproduced live against Compose (PR #248 review). It must travel
+        # in the JSON body instead.
+        assert "params" not in call.kwargs or call.kwargs["params"] is None
         body = call.kwargs["json"]
+        assert body["tenant"] == _get_user_tenant_name(USER)
         assert body["vector"] == [1.0, 0.0]
         assert body["properties"]["content"] == "edited"
         assert "content_hash" in body["properties"]
