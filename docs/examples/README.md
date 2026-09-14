@@ -139,7 +139,11 @@ Max size: 50 MB. Binary formats are magic-byte sniffed against the declared
 is rejected with `400 Bad Request`. Legacy `application/msword` (.doc) and
 Outlook `application/vnd.ms-outlook` (.msg) are explicitly rejected with a
 `400` naming the supported replacement (.docx / .eml) rather than accepted
-and garbled. A generic or absent `Content-Type` (`application/octet-stream`)
+and garbled. Legacy `application/vnd.ms-excel` (.xls) and
+`application/vnd.ms-powerpoint` (.ppt) are likewise unsupported and also
+`400`; their rejection message adds a sentence naming the modern replacement
+(.xlsx / .pptx) on top of the full allowed-types list above. A generic or
+absent `Content-Type` (`application/octet-stream`)
 falls back to the filename's extension when that extension is registered
 (e.g. uploading `main.py` with no declared type) — see
 [supported file types](../reference/file-types.md) for the full extension

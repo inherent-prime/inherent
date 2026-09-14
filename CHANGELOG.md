@@ -5,6 +5,53 @@ All notable changes to Inherent are documented here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- **Empty-string workspace scopes now raise instead of silently widening a
+  query (#212).** Three `inh-ingestion-svc` methods guarded a WHERE clause
+  with a bare `if workspace_id:`, which is falsy for `""` and so dropped the
+  filter entirely -- the same fail-open shape #177 closed in
+  `get_dead_letter_jobs`. `WeaviateService.search_chunks` and
+  `DatabaseService.get_processing_stats` now reject a blank scope outright
+  (neither has a legitimate unscoped meaning; `get_processing_stats`'s
+  `workspace_id` is mandatory as a result), while
+  `DatabaseService.get_documents_by_tenant` keeps `None` as a deliberate
+  tenant-wide opt-out and rejects only `""`. None of the three was reachable
+  from an HTTP route, so this closes a latent shape rather than an active
+  vulnerability.
+
+### Fixed
+
+- **`_delivery_count` and five sibling Redis MQ guards survive `python -O`
+  (#256).** Bare `assert self._redis is not None` statements are stripped
+  under `-O`/`PYTHONOPTIMIZE=1`, moving the failure from a clear assertion to
+  an `AttributeError` frames away from the cause. All six now raise
+  `RuntimeError` naming the violated boundary.
+- **PPTX speaker-note extraction reports object-model drift instead of
+  swallowing it (#255).** `_pptx_slide_notes` reads python-pptx attributes
+  via `getattr` (the library ships no usable stubs), which made a renamed or
+  removed attribute indistinguishable from a slide that legitimately has no
+  notes. A missing attribute now logs a warning naming it; a real
+  `has_notes_slide=False` stays silent. Extraction still never fails a
+  document over one slide's notes.
+- **Embedder truncation comment no longer cites a model the stack does not
+  run (#201).** `inh-public-api-svc`'s `embed_passage` documented "TEI's
+  256-token cap" while `EMBEDDING_MODEL_ID` defaults to
+  `BAAI/bge-small-en-v1.5`, whose real ceiling is 512 -- a comment naming the
+  wrong token budget for anyone reasoning about chunk sizing from it. It now
+  points at `EMBEDDING_MAX_TOKENS` as the source of truth, and a test pins
+  that default against the default model's limit so the two cannot drift.
+
+### Changed
+
+- **`make type-check` covers all four Python packages (#360).** It ran mypy
+  for only `inh-public-api-svc` and `inh-cli` while CI's matrix typechecks
+  all four, so the documented pre-push gate was strictly weaker than CI --
+  #357 shipped a real ingestion-svc type error that passed locally, failed
+  CI, and skipped the Test and coverage steps behind it. A parity guard test
+  now fails if a package CI typechecks is absent from the target.
+- Legacy `.xls`/`.ppt` upload rejections now add a bespoke sentence naming the modern replacement (`.xlsx`/`.pptx`) on top of the existing generic supported-types message, on both REST and MCP (#192).
+
 ### Removed
 
 - **Legacy `DocumentProcessor` / `src/services/processor.py` deleted (#185).** The pre-Temporal synchronous ingestion pipeline was dead code (no runtime entrypoint imported it, per its own deprecation docstring from #23) carrying a duplicate file-type dispatch chain and `errors="ignore"` decoding already superseded by the live `FILE_TYPE_REGISTRY`-driven Temporal activities; its OCR/extraction test coverage was confirmed fully duplicated by `test_image_ocr.py`'s `TestActivityImageOCR`, `test_extraction_by_type.py`, and `test_temporal_activities.py` before deletion, so `processor.py` and its processor-only tests (`test_processor.py`, `test_processor_extraction.py`, `test_processor_backend.py`, `test_integration.py`, and the `TestProcessorImageOCR` / `TestProcessorCompletionPublishing` classes) were removed with no coverage loss.

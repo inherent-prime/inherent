@@ -110,25 +110,31 @@ flowchart LR
 
 ### 2.1 Intake (public-api, synchronous, request-scoped)
 
-`intake_document` (`services/inh-public-api-svc/src/services/document_intake.py:37-365`)
+`intake_document` (`services/inh-public-api-svc/src/services/document_intake.py:38-373`)
 is the single validate/dedup/store/enqueue path shared by REST
 (`POST /v1/documents`) and the MCP `upload_document` tool — a pure move, not
 two implementations (`document_intake.py:1-9`). In order:
 
-1. **Explicit-unsupported check** (`document_intake.py:108-110`) — a format
+1. **Explicit-unsupported check** (`document_intake.py:109-111`) — a format
    with a real replacement (legacy `.doc`, Outlook `.msg`) is rejected with a
-   message naming the replacement, before the generic lookup.
+   message naming the replacement, before the generic lookup. A legacy format
+   with no dedicated replacement flow yet (`.xls`, `.ppt`) instead falls
+   through to the generic-lookup miss below, whose message gains one bespoke
+   sentence naming its replacement (`.xlsx` / `.pptx`) on top of the full
+   allow-list — see `legacy_format_hint_for_mime`
+   (`inh_contracts/file_types.py`) and
+   [Supported file types](../reference/file-types.md#validation-at-upload).
 2. **Three-signal type validation.** An upload carries three independent
    signals — declared `Content-Type`, filename extension, and actual bytes —
    and any pairwise disagreement is caught:
-   - `get_spec_for_upload` (`document_intake.py:117`) resolves the declared
+   - `get_spec_for_upload` (`document_intake.py:118`) resolves the declared
      MIME type against `FILE_TYPE_REGISTRY`; falls back to the filename
      extension only when the declared type is generic/absent.
-   - `check_extension_consistency` (`document_intake.py:132`) — a filename
+   - `check_extension_consistency` (`document_intake.py:140`) — a filename
      extension registered to a *different* type than the declared one is
      rejected (a real contradiction); text extensions never trigger this
      (`text/plain` is a truthful `Content-Type` for `.md`/`.csv`/etc).
-   - `sniff_content_type` (`document_intake.py:162`) — the bytes' magic
+   - `sniff_content_type` (`document_intake.py:170`) — the bytes' magic
      signature must agree with the declared type.
    See [Supported file types](../reference/file-types.md#validation-at-upload)
    for the full validation table; this page's contribution is *why* three
@@ -137,7 +143,7 @@ two implementations (`document_intake.py:1-9`). In order:
    extension, or bytes that don't match either).
 3. **Size validation** against the format's `max_size_bytes` override or the
    global 50 MB cap.
-4. **Dedup** (`document_intake.py:178-226`) — `(workspace_id, content_hash)`
+4. **Dedup** (`document_intake.py:186-234`) — `(workspace_id, content_hash)`
    first, then `(workspace_id, filename)`. A content-hash match on a non-
    `failed` document short-circuits entirely: no S3 write, no pending-row
    reset, no MQ publish — re-uploading identical bytes is a pure read. A
@@ -145,10 +151,10 @@ two implementations (`document_intake.py:1-9`). In order:
    through and re-indexes under the same `document_id` (#60's edited-content
    reindex).
 5. **S3 upload**, then **a durable `pending` row** written *before*
-   enqueueing (`document_intake.py:254-278`) — so `GET /v1/documents/{id}`
+   enqueueing (`document_intake.py:262-286`) — so `GET /v1/documents/{id}`
    can find the document immediately instead of 404ing until ingestion
    finishes, and so the upload is recoverable if the next step fails.
-6. **Publish `document.uploaded`** (`document_intake.py:309-311`). If this
+6. **Publish `document.uploaded`** (`document_intake.py:317-319`). If this
    fails, the file is already durably stored — the response is `201` with
    `status="failed"` (never a request failure), and the row is marked
    failed through `mark_document_failed_with_retry` (§7).

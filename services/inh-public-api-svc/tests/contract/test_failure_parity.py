@@ -736,6 +736,108 @@ class TestUploadLegacyFormatRejectionParity:
 
 
 # ---------------------------------------------------------------------------
+# Upload: legacy .xls/.ppt bespoke rejection sentence (#192)
+# ---------------------------------------------------------------------------
+
+
+class TestUploadLegacyXlsRejectionMessageParity:
+    """#192: unlike .doc/.msg above (EXPLICITLY_UNSUPPORTED, full message
+    replacement), legacy .xls/.ppt keep NO FILE_TYPE_REGISTRY entry and no
+    EXPLICITLY_UNSUPPORTED entry either -- they still fall through to the
+    generic "unsupported type" rejection on both surfaces, which now gains
+    one ADDITIVE bespoke sentence (`legacy_format_hint_for_mime`) naming the
+    modern replacement, on top of the full allow-list both surfaces already
+    printed. This is the surface-level pin that both REST and MCP actually
+    produce that sentence for a declared ``application/vnd.ms-excel``
+    upload -- inh-contracts' test_file_types.py::TestLegacyFormatHint covers
+    the message-building contract itself in isolation.
+    """
+
+    async def test_rest_and_mcp_both_name_xlsx_for_legacy_xls(self):
+        # --- REST: declared application/vnd.ms-excel ------------------------
+        rest_db = _mock_db()
+        rest_db.get_document_id_by_content_hash = AsyncMock(return_value=None)
+        rest_db.get_document_id_by_filename = AsyncMock(return_value=None)
+
+        rest_storage = MagicMock()
+        rest_storage.generate_key.return_value = f"{WS}/fake-uuid/report.xls"
+        rest_storage.upload_file = AsyncMock(return_value=f"{WS}/fake-uuid/report.xls")
+        rest_storage.build_storage_url.return_value = f"s3://docs/{WS}/fake-uuid/report.xls"
+        rest_storage._bucket = "docs"
+        rest_mq = AsyncMock()
+        rest_mq.publish = AsyncMock(return_value="1-0")
+
+        write_key = _write_key()
+        application = create_app()
+        application.dependency_overrides[get_api_key_info] = lambda: write_key
+        application.dependency_overrides[get_write_permission] = lambda: write_key
+        application.dependency_overrides[resolve_workspace_write] = lambda: ResolvedAuth(
+            key_info=write_key, workspace_id=WS
+        )
+        application.dependency_overrides[get_database] = lambda: rest_db
+        try:
+            with (
+                patch(
+                    "src.services.document_intake.get_storage_service",
+                    return_value=rest_storage,
+                ),
+                patch(
+                    "src.services.document_intake.get_mq_service",
+                    new_callable=AsyncMock,
+                    return_value=rest_mq,
+                ),
+            ):
+                transport = ASGITransport(app=application)
+                async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                    rest_response = await ac.post(
+                        "/v1/documents",
+                        headers={"X-API-Key": "ink_test_key"},
+                        files={
+                            "file": (
+                                "report.xls",
+                                io.BytesIO(b"\xd0\xcf\x11\xe0 fake OLE compound file bytes"),
+                                "application/vnd.ms-excel",
+                            )
+                        },
+                    )
+        finally:
+            application.dependency_overrides.clear()
+
+        assert rest_response.status_code == 400
+        rest_detail = rest_response.json()["detail"]
+        # Additive, not a replacement (#192) -- the full generic allow-list
+        # is still there, distinguishing this from the .doc/.msg case above.
+        assert "Allowed types:" in rest_detail
+        assert "legacy .xls format" in rest_detail
+        assert ".xlsx" in rest_detail
+        rest_storage.upload_file.assert_not_awaited()
+        rest_db.create_or_reset_pending_document.assert_not_awaited()
+        rest_mq.publish.assert_not_awaited()
+
+        # --- MCP: declared content_type, the scenario this fix covers ------
+        # (an OMITTED content_type for "report.xls" defaults to text/plain
+        # via `_default_upload_content_type` -- a separate, pre-existing
+        # behavior this issue does not change; declaring the binary MIME
+        # explicitly is the realistic shape of an .xls upload attempt.)
+        mcp_db = _mock_db()
+        mcp_result = await _call_mcp_tool(
+            "upload_document",
+            {
+                "api_key": "ink_k",
+                "filename": "report.xls",
+                "content": "pretend this is spreadsheet text",
+                "content_type": "application/vnd.ms-excel",
+            },
+            mcp_db,
+        )
+
+        assert "Error" in mcp_result[0].text
+        assert "legacy .xls format" in mcp_result[0].text
+        assert ".xlsx" in mcp_result[0].text
+        mcp_db.create_or_reset_pending_document.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
 # Upload: a NEWLY-ACCEPTED type's magic-byte mismatch -- both surfaces
 # (#121/#122). Same contract as TestUploadContentTypeMismatchParity above,
 # pinned separately for a type that did not exist before this workstream, so
