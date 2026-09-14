@@ -389,4 +389,3 @@ class TestDocumentCompletionMessageModel:
         assert data["content_type"] == "text/plain"
         assert data["size_bytes"] == 512
         assert data["storage_backend"] is None
-

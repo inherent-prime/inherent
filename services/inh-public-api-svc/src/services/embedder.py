@@ -201,8 +201,12 @@ def embed_passage(text: str) -> list[float]:
     Goes through the same shared ``EmbeddingProvider`` as :func:`embed_query`
     (#311) -- ``TEIEmbeddingProvider.embed_batch`` always sends TEI
     ``truncate: true`` unconditionally, so a real paragraph does not 413
-    against TEI's 256-token cap without this function needing a truncate
-    flag of its own. Reuses the query path's tuned (not the ingestion batch
+    against the configured model's ``max_input_length`` without this
+    function needing a truncate flag of its own. That ceiling is a property
+    of ``EMBEDDING_MODEL_ID``, not a constant -- the default
+    ``BAAI/bge-small-en-v1.5`` caps at 512 tokens -- so read
+    ``EMBEDDING_MAX_TOKENS`` as the source of truth rather than any number
+    quoted here (#201). Reuses the query path's tuned (not the ingestion batch
     path's ~100s worst-case) retry budget -- chunk writes run synchronously
     inside a public-api HTTP request, the same wall-clock constraint
     ``embed_query`` is tuned for, not a background Temporal activity. Not

@@ -348,6 +348,24 @@ class TestExtractTextActivity:
             _resolve_extractor("application/vnd.ms-powerpoint")
         assert exc_info.value.non_retryable
 
+    def test_legacy_xls_and_ppt_still_unregistered_after_192(self):
+        """#192 added a bespoke "convert to xlsx/pptx" sentence to the
+        REST/MCP rejection messages (inh-contracts' file_types.py,
+        `legacy_format_hint_for_mime`) but deliberately did NOT touch this
+        extraction-dispatch path or its message -- #117 removed per-type
+        branching from dispatch and #192 keeps that: the two tests above
+        (unchanged) already pin that `_resolve_extractor` still hard-fails
+        identically for both legacy MIME types. This test only pins that the
+        two facts hold together: still unregistered here, AND the hint table
+        (consulted by REST/MCP, never by this module) agrees on both types
+        so the two never drift on which formats are "legacy with a
+        replacement"."""
+        from inh_contracts.file_types import get_spec_for_mime, legacy_format_hint_for_mime
+
+        for legacy_mime in ("application/vnd.ms-excel", "application/vnd.ms-powerpoint"):
+            assert get_spec_for_mime(legacy_mime) is None
+            assert legacy_format_hint_for_mime(legacy_mime) is not None
+
     @patch("src.temporal.shared_services.get_staging_service")
     @patch("src.temporal.shared_services.get_storage_service")
     @pytest.mark.asyncio

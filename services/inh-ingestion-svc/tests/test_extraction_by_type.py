@@ -483,6 +483,20 @@ class TestXlsxFailurePaths:
 
         assert get_spec_for_mime("application/vnd.ms-excel") is None
 
+    def test_legacy_xls_rejection_names_xlsx(self):
+        """#192: dispatch is unchanged by the above (still unregistered,
+        still hard-fails) -- only the rejection message gains one bespoke,
+        actionable sentence naming the modern replacement. Full contract
+        coverage lives in inh-contracts' test_file_types.py
+        (TestLegacyFormatHint); this pins that the ingestion-svc side of the
+        same contract (no registry entry) and the message improvement are
+        both still true from this package's point of view."""
+        from inh_contracts.file_types import legacy_format_hint_for_mime
+
+        hint = legacy_format_hint_for_mime("application/vnd.ms-excel")
+        assert hint is not None
+        assert ".xlsx" in hint
+
     def test_memory_error_during_construction_propagates_not_wrapped(self, monkeypatch):
         """#215 pattern-sweep hit: `_extract_xlsx_text`'s `except Exception`
         around `openpyxl.load_workbook()` construction had no `except
@@ -635,6 +649,15 @@ class TestPptxFailurePaths:
         from inh_contracts.file_types import get_spec_for_mime
 
         assert get_spec_for_mime("application/vnd.ms-powerpoint") is None
+
+    def test_legacy_ppt_rejection_names_pptx(self):
+        """#192: same treatment as the xls case above -- dispatch unchanged,
+        message gains a bespoke sentence naming pptx."""
+        from inh_contracts.file_types import legacy_format_hint_for_mime
+
+        hint = legacy_format_hint_for_mime("application/vnd.ms-powerpoint")
+        assert hint is not None
+        assert ".pptx" in hint
 
     def test_memory_error_during_construction_propagates_not_wrapped(self, monkeypatch):
         """#215 pattern-sweep hit: `_extract_pptx_text`'s `except Exception`

@@ -126,4 +126,3 @@ class TestActivityImageOCR:
         _install_fake_ocr(monkeypatch, image_to_string_exc=ValueError)
         text = _extract_image_text(PNG_BYTES, FILENAME)
         assert text == PLACEHOLDER
-

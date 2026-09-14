@@ -99,6 +99,7 @@ from inh_contracts.file_types import (
     explicitly_unsupported_message_for_extension,
     explicitly_unsupported_message_for_mime,
     get_spec_for_extension,
+    legacy_format_hint_for_mime,
     mcp_mime_types,
     mime_type_for_extension,
 )
@@ -1364,17 +1365,23 @@ async def _handle_upload_document(key_info: APIKeyInfo, arguments: dict) -> list
     content_type = declared_content_type or _default_upload_content_type(filename)
 
     if content_type not in SUPPORTED_TEXT_MIME_TYPES:
-        return [
-            TextContent(
-                type="text",
-                text=(
-                    f"Error: upload_document accepts only these text content types: "
-                    f"{', '.join(SUPPORTED_TEXT_MIME_TYPES)} (got '{content_type}'). "
-                    f"Other formats (PDF, DOCX, PNG, ...) are REST-only by design — use "
-                    f"POST /v1/documents instead."
-                ),
-            )
-        ]
+        message = (
+            f"Error: upload_document accepts only these text content types: "
+            f"{', '.join(SUPPORTED_TEXT_MIME_TYPES)} (got '{content_type}'). "
+            f"Other formats (PDF, DOCX, PNG, ...) are REST-only by design — use "
+            f"POST /v1/documents instead."
+        )
+        # #192: additive, not a replacement -- same treatment as REST's
+        # document_intake (see that module for the shared helper). A
+        # declared legacy MIME (currently .xls/.ppt) gets one more sentence
+        # naming its modern replacement on top of this message, same as
+        # REST -- #211 is the open cross-surface divergence defect, so both
+        # surfaces call the same `legacy_format_hint_for_mime` rather than
+        # each hand-rolling their own wording.
+        legacy_hint = legacy_format_hint_for_mime(content_type)
+        if legacy_hint is not None:
+            message = f"{message} {legacy_hint}"
+        return [TextContent(type="text", text=message)]
 
     workspace_id, error = await _resolve_single_workspace_for_upload(
         key_info, arguments.get("workspace_id")
