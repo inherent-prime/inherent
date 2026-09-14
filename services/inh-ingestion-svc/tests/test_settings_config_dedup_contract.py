@@ -111,3 +111,23 @@ def test_mongodb_uri_default_is_single_sourced() -> None:
 def test_mongodb_uri_default_matches_golden_value() -> None:
     """A deliberate URI change must come here; an accidental one fails."""
     assert DEFAULT_MONGODB_URI == GOLDEN_MONGODB_URI
+
+
+def test_embedding_max_tokens_default_matches_default_model_limit() -> None:
+    """#201: `EMBEDDING_MAX_TOKENS`'s default must stay consistent with
+    `EMBEDDING_MODEL_ID`'s default -- docker-compose.yml, .env.example, and
+    every infra/ manifest default the model to bge-small-en-v1.5, whose real
+    max sequence length is 512 tokens.
+
+    A stale comment (``max_input_length (256 tokens for all-MiniLM-L6-v2)``,
+    naming a DIFFERENT model than the one actually deployed) used to live in
+    this service's ``embedder.py``; #311 moved the TEI wire adapter into
+    ``inh_contracts.embedding.tei_provider`` and, in doing so, already made
+    that comment model-agnostic (see its docstring and
+    docs/architecture/overview.md's "Unverifiable / open questions" section
+    for the history) -- so there is no comment left in ``embedder.py`` to fix.
+    This test instead pins the actual numeric contract so a future
+    default-model bump can't silently reintroduce a config/reality mismatch.
+    """
+    assert Settings.model_fields["embedding_model_id"].default == "BAAI/bge-small-en-v1.5"
+    assert Settings.model_fields["embedding_max_tokens"].default == 512

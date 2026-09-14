@@ -1602,27 +1602,52 @@ class DatabaseService:
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
-        """Get documents for a tenant, optionally filtered by workspace.
+        """Get documents for a tenant, optionally narrowed to one workspace.
 
         Args:
-            tenant_id: The tenant identifier
-            workspace_id: Optional workspace filter
+            tenant_id: The tenant identifier. Every row returned is scoped
+                to this tenant regardless of ``workspace_id`` below -- this
+                is the actual tenant boundary for this method.
+            workspace_id: Optional workspace filter that narrows *within*
+                ``tenant_id``'s already-applied scope (#212, follow-up to
+                #175/#177). ``None`` is a deliberate, safe opt-out of the
+                extra narrowing -- e.g. "every document this tenant owns,
+                across all of its workspaces" -- and is checked with
+                ``is not None`` (not truthiness) so it is never confused
+                with ``""``. ``""`` is never a legitimate "all workspaces"
+                spelling (that's what omitting the argument/``None`` is
+                for); passing it raises rather than being silently treated
+                the same as ``None``, which is what a bare
+                ``if workspace_id:`` guard used to do -- indistinguishable
+                from "not provided" and a cross-workspace-within-tenant
+                widening bug in waiting.
             status: Optional status filter
             limit: Max documents to return
             offset: Offset for pagination
 
         Returns:
-            List of document records
+            List of document records, all belonging to tenant_id.
+
+        Raises:
+            ValueError: if ``workspace_id`` is provided but blank or
+                whitespace-only.
         """
         if not self.engine:
             raise RuntimeError("Database not connected")
+
+        if workspace_id is not None and not workspace_id.strip():
+            raise ValueError(
+                "get_documents_by_tenant's workspace_id, when provided, must "
+                "be non-blank -- pass None to omit the workspace filter "
+                "entirely, not an empty string (#212)."
+            )
 
         with self.get_session() as session:
             query = self.processed_documents.select().where(
                 self.processed_documents.c.tenant_id == tenant_id
             )
 
-            if workspace_id:
+            if workspace_id is not None:
                 query = query.where(self.processed_documents.c.workspace_id == workspace_id)
 
             if status:
@@ -1808,20 +1833,52 @@ class DatabaseService:
 
             return int(count)  # type: ignore[arg-type]
 
-    async def get_processing_stats(self, workspace_id: str | None = None) -> dict[str, Any]:
-        """Get processing statistics."""
+    async def get_processing_stats(self, workspace_id: str) -> dict[str, Any]:
+        """Get processing statistics, always scoped to a workspace.
+
+        Args:
+            workspace_id: REQUIRED workspace scope (#212, follow-up to
+                #175/#177). Unlike ``get_documents_by_tenant``, this query
+                has no other scoping column (no ``tenant_id`` filter is
+                ever applied here) -- so a falsy value wouldn't just widen
+                the result, it would return GLOBAL aggregate counts across
+                every tenant and workspace in one call. These are
+                aggregates, not raw rows, but "every customer's document
+                counts in one response" is still cross-tenant data this
+                method has no legitimate caller for today (``grep -rn
+                "get_processing_stats(" src/`` finds none -- only tests,
+                all of which already pass a workspace_id). It is now
+                mandatory and a falsy value RAISES rather than silently
+                falling back to the unfiltered/global query, matching the
+                ``if workspace_id:`` fail-open shape #177 already fixed on
+                ``get_dead_letter_jobs``. A future "global admin stats"
+                endpoint should add its own explicitly-named method (or an
+                explicit ``workspace_id: Literal[None]`` opt-in) rather
+                than reintroduce "falsy means unscoped" here.
+
+        Returns:
+            Aggregate stats dict, scoped to workspace_id.
+
+        Raises:
+            ValueError: if ``workspace_id`` is falsy (``""`` or
+                whitespace-only).
+        """
         if not self.engine:
             raise RuntimeError("Database not connected")
 
+        if not workspace_id or not workspace_id.strip():
+            raise ValueError(
+                "get_processing_stats requires a non-blank workspace_id -- "
+                "returning global processing stats across every workspace "
+                "is not a supported operation of this method (#212)."
+            )
+
         with self.get_session() as session:
-            # `where_clause` is one of two in-code string literals -- never a
+            # `where_clause` is a single in-code string literal -- never a
             # caller value -- and the workspace_id itself is a bound parameter,
             # so the f-string below interpolates no untrusted input.
-            where_clause = ""
-            params = {}
-            if workspace_id:
-                where_clause = "WHERE workspace_id = :workspace_id"
-                params["workspace_id"] = workspace_id
+            where_clause = "WHERE workspace_id = :workspace_id"
+            params = {"workspace_id": workspace_id}
 
             stats_query = text(
                 f"""

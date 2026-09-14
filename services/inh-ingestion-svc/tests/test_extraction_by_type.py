@@ -656,6 +656,115 @@ class TestPptxFailurePaths:
             _extract_pptx_text(b"irrelevant, Presentation is mocked")
 
 
+class TestPptxSlideNotesObjectModelDrift:
+    """#255: `_pptx_slide_notes` uses getattr() (slide is typed `object` --
+    python-pptx ships no usable stubs) so a genuine python-pptx object-model
+    change (an attribute renamed/removed) must not silently read as "this
+    slide has no notes" -- it must log a warning naming what's missing.
+
+    The issue's own suggestion to use pytest's `caplog` doesn't apply here:
+    as `test_formula_only_workbook_logs_a_diagnostic_warning` above already
+    documents, `structlog`'s warnings never reach `caplog` in this codebase
+    (not routed through `structlog.stdlib`), so these tests follow that same
+    established pattern -- monkeypatching the module's `logger.warning`.
+    """
+
+    @staticmethod
+    def _capture_warnings(monkeypatch):
+        import src.temporal.activities.extract as extract_module
+
+        calls = []
+        monkeypatch.setattr(
+            extract_module.logger, "warning", lambda msg, **kw: calls.append((msg, kw))
+        )
+        return calls
+
+    def test_has_notes_slide_false_is_silent(self, monkeypatch):
+        """(a) Legitimate 'no notes' (has_notes_slide present and False)
+        must not warn."""
+        from src.temporal.activities.extract import _pptx_slide_notes
+
+        calls = self._capture_warnings(monkeypatch)
+
+        class _FakeSlideNoNotes:
+            has_notes_slide = False
+
+        assert _pptx_slide_notes(_FakeSlideNoNotes()) is None
+        assert calls == []
+
+    def test_missing_has_notes_slide_attribute_warns(self, monkeypatch):
+        """(b) `has_notes_slide` absent entirely (object model changed) must
+        log a warning naming the missing attribute, then behave as no notes."""
+        from src.temporal.activities.extract import _pptx_slide_notes
+
+        calls = self._capture_warnings(monkeypatch)
+
+        class _FakeSlideNoAttribute:
+            """Deliberately has no has_notes_slide attribute at all."""
+
+        assert _pptx_slide_notes(_FakeSlideNoAttribute()) is None
+        assert len(calls) == 1
+        message, _kwargs = calls[0]
+        assert "has_notes_slide" in message
+
+    def test_has_notes_slide_true_but_notes_slide_missing_warns(self, monkeypatch):
+        """(c) `has_notes_slide=True` but `notes_slide` missing/None is an
+        unexpected shape (object model changed) -- must warn."""
+        from src.temporal.activities.extract import _pptx_slide_notes
+
+        calls = self._capture_warnings(monkeypatch)
+
+        class _FakeSlideBrokenNotesSlide:
+            has_notes_slide = True
+            # No notes_slide attribute -- simulates a renamed/removed attribute.
+
+        assert _pptx_slide_notes(_FakeSlideBrokenNotesSlide()) is None
+        assert len(calls) == 1
+        message, _kwargs = calls[0]
+        assert "notes_slide" in message
+
+    def test_has_notes_slide_true_but_text_frame_missing_warns(self, monkeypatch):
+        """(c) `has_notes_slide=True` and `notes_slide` present, but the
+        notes object's text-frame is missing -- also an unexpected shape,
+        must warn."""
+        from src.temporal.activities.extract import _pptx_slide_notes
+
+        calls = self._capture_warnings(monkeypatch)
+
+        class _FakeNotesSlideNoTextFrame:
+            """Deliberately has no notes_text_frame attribute."""
+
+        class _FakeSlideBrokenTextFrame:
+            has_notes_slide = True
+            notes_slide = _FakeNotesSlideNoTextFrame()
+
+        assert _pptx_slide_notes(_FakeSlideBrokenTextFrame()) is None
+        assert len(calls) == 1
+        message, _kwargs = calls[0]
+        assert "notes_text_frame" in message
+
+    def test_healthy_notes_chain_returns_text_without_warning(self, monkeypatch):
+        """Sanity check: a well-formed slide with real notes still returns
+        the notes text and never warns -- the new guards must not regress
+        the happy path."""
+        from src.temporal.activities.extract import _pptx_slide_notes
+
+        calls = self._capture_warnings(monkeypatch)
+
+        class _FakeTextFrame:
+            text = "  Speaker notes here.  "
+
+        class _FakeNotesSlide:
+            notes_text_frame = _FakeTextFrame()
+
+        class _FakeSlideWithNotes:
+            has_notes_slide = True
+            notes_slide = _FakeNotesSlide()
+
+        assert _pptx_slide_notes(_FakeSlideWithNotes()) == "Speaker notes here."
+        assert calls == []
+
+
 class TestPdfFailurePaths:
     """#195: `_extract_pdf_text` was completely unwrapped -- a corrupt/
     truncated/password-protected PDF raised pypdf's raw exception type

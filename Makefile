@@ -268,9 +268,11 @@ format-check:
 	@cd $(CONTRACTS_DIR) && uv run black --check src tests
 	@cd $(CLI_DIR) && uv run black --check src tests
 
-## type-check: Run mypy for services that currently enable it.
+## type-check: Run mypy for every Python package, mirroring CI's checks matrix.
 type-check:
+	@cd $(INGESTION_DIR) && uv run mypy src
 	@cd $(PUBLIC_API_DIR) && uv run mypy src
+	@cd $(CONTRACTS_DIR) && uv run mypy src
 	@cd $(CLI_DIR) && uv run mypy src
 
 ## security-check: Run Bandit for services that currently enable it.

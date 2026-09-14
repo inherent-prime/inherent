@@ -18,6 +18,7 @@ from inh_contracts.file_types import (
     check_extension_consistency,
     explicitly_unsupported_message_for_mime,
     get_spec_for_upload,
+    legacy_format_hint_for_mime,
     sniff_content_type,
 )
 
@@ -116,12 +117,19 @@ async def intake_document(
     # unregistered MIME type is deliberately NOT widened by this fallback.
     spec = get_spec_for_upload(content_type, filename)
     if spec is None:
-        raise BadRequestError(
-            detail=(
-                f"Unsupported file type '{content_type}'. "
-                f"Allowed types: {', '.join(ALLOWED_MIME_TYPES)}"
-            ),
+        detail = (
+            f"Unsupported file type '{content_type}'. "
+            f"Allowed types: {', '.join(ALLOWED_MIME_TYPES)}"
         )
+        # #192: additive, not a replacement -- a known legacy MIME (currently
+        # .xls/.ppt; .doc/.msg are handled above by the EXPLICITLY_UNSUPPORTED
+        # check, which fully replaces this message instead) gets one more
+        # sentence naming its modern replacement, on top of the full allow-
+        # list this branch already builds. See `legacy_format_hint_for_mime`.
+        legacy_hint = legacy_format_hint_for_mime(content_type)
+        if legacy_hint is not None:
+            detail = f"{detail} {legacy_hint}"
+        raise BadRequestError(detail=detail)
 
     # --- 2. Cross-check the filename extension against the declared type ----
     # (#117). Independent of the byte-level sniff below: this catches a file

@@ -114,7 +114,6 @@ module = [
     "src.api.ownership",             # 2
     "src.services.database",         # 1
     "src.services.embedder",         # 1
-    "src.services.processor",        # 1
     "src.services.weaviate",         # 7
     "src.temporal.activities.extract",  # 1
     "src.temporal.activities.status",   # 2

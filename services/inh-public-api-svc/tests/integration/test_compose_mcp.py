@@ -41,7 +41,7 @@ import asyncio
 import json
 import os
 import time
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Generator
 from contextlib import asynccontextmanager
 
 import httpx
@@ -186,7 +186,53 @@ def client() -> httpx.Client:
 
 
 @pytest.fixture
-def live_backend_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+async def _live_service_handles() -> AsyncIterator[None]:
+    """Close the live ``DatabaseService``/``SearchService`` handles a stdio test builds.
+
+    The mirror of ``_drop_embedder_client`` below, for the other two live
+    handles a stdio test's tool calls construct. ``get_database()`` /
+    ``get_search_service()`` (imported into ``src/mcp_server/server.py``)
+    lazily build and cache a ``DatabaseService`` (an asyncpg engine + pool)
+    and a ``SearchService`` (an ``httpx.AsyncClient`` to Weaviate) the first
+    time a handler calls them, in the module globals ``_database`` /
+    ``_search_service`` on ``src.services.database`` / ``src.services.search``.
+
+    Nothing used to close them. ``tests/conftest.py``'s autouse
+    ``_reset_service_singletons`` only NULLS those globals before and after
+    every test -- by design, so a later test does not inherit a connection
+    bound to a dead event loop -- it never calls ``.close()``. That left
+    whatever this fixture built leaking its engine/pool and HTTP client for
+    the rest of the test session: bounded (one per session, not per request),
+    but every new live-backend stdio test added here adds another (#259).
+
+    ``close_database()`` / ``close_search_service()`` are the existing
+    module-level helpers used for exactly this at real app shutdown (see the
+    bottom of ``src/services/database.py`` / ``src/services/search.py``) --
+    not something invented for this test -- and both are documented "safe to
+    call even if [the singleton] was never initialized", so awaiting them
+    unconditionally here is correct whether or not the test actually
+    exercised a handler that built one. ``try/finally`` around the ``yield``,
+    not a bare one, so the close still runs when the test body itself fails.
+
+    Depended on by ``live_backend_settings`` below rather than requested
+    directly by tests, so every stdio test that already takes
+    ``live_backend_settings`` for its backend env-patching gets this cleanup
+    for free too.
+    """
+    from src.services.database import close_database
+    from src.services.search import close_search_service
+
+    try:
+        yield
+    finally:
+        await close_database()
+        await close_search_service()
+
+
+@pytest.fixture
+def live_backend_settings(
+    monkeypatch: pytest.MonkeyPatch, _live_service_handles: None
+) -> Generator[None, None, None]:
     """Point the process-wide ``settings`` singleton at the compose backends.
 
     Mutates the singleton OBJECT rather than ``os.environ`` on purpose:
@@ -213,6 +259,12 @@ def live_backend_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
     Only the stdio test needs this: the HTTP tests talk to the containerized
     app, which is already configured with the in-network hostnames.
+
+    This fixture only owns the embedder's client -- the ``DatabaseService`` /
+    ``SearchService`` singletons a stdio test's handlers build against these
+    same backends are closed by the ``_live_service_handles`` fixture above,
+    which this one depends on (see its docstring for why: they need an
+    ``async`` teardown these ``yield``-based ``monkeypatch`` semantics do not).
     """
     import src.services.embedder as embedder
 

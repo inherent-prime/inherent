@@ -142,11 +142,32 @@ def test_checkout_uses_full_history() -> None:
 
     `git diff origin/<base>...HEAD` fails on a `fetch-depth: 1` checkout
     because the merge-base commit is not present locally.
+
+    Scoped to the `actions/checkout` step's own block (reusing `_job_block`,
+    the same helper `test_timeout_minutes_present` uses), not a bare
+    `re.search` over the whole file (#257): an unscoped search would pass
+    even if `fetch-depth: 0` only appeared in a comment elsewhere while the
+    real checkout step used a shallow (or default) depth -- a guard that can
+    pass while the thing it guards is broken. This stays a text-slice regex
+    rather than `yaml.safe_load`, matching this file's existing convention
+    (`_job_block`/`_step_script` throughout) and this suite's house rule of
+    carrying no project dependencies (see `test_makefile_compose_preflight_
+    guard.py`'s docstring) -- `yaml` is only ever pulled in elsewhere via
+    `pytest.importorskip`, i.e. treated as optional, which a load-bearing
+    assertion like this one should not depend on.
     """
     text = _text()
-    assert re.search(r"fetch-depth:\s*0", text), (
-        "checkout step must use `fetch-depth: 0` so the base-branch diff has "
-        "a merge-base to compare against"
+    job = _job_block("conventions", text)
+    idx = job.index("actions/checkout@v4")
+    # A step block runs until the next step header (`- ` at the same
+    # 6-space indent the `steps:` list uses in this workflow) or the end of
+    # the job.
+    nxt = re.search(r"\n      - ", job[idx:])
+    checkout_step = job[idx : idx + nxt.start()] if nxt else job[idx:]
+    assert re.search(r"fetch-depth:\s*0", checkout_step), (
+        "the `actions/checkout` step must set `fetch-depth: 0` so the "
+        "base-branch diff has a merge-base to compare against; found "
+        f"step block: {checkout_step!r}"
     )
 
 

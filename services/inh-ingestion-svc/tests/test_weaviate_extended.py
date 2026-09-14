@@ -87,6 +87,32 @@ class TestWeaviateServiceExtended:
         mock_collection.query.bm25.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_search_chunks_empty_workspace_id_raises(self, weaviate_service):
+        """#212: an empty-string workspace_id must raise, not silently drop
+        the Filter.by_property("workspace_id") clause and search every
+        tenant's chunks in the legacy collection -- the exact fail-open
+        `if workspace_id:` shape #177 already fixed elsewhere.
+        """
+        mock_collection = MagicMock()
+        weaviate_service.client.collections.get.return_value = mock_collection
+
+        with pytest.raises(ValueError, match="workspace_id"):
+            await weaviate_service.search_chunks("query", "")
+
+        # The query must never reach Weaviate once the guard raises -- an
+        # unfiltered bm25 call would be the cross-tenant leak itself.
+        mock_collection.query.bm25.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_search_chunks_none_workspace_id_raises(self, weaviate_service):
+        """#212: the default (``None``, i.e. omitted) must also raise --
+        this method has no other tenant boundary, so "unscoped" is never a
+        safe default the way it is for get_documents_by_tenant's tenant_id.
+        """
+        with pytest.raises(ValueError, match="workspace_id"):
+            await weaviate_service.search_chunks("query")
+
+    @pytest.mark.asyncio
     async def test_legacy_delete_document_chunks(self, weaviate_service):
         """Test legacy delete chunks."""
         mock_collection = MagicMock()

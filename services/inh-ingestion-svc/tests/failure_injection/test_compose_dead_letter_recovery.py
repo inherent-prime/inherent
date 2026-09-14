@@ -191,13 +191,28 @@ def _docker_compose(*args: str, timeout: int = 60) -> subprocess.CompletedProces
 
 
 def _weaviate_health_status() -> str | None:
-    """Return the container's Docker healthcheck status, or None if unknown."""
-    result = subprocess.run(
-        ["docker", "inspect", "--format", "{{.State.Health.Status}}", WEAVIATE_CONTAINER],
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
+    """Return the container's Docker healthcheck status, or None if unknown.
+
+    Guards the subprocess call the same way `_require_stack` guards its own
+    `docker compose ps` call below (#263): a hung or missing Docker daemon
+    must surface as "unknown" -- the same sentinel this function already
+    returns for a non-zero `docker inspect` exit -- not an unhandled
+    `subprocess.TimeoutExpired`/`OSError` crashing whichever caller is
+    polling (`_wait_weaviate_healthy`, on both the setup and the
+    unconditional cleanup path). Callers already treat `None` as "not
+    healthy yet" and eventually raise their own actionable `pytest.fail`/
+    `pytest.skip` off of it, so this preserves that contract instead of
+    inventing a second failure mechanism for the same condition.
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "inspect", "--format", "{{.State.Health.Status}}", WEAVIATE_CONTAINER],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
     if result.returncode != 0:
         return None
     return result.stdout.strip()

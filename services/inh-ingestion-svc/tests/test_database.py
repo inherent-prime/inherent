@@ -510,6 +510,21 @@ class TestProcessingStats:
         assert stats["total_chunks"] >= len(sample_chunks)
 
     @pytest.mark.asyncio
+    async def test_get_processing_stats_empty_workspace_id_raises(
+        self,
+        db_service: DatabaseService,
+    ):
+        """#212: an empty-string workspace_id must raise, not fall through
+        to the unfiltered query -- this method has no other scoping column
+        (no tenant_id is ever applied here), so "no filter" means GLOBAL
+        aggregate counts across every tenant's documents, not a safe
+        default. This is the same ``if workspace_id:`` fail-open shape
+        #177 already fixed on get_dead_letter_jobs.
+        """
+        with pytest.raises(ValueError, match="workspace_id"):
+            await db_service.get_processing_stats(workspace_id="")
+
+    @pytest.mark.asyncio
     async def test_get_workspace_stats_view(
         self,
         db_service: DatabaseService,

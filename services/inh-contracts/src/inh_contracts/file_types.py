@@ -332,11 +332,11 @@ FILE_TYPE_REGISTRY: tuple[FileTypeSpec, ...] = (
         # D0 CF 11 E0 A1 B1 1A E1) with NO registry entry -- it is not this
         # spec's `extensions`, so a declared `.xls` upload 400s via the
         # standard `UnknownContentTypeError` (never accept-then-garble). That
-        # message names every supported type, including this xlsx entry, so
-        # it IS actionable -- but it is the generic list, not the #118 issue
-        # body's suggested bespoke "convert to .xlsx" wording; a friendlier,
-        # legacy-format-specific message is filed as a follow-up (see
-        # surface-friction issue linked from the #118/#119 PR).
+        # message names every supported type, including this xlsx entry, AND
+        # (#192) appends the #118 issue body's suggested bespoke "convert to
+        # .xlsx" sentence -- see `_LEGACY_FORMAT_HINTS` next to
+        # `UnknownContentTypeError` above. Dispatch itself is unchanged:
+        # `.xls` still has no registry entry and still hard-fails here.
         magic=b"PK\x03\x04",
         surfaces=frozenset({"rest"}),
         extractor="xlsx",
@@ -348,7 +348,7 @@ FILE_TYPE_REGISTRY: tuple[FileTypeSpec, ...] = (
         extensions=(".pptx",),
         # Same ZIP family as docx/xlsx -- see the docx entry's comment.
         # Legacy `.ppt` (OLE2/CFBF) has no registry entry, same reasoning as
-        # xlsx/.xls above.
+        # xlsx/.xls above -- including the #192 bespoke-message treatment.
         magic=b"PK\x03\x04",
         surfaces=frozenset({"rest"}),
         extractor="pptx",
@@ -874,15 +874,82 @@ def mcp_mime_types() -> tuple[str, ...]:
 # ---------------------------------------------------------------------------
 
 
+# Legacy-format hint table (#192) -- MESSAGE TEXT ONLY, never consulted by
+# dispatch. #117 deliberately removed per-type if/elif branching from the
+# validation/extraction path in favour of one flat `FILE_TYPE_REGISTRY`; a
+# legacy MIME type has no entry there on purpose (see the xlsx/pptx specs'
+# comments above) and must keep hard-failing exactly like any other
+# unregistered type -- that contract is unchanged, only the reason string
+# gains a sentence.
+#
+# This table only answers "does the generic rejection message also deserve
+# one bespoke, actionable sentence naming the modern replacement" and is
+# consulted from nowhere else. #118/#119 asked for this sentence and it
+# never landed.
+#
+# `legacy_format_hint_for_mime` below is a PUBLIC function, not a private
+# helper of `UnknownContentTypeError` alone: REST's `document_intake.py` and
+# MCP's `server.py` each build their OWN "unsupported type" message inline
+# rather than raising/catching `UnknownContentTypeError` (that class is only
+# ever raised internally by `sniff_content_type`, whose docstring notes
+# reaching it for a resolvable spec would itself be a contract bug -- it is
+# not on either surface's actual unregistered-type rejection path). Per
+# #211 (the open cross-surface message-divergence defect), the fix belongs
+# in one function BOTH surfaces call into their own message, not only on an
+# error class neither surface's rejection path actually raises for this
+# case -- see the call sites in those two files. It is still ALSO wired into
+# `UnknownContentTypeError` below for the contract-level guarantee (and any
+# future/other caller that does raise it) even though today's REST/MCP
+# handlers reach their own string first.
+#
+# Maps a legacy MIME type -> (the legacy format's OWN extension, for the
+# "this looks like legacy X" half of the sentence -- there's no registry
+# entry to read this back from, since legacy formats are deliberately
+# unregistered, so it's spelled out here instead; the `FILE_TYPE_REGISTRY`
+# `key` of its modern replacement, for the "convert to Y" half). Adding a
+# future legacy sibling (e.g. legacy .doc) is one line here; the
+# replacement's MIME/extension text is derived from the registry via
+# `get_spec_by_key`/`mime_type_for_extension` below rather than hardcoded a
+# second time.
+_LEGACY_FORMAT_HINTS: tuple[tuple[str, str, str], ...] = (
+    ("application/vnd.ms-excel", ".xls", "xlsx"),
+    ("application/vnd.ms-powerpoint", ".ppt", "pptx"),
+)
+
+
+def legacy_format_hint_for_mime(declared_mime: str) -> str | None:
+    """One bespoke sentence naming the modern replacement for `declared_mime`
+    if it's a known legacy format, else ``None``. Message-only -- see
+    `_LEGACY_FORMAT_HINTS`.
+    """
+    normalized = declared_mime.split(";", 1)[0].strip().lower()
+    for legacy_mime, legacy_extension, replacement_key in _LEGACY_FORMAT_HINTS:
+        if normalized == legacy_mime:
+            replacement_spec = get_spec_by_key(replacement_key)
+            if replacement_spec is None:
+                return None  # pragma: no cover -- table/registry kept in sync by test
+            replacement_extension = replacement_spec.extensions[0]
+            replacement_mime = mime_type_for_extension(replacement_spec, replacement_extension)
+            return (
+                f"This looks like the legacy {legacy_extension} format -- convert to "
+                f"{replacement_extension} ({replacement_mime}) and re-upload."
+            )
+    return None
+
+
 class UnknownContentTypeError(ValueError):
     """A declared/stored content type has no matching registry entry."""
 
     def __init__(self, declared_mime: str):
         self.declared_mime = declared_mime
-        super().__init__(
+        message = (
             f"Unsupported content type '{declared_mime}'. "
             f"Supported types: {', '.join(all_mime_types())}"
         )
+        hint = legacy_format_hint_for_mime(declared_mime)
+        if hint is not None:
+            message = f"{message} {hint}"
+        super().__init__(message)
 
 
 class ContentTypeMismatchError(ValueError):

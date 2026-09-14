@@ -380,9 +380,25 @@ def test_xlsx_chunks_stay_within_bounds(client: httpx.Client) -> None:
     §6.2 was written, and ``.xlsx`` now resolves to ``chunking_hint="tabular"``
     → ``_chunk_by_rows``, which never splits a row and slices oversized ones.
     Measured on THIS fixture with the compose defaults: ``_chunk_by_sentences``
-    → 2 chunks, largest 28,344 chars (the defect); ``_chunk_by_rows`` → 22
-    chunks, largest 1,537. The overview text is stale, not wrong-in-principle
-    -- see the report for that finding.
+    → 2 chunks, largest 28,344 chars -- that IS the defect, and the number
+    that matters here: it is what "the whole sheet lands as one chunk" means
+    concretely for this fixture, independent of how tabular chunking happens
+    to be tuned. The overview text is stale, not wrong-in-principle -- see the
+    report for that finding.
+
+    ``_chunk_by_rows``'s own chunk count and largest-chunk size are
+    deliberately NOT pinned as literals here: they drift with tuning (row
+    batching, ``_token_budget_char_cap``, ``EMBEDDING_MAX_TOKENS``, ...), and a
+    docstring number nothing asserts has no way to notice it has gone stale --
+    this paragraph's own previous figure ("22 chunks, largest 1,537") already
+    had, silently, until #262. As of 2026-09-14, with the compose defaults,
+    ``_chunk_by_rows`` produces 51 chunks on this fixture, largest 786 chars
+    (well inside ``MAX_CHUNK_CHARS`` below) -- an "as of" observation to
+    sanity-check against, not a bound this test enforces. To re-measure: run
+    this test against a live stack (see the module docstring above) and read
+    ``sizes`` / ``len(chunks)`` at the ``assert not oversized`` line below, or
+    fetch ``GET /v1/chunks/{document_id}`` for the uploaded ``XLSX_FIXTURE``
+    by hand.
 
     So this stands as the live regression guard for the fix: if tabular
     chunking is ever reverted, mis-wired, or the registry hint stops resolving,

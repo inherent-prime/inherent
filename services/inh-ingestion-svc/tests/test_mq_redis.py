@@ -237,6 +237,64 @@ class TestRedisMQServiceIdlePoll:
         assert kwargs["health_check_interval"] > 0
 
 
+class TestRedisMQServiceNoneGuards:
+    """Regression tests for #256: the internal ``self._redis is not None``
+    guards must be explicit ``if``/``raise`` checks, not bare ``assert``.
+
+    ``assert`` is stripped entirely under ``python -O`` / ``PYTHONOPTIMIZE=1``,
+    which would let a disconnected call fall through to an ``AttributeError``
+    on ``None`` instead of a clear, boundary-naming ``RuntimeError`` — and
+    that difference can't be observed by asserting on source text, so these
+    tests instead call each guarded method on a disconnected instance and
+    check the exception type/message actually raised.
+    """
+
+    @pytest.mark.asyncio
+    async def test_delivery_count_raises_runtime_error_when_disconnected(self, service):
+        """The method named in issue #256: must raise RuntimeError, never
+        AssertionError (bare assert) or AttributeError (guard silently gone).
+        """
+        assert service._redis is None  # precondition: never connected
+
+        with pytest.raises(
+            RuntimeError, match="_delivery_count.*only valid on a connected consumer"
+        ):
+            await service._delivery_count("stream", "group", "1-0")
+
+    @pytest.mark.asyncio
+    async def test_ensure_consumer_group_raises_runtime_error_when_disconnected(self, service):
+        with pytest.raises(
+            RuntimeError, match="_ensure_consumer_group.*only valid on a connected consumer"
+        ):
+            await service._ensure_consumer_group("stream", "group")
+
+    @pytest.mark.asyncio
+    async def test_poll_loop_raises_runtime_error_when_disconnected(self, service):
+        with pytest.raises(RuntimeError, match="_poll_loop.*only valid on a connected consumer"):
+            await service._poll_loop("stream", "group", "consumer", AsyncMock())
+
+    @pytest.mark.asyncio
+    async def test_reclaim_pending_raises_runtime_error_when_disconnected(self, service):
+        with pytest.raises(
+            RuntimeError, match="_reclaim_pending.*only valid on a connected consumer"
+        ):
+            await service._reclaim_pending("stream", "group", "consumer", AsyncMock())
+
+    @pytest.mark.asyncio
+    async def test_process_pending_raises_runtime_error_when_disconnected(self, service):
+        with pytest.raises(
+            RuntimeError, match="_process_pending.*only valid on a connected consumer"
+        ):
+            await service._process_pending("stream", "group", "consumer", AsyncMock())
+
+    @pytest.mark.asyncio
+    async def test_handle_message_raises_runtime_error_when_disconnected(self, service):
+        with pytest.raises(
+            RuntimeError, match="_handle_message.*only valid on a connected consumer"
+        ):
+            await service._handle_message("stream", "group", "1-0", {}, AsyncMock())
+
+
 class TestRedisMQServiceSubscribe:
     """Tests for RedisMQService subscribe/unsubscribe functionality."""
 

@@ -5,6 +5,10 @@ All notable changes to Inherent are documented here. The format follows
 
 ## [Unreleased]
 
+### Removed
+
+- **Legacy `DocumentProcessor` / `src/services/processor.py` deleted (#185).** The pre-Temporal synchronous ingestion pipeline was dead code (no runtime entrypoint imported it, per its own deprecation docstring from #23) carrying a duplicate file-type dispatch chain and `errors="ignore"` decoding already superseded by the live `FILE_TYPE_REGISTRY`-driven Temporal activities; its OCR/extraction test coverage was confirmed fully duplicated by `test_image_ocr.py`'s `TestActivityImageOCR`, `test_extraction_by_type.py`, and `test_temporal_activities.py` before deletion, so `processor.py` and its processor-only tests (`test_processor.py`, `test_processor_extraction.py`, `test_processor_backend.py`, `test_integration.py`, and the `TestProcessorImageOCR` / `TestProcessorCompletionPublishing` classes) were removed with no coverage loss.
+
 ## [0.7.0] — 2026-09-11
 
 ### Fixed

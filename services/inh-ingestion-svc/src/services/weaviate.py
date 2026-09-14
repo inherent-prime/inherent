@@ -1140,19 +1140,54 @@ class WeaviateService:
         workspace_id: str | None = None,
         limit: int = 10,
     ) -> list[dict[str, Any]]:
-        """Search for chunks in legacy collection.
+        """Search for chunks in the legacy (non-tenant-partitioned) collection.
 
-        Note: For multi-tenant search, use search_chunks_with_tenant()
+        Note: For multi-tenant search, use search_chunks_with_tenant() --
+        that method scopes to a Weaviate tenant natively and should be
+        preferred for any new caller.
+
+        Args:
+            query: Search query.
+            workspace_id: REQUIRED workspace scope (#212, follow-up to
+                #175/#177). This is the tenant-BOUNDARY filter for this
+                method -- the legacy collection has no other partitioning,
+                so a falsy value here doesn't just narrow the search, it
+                searches every workspace's chunks in one call. An earlier
+                version guarded the ``Filter.by_property("workspace_id")``
+                clause with a bare ``if workspace_id:``, which is falsy for
+                ``""`` and would silently drop the filter instead of
+                raising -- the exact fail-open shape #177 already fixed
+                elsewhere in this service. It is now mandatory and a falsy
+                value (``None`` or ``""``) RAISES rather than widening the
+                search to every tenant. Unlike ``get_documents_by_tenant``
+                or ``get_processing_stats``, there is no outer scope (a
+                ``tenant_id`` column, an already-authorized session) this
+                method's filter narrows *within* -- dropping it is a full
+                cross-tenant leak, not a convenience default.
+            limit: Maximum results.
+
+        Returns:
+            List of matching chunks with metadata, all scoped to
+            workspace_id.
+
+        Raises:
+            ValueError: if ``workspace_id`` is falsy (``None``, ``""``, or
+                whitespace-only).
         """
         if not self.client:
             raise RuntimeError("Weaviate not connected")
 
+        if not workspace_id or not workspace_id.strip():
+            raise ValueError(
+                "search_chunks requires a non-blank workspace_id -- searching "
+                "the legacy chunk collection across every workspace is not a "
+                "supported operation of this method (#212)."
+            )
+
         collection = self.client.collections.get(DOCUMENT_CHUNKS_COLLECTION)
 
         try:
-            filters = None
-            if workspace_id:
-                filters = Filter.by_property("workspace_id").equal(workspace_id)
+            filters = Filter.by_property("workspace_id").equal(workspace_id)
 
             results = collection.query.bm25(
                 query=query,

@@ -1,9 +1,11 @@
 """Tests for PNG image OCR extraction with graceful fallback (#61).
 
-Covers both the Temporal activity helper (``_extract_image_text`` in
-``extract.py``) and the processor method (``_extract_image_text`` in
-``processor.py``). OCR is mocked so these run WITHOUT the real tesseract
-system binary installed:
+Covers the Temporal activity helper (``_extract_image_text`` in
+``extract.py``) -- the live ingestion path's OCR extraction. This file used
+to also cover the equivalent method on the legacy ``DocumentProcessor``
+(``processor.py``); that class was removed (#185) once its OCR behaviour was
+confirmed fully duplicated here. OCR is mocked so these run WITHOUT the real
+tesseract system binary installed:
 
 - OCR available  -> ``pytesseract.image_to_string`` returns text, which is
   returned verbatim.
@@ -16,14 +18,9 @@ from __future__ import annotations
 
 import sys
 import types
-from datetime import UTC, datetime
-from unittest.mock import MagicMock
 
 import pytest
 
-from src.config.settings import Settings
-from src.models.document import DocumentUploadMessage
-from src.services.processor import DocumentProcessor
 from src.temporal.activities.extract import _extract_image_text
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n fake png bytes"
@@ -130,63 +127,3 @@ class TestActivityImageOCR:
         text = _extract_image_text(PNG_BYTES, FILENAME)
         assert text == PLACEHOLDER
 
-
-# ---------------------------------------------------------------------------
-# Processor method: processor.py::_extract_image_text (via _extract_text)
-# ---------------------------------------------------------------------------
-
-
-class TestProcessorImageOCR:
-    @pytest.fixture
-    def processor(self):
-        settings = MagicMock(spec=Settings)
-        settings.max_chunk_size = 1000
-        settings.chunk_overlap = 200
-        settings.chunking_strategy = "tokens"
-        settings.database_url = "postgresql://mock:mock@localhost:5432/mock"
-        proc = DocumentProcessor(settings)
-        proc._initialized = True
-        return proc
-
-    def _message(self) -> DocumentUploadMessage:
-        return DocumentUploadMessage(
-            event_type="document.uploaded",
-            document_id="doc-png-1",
-            workspace_id="ws-1",
-            user_id="user-1",
-            filename=FILENAME,
-            original_filename=FILENAME,
-            content_type="image/png",
-            size_bytes=len(PNG_BYTES),
-            storage_backend="local",
-            storage_path="ws-1/doc-png-1/scan.png",
-            storage_bucket="bucket",
-            timestamp=datetime.now(UTC).isoformat(),
-        )
-
-    @pytest.mark.asyncio
-    async def test_ocr_available_returns_text(self, processor, monkeypatch):
-        _install_fake_ocr(monkeypatch, return_text="Inherent OCR sample")
-        text = await processor._extract_text(PNG_BYTES, self._message())
-        assert text == "Inherent OCR sample"
-
-    @pytest.mark.asyncio
-    async def test_ocr_libs_missing_returns_placeholder(self, processor, monkeypatch):
-        _block_ocr_imports(monkeypatch)
-        text = await processor._extract_text(PNG_BYTES, self._message())
-        assert text == PLACEHOLDER
-
-    @pytest.mark.asyncio
-    async def test_tesseract_binary_missing_returns_placeholder(self, processor, monkeypatch):
-        _install_fake_ocr(monkeypatch)
-        from pytesseract import TesseractNotFoundError  # the fake one
-
-        _install_fake_ocr(monkeypatch, image_to_string_exc=TesseractNotFoundError)
-        text = await processor._extract_text(PNG_BYTES, self._message())
-        assert text == PLACEHOLDER
-
-    @pytest.mark.asyncio
-    async def test_empty_ocr_output_returns_placeholder(self, processor, monkeypatch):
-        _install_fake_ocr(monkeypatch, return_text="")
-        text = await processor._extract_text(PNG_BYTES, self._message())
-        assert text == PLACEHOLDER

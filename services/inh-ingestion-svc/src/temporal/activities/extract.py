@@ -29,6 +29,7 @@ import re
 import zipfile
 from collections.abc import Callable
 from email import policy
+from typing import Any
 from urllib.parse import unquote
 
 # The three ET.fromstring() calls below parse XML pulled out of a
@@ -895,17 +896,57 @@ def _pptx_slide_title(slide: object) -> str | None:
     return text or None
 
 
+# Sentinel distinguishing "attribute absent" from "attribute is None/False".
+# Typed `Any` (not left to infer as `object`) so it doesn't narrow the
+# getattr() calls below away from their usual `Any` return -- `notes_slide`
+# and `text_frame` are themselves python-pptx objects with no usable stubs
+# (see the module-level getattr rationale on _pptx_slide_title), so chaining
+# a further `.text`/`.notes_text_frame` off of them must stay unchecked, same
+# as every other getattr in this module.
+_PPTX_ATTR_MISSING: Any = object()
+
+
 def _pptx_slide_notes(slide: object) -> str | None:
     """Speaker notes text for `slide`, or None if it has no notes slide, or
-    the notes slide has no non-whitespace text."""
-    # getattr rather than attribute access, matching _pptx_slide_title above:
-    # `slide` is typed `object` because python-pptx ships no usable stubs.
-    if not getattr(slide, "has_notes_slide", False):
+    the notes slide has no non-whitespace text.
+
+    getattr (rather than attribute access) throughout, matching
+    _pptx_slide_title above: `slide` is typed `object` because python-pptx
+    ships no usable stubs. That has a cost -- getattr-with-default makes a
+    genuine python-pptx object-model change (an attribute renamed/removed)
+    read identically to "this slide legitimately has no notes". We log (never
+    raise) when an expected attribute is unexpectedly missing, so that
+    degradation is observable -- extraction must not fail a whole document
+    over one slide's notes, but silence would let the object-model drift go
+    unnoticed indefinitely (#255).
+    """
+    has_notes = getattr(slide, "has_notes_slide", _PPTX_ATTR_MISSING)
+    if has_notes is _PPTX_ATTR_MISSING:
+        logger.warning(
+            "PPTX slide object missing expected has_notes_slide attribute -- "
+            "python-pptx object model may have changed; treating as no notes",
+        )
         return None
-    notes_slide = getattr(slide, "notes_slide", None)
-    if notes_slide is None:
+    if not has_notes:
+        return None  # legitimate "no notes" (has_notes_slide is False) -- stay silent
+
+    notes_slide = getattr(slide, "notes_slide", _PPTX_ATTR_MISSING)
+    if notes_slide is _PPTX_ATTR_MISSING or notes_slide is None:
+        logger.warning(
+            "PPTX slide has has_notes_slide=True but notes_slide is missing -- "
+            "python-pptx object model may have changed; skipping this slide's notes",
+        )
         return None
-    notes_text = (notes_slide.notes_text_frame.text or "").strip()
+
+    text_frame = getattr(notes_slide, "notes_text_frame", _PPTX_ATTR_MISSING)
+    if text_frame is _PPTX_ATTR_MISSING or text_frame is None:
+        logger.warning(
+            "PPTX slide's notes_slide is missing notes_text_frame -- "
+            "python-pptx object model may have changed; skipping this slide's notes",
+        )
+        return None
+
+    notes_text = (text_frame.text or "").strip()
     return notes_text or None
 
 
