@@ -70,6 +70,22 @@ All notable changes to Inherent are documented here. The format follows
   `StoreDocumentOutput.document_row_inserted`), mirroring the #110 fencing
   check's shape of pushing the decision into the transaction that can see
   it.
+- **`ConversationMemoryWorkflow` no longer loses buffered turns when a flush
+  activity fails (#363).** `_flush` cleared the turn buffer before running
+  redact/chunk/store/stats with nothing catching a failure, and with no
+  `retry_policy` on `start_workflow` an exhausted activity retry (e.g.
+  `redact_turns`, `maximum_attempts=1` by design) put the whole workflow
+  execution into a terminal Failed state -- silently discarding every
+  buffered turn after the caller had already received `202 Accepted`. A
+  failed flush is now dead-lettered into the existing `dead_letter_jobs`
+  table (`record_dead_letter`, widened by a per-batch `dedup_key` -- see
+  migration 021 -- so one long-lived conversation run can dead-letter more
+  than once without colliding with itself) with enough identifiers and, when
+  safe, already-redacted text to replay the batch by hand; a failure at
+  `redact_turns` itself stores no raw text (see `redact.py`'s "ONE AND ONLY
+  place" invariant) and points at Temporal's own signal history instead. If
+  the dead-letter write itself also fails, the workflow logs CRITICAL rather
+  than crashing, and keeps running so later turns still flush normally.
 
 ### Changed
 

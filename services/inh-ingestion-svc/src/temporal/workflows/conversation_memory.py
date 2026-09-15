@@ -75,6 +75,70 @@ Reuse, not fork
 ``StoreDocumentInput.append=True`` (see that field's docstring for why an
 unmodified, unconditional full-replace call on every flush would silently
 destroy every previously-flushed turn's chunks from the second flush on).
+
+Durability semantics -- what happens when a flush FAILS (#363)
+---------------------------------------------------------------------
+The happy path above assumes every activity in the flush pipeline succeeds.
+It doesn't always: ``redact_turns`` is deliberately ``maximum_attempts=1``
+(see its own module docstring), and nothing downstream has an unlimited
+retry budget either. Before #363, ``_flush`` cleared ``self._buffer`` BEFORE
+running the pipeline and caught nothing -- an activity failure propagated
+out of ``run()``, and because ``conversation_trigger.py`` starts this
+workflow with no ``retry_policy``, Temporal does not start a new run. The
+workflow execution went terminally Failed, every turn buffered in that flush
+was gone, and the caller had already received ``202 Accepted``.
+
+``_flush`` now wraps the pipeline and DEAD-LETTERS the batch on failure
+(``_dead_letter_flush``) instead of letting the exception escape:
+
+* **Where it goes**: a ``dead_letter_jobs`` row (the SAME table/mechanism
+  ``DocumentIngestionWorkflow`` uses via ``record_dead_letter`` --
+  ``src/temporal/activities/dead_letter.py`` -- not a parallel one), keyed
+  by this conversation's ``document_id``. Because ONE long-lived
+  conversation run can dead-letter more than once (unlike a document
+  ingestion run, which ends at its first terminal failure), the row is
+  additionally keyed by a per-batch ``dedup_key`` -- see migration 021 and
+  ``DatabaseService.add_dead_letter_job`` -- so a second failed flush in the
+  same run gets its OWN row instead of silently no-op'ing against the
+  first's.
+* **What it contains, and the one deliberate exception**: workspace/
+  conversation/document identifiers, the Temporal workflow_id/run_id, every
+  affected ``turn_id``, the failed stage, and the error -- always enough to
+  know exactly which turns were lost and why. Turn TEXT is included too,
+  **but only when it is already-redacted text** (a failure at
+  ``chunk_conversation``/store/stats, where ``redact_turns`` already ran
+  successfully in THIS flush). When ``redact_turns`` itself is the step that
+  failed, no turn text is safe to persist yet -- see redact.py's module
+  docstring: it is "the ONE AND ONLY place raw pre-redaction turn text is
+  allowed to exist in the pipeline", and a dead-letter row is a SECOND
+  at-rest copy outside that boundary. So that case's row carries identifiers
+  only, and recovery means pulling the raw text back out of Temporal's own
+  event history (the ``add_turn`` signal payload for each named ``turn_id``
+  in that run) -- not a second unredacted copy in Postgres.
+* **Recovery**: an operator (or a future automated job) reads the row's
+  ``original_message`` JSON, and either replays the included redacted turns
+  through a manual re-embed, or -- for the no-safe-text case above -- looks
+  up the named turn_ids in the workflow's Temporal history and re-drives
+  them through the normal ingestion path by hand.
+* **If the dead-letter WRITE itself fails** (it is an activity, and can
+  fail like any other): the workflow does NOT crash -- crashing would only
+  cost it every FUTURE turn too, without recovering this one. Instead it
+  logs CRITICAL with every identifier needed to find the batch by hand
+  (workspace_id/external_id/document_id, workflow_id/run_id, every
+  turn_id) so the loss is never silent even when nothing durable records it
+  beyond Temporal's own history. See ``_dead_letter_flush``.
+* **The workflow survives either way**: ``_flush`` always returns normally
+  after a dead-letter (successful or not) instead of re-raising, so
+  ``run()``'s loop continues, the buffer/char accounting for the NEXT flush
+  is unaffected, and later turns keep flushing normally. Proven by
+  ``test_conversation_memory_workflow.py``'s dead-letter tests, which flush
+  a failing batch and then a normal one on the SAME workflow run.
+* **What this deliberately does NOT do** (ruled out, see issue #363): give
+  ``redact_turns`` a retry budget, add a ``retry_policy`` to
+  ``start_workflow``, or silently re-buffer the failed batch for a later
+  flush attempt (which would turn a deterministic poison batch into an
+  invisible, unbounded hot loop instead of one recorded, boundedly-retried
+  dead-letter write).
 """
 
 from __future__ import annotations
@@ -86,6 +150,7 @@ from datetime import datetime, timedelta
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ActivityError
 
 with workflow.unsafe.imports_passed_through():
     from inh_contracts.conversation import CONVERSATION_CONTENT_TYPE
@@ -93,6 +158,7 @@ with workflow.unsafe.imports_passed_through():
     from src.temporal.activities.cleanup import cleanup_staging
     from src.temporal.activities.completion import publish_completion
     from src.temporal.activities.conversation_chunk import chunk_conversation
+    from src.temporal.activities.dead_letter import record_dead_letter
     from src.temporal.activities.redact import redact_turns
     from src.temporal.activities.store import store_in_postgresql, store_in_weaviate
     from src.temporal.activities.tenant import ensure_tenant_ready, update_workspace_stats
@@ -105,6 +171,8 @@ with workflow.unsafe.imports_passed_through():
         ConversationTurnSignal,
         EnsureTenantInput,
         PublishCompletionInput,
+        RecordDeadLetterInput,
+        RedactedTurn,
         RedactTurnInput,
         RedactTurnsInput,
         StoreDocumentInput,
@@ -130,6 +198,22 @@ CONVERSATION_STORAGE_BACKEND = "local"
 # recent turn_ids (default flush threshold 4000 chars, typical turns are a
 # few hundred chars) without growing workflow history/state unboundedly.
 _SEEN_TURN_IDS_BOUND = 2000
+
+
+def _stage_from_exception(exc: Exception) -> str:
+    """Best-effort "which activity failed" label for the dead-letter row's
+    `error_type`/logging (#363).
+
+    `ActivityError.activity_type` names the activity Temporal was actually
+    executing when it failed, which is more precise than guessing from a
+    nested try/except per activity (chunk_conversation vs. store_in_* vs.
+    update_workspace_stats). Anything else (a bug in this workflow's own
+    control flow between activity calls, not an activity failure itself)
+    falls back to the exception's class name so the row is never blank.
+    """
+    if isinstance(exc, ActivityError):
+        return exc.activity_type
+    return type(exc).__name__
 
 
 @dataclass
@@ -349,7 +433,12 @@ class ConversationMemoryWorkflow:
         pipeline for the currently buffered turns. Returns the number of
         turns that were in this flush (buffered, not necessarily all
         successfully redacted -- a dropped turn per #307 still counts as
-        "handled" so continue_as_new's turn count stays meaningful)."""
+        "handled" so continue_as_new's turn count stays meaningful, and
+        neither is a batch this method DEAD-LETTERED after a pipeline
+        failure -- see #363 / the module docstring's "Durability semantics"
+        section for why swallowing the batch here, rather than propagating
+        the failure and letting the workflow execution go terminally Failed,
+        is what keeps this conversation able to serve later turns)."""
         turns_to_flush = self._buffer
         self._buffer = []
         self._buffered_chars = 0
@@ -360,25 +449,35 @@ class ConversationMemoryWorkflow:
         run_id = workflow.info().run_id
 
         # --- redact_turns: the ONLY step allowed to see raw turn text -----
-        redact_output = await workflow.execute_activity(
-            redact_turns,
-            RedactTurnsInput(
-                turns=[
-                    RedactTurnInput(turn_id=t.turn_id, text=t.text, role=t.role)
-                    for t in turns_to_flush
-                ],
-                workflow_run_id=run_id,
-                workspace_id=self._workspace_id,
-                document_id=self._document_id,
-            ),
-            start_to_close_timeout=timedelta(seconds=30),
-            # Belt-and-suspenders (redact.py's own module docstring, guard 2
-            # of 2): redact_turns is non_retryable=True on any activity-level
-            # failure regardless, but pinning maximum_attempts=1 here means a
-            # future change to that guard, or a copy-pasted call site, still
-            # cannot retry a redaction failure.
-            retry_policy=RetryPolicy(maximum_attempts=1),
-        )
+        try:
+            redact_output = await workflow.execute_activity(
+                redact_turns,
+                RedactTurnsInput(
+                    turns=[
+                        RedactTurnInput(turn_id=t.turn_id, text=t.text, role=t.role)
+                        for t in turns_to_flush
+                    ],
+                    workflow_run_id=run_id,
+                    workspace_id=self._workspace_id,
+                    document_id=self._document_id,
+                ),
+                start_to_close_timeout=timedelta(seconds=30),
+                # Belt-and-suspenders (redact.py's own module docstring, guard 2
+                # of 2): redact_turns is non_retryable=True on any activity-level
+                # failure regardless, but pinning maximum_attempts=1 here means a
+                # future change to that guard, or a copy-pasted call site, still
+                # cannot retry a redaction failure.
+                retry_policy=RetryPolicy(maximum_attempts=1),
+            )
+        except Exception as exc:
+            # #363: no output from redact_turns means NO safe (redacted) text
+            # exists for this batch -- see `_dead_letter_flush`'s
+            # `redacted_turns=None` handling for why we deliberately do NOT
+            # fall back to `turns_to_flush`'s raw text here.
+            await self._dead_letter_flush(
+                turns_to_flush, run_id, exc, stage="redact_turns", redacted_turns=None
+            )
+            return len(turns_to_flush)
 
         if not redact_output.redacted_turns:
             # Every turn in this flush failed redaction and was dropped
@@ -399,141 +498,165 @@ class ConversationMemoryWorkflow:
             if rt.turn_id in buffered_by_id
         ]
 
-        chunk_output = await workflow.execute_activity(
-            chunk_conversation,
-            ChunkConversationInput(
+        # --- chunk -> store -> stats: everything past this point only ever
+        # reads TEXT from `redact_output.redacted_turns` (already safe to
+        # persist if we have to dead-letter below), never from
+        # `turns_to_flush` -- see module docstring. #363: one try/except
+        # around the rest of the pipeline, rather than one per activity,
+        # because every failure here shares the same recovery story (the
+        # batch is already-redacted and safe to dead-letter whole) --
+        # `_stage_from_exception` recovers which activity actually failed
+        # for the dead-letter row's `error_type`/logging without needing a
+        # separate handler per call.
+        try:
+            chunk_output = await workflow.execute_activity(
+                chunk_conversation,
+                ChunkConversationInput(
+                    workflow_run_id=run_id,
+                    document_id=self._document_id,
+                    workspace_id=self._workspace_id,
+                    redacted_turns=redact_output.redacted_turns,
+                    turn_meta=turn_meta,
+                ),
+                start_to_close_timeout=timedelta(seconds=60),
+                retry_policy=RetryPolicy(
+                    maximum_attempts=2,
+                    initial_interval=timedelta(seconds=1),
+                    maximum_interval=timedelta(seconds=10),
+                    backoff_coefficient=2.0,
+                ),
+            )
+
+            if chunk_output.chunk_count == 0:
+                return len(turns_to_flush)
+
+            flush_text_length = sum(len(rt.text) for rt in redact_output.redacted_turns)
+            # size_bytes must stay > 0 (processed_documents' CHECK, migration
+            # 001) -- always true here since this branch only runs when at least
+            # one turn redacted successfully, i.e. flush_text_length >= 1.
+            flush_size_bytes = max(flush_text_length, 1)
+
+            self._total_turns_flushed += len(turns_to_flush)
+
+            store_input = StoreDocumentInput(
                 workflow_run_id=run_id,
                 document_id=self._document_id,
                 workspace_id=self._workspace_id,
+                user_id=self._user_id,
+                filename=self._document_id,
+                original_filename=self._external_id,
+                content_type=CONVERSATION_CONTENT_TYPE,
+                size_bytes=flush_size_bytes,
+                storage_backend=CONVERSATION_STORAGE_BACKEND,
+                storage_path=f"conversation://{self._workspace_id}/{self._external_id}",
+                text_length=flush_text_length,
+                processing_time_ms=0,
+                tenant_id=self._tenant_id,
+                append=True,
+                document_type="conversation",
+                external_id=self._external_id,
+                metadata={
+                    "turn_count": self._total_turns_flushed,
+                    "last_flushed_at": workflow.now().isoformat(),
+                },
+            )
+
+            pg_task = workflow.execute_activity(
+                store_in_postgresql,
+                store_input,
+                start_to_close_timeout=timedelta(seconds=60),
+                retry_policy=RetryPolicy(
+                    maximum_attempts=5,
+                    initial_interval=timedelta(seconds=2),
+                    maximum_interval=timedelta(seconds=30),
+                    backoff_coefficient=2.0,
+                ),
+            )
+            wv_task = workflow.execute_activity(
+                store_in_weaviate,
+                store_input,
+                start_to_close_timeout=timedelta(minutes=2),
+                heartbeat_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(
+                    maximum_attempts=5,
+                    initial_interval=timedelta(seconds=5),
+                    maximum_interval=timedelta(seconds=60),
+                    backoff_coefficient=2.0,
+                ),
+            )
+            pg_result, wv_result = await asyncio.gather(pg_task, wv_task)
+
+            # `self._document_created` is workflow-LOCAL memory of "have I ever
+            # successfully stored a document for this conversation" -- still the
+            # right source of truth for get_status()'s observability field, the
+            # continue_as_new carry-over, and _finalize()'s completion-event
+            # `success` flag below, none of which need to survive the row
+            # underneath the workflow being deleted and recreated. Kept for
+            # those; NOT used for document_delta anymore (#364, see below).
+            if pg_result.success and not self._document_created:
+                self._document_created = True
+
+            await workflow.execute_activity(
+                update_workspace_stats,
+                UpdateStatsInput(
+                    workspace_id=self._workspace_id,
+                    # #364: derived from what THIS upsert actually did in the
+                    # database (StoreDocumentOutput.document_row_inserted, set
+                    # from Postgres's `(xmax = 0)` on the INSERT ... ON CONFLICT
+                    # in store_processed_document), NOT from whether this
+                    # workflow run previously believed it had already created
+                    # the row (the old `not self._document_created` check). The
+                    # old check went stale forever the moment `DELETE
+                    # /v1/conversations/{external_id}` removed the
+                    # processed_documents row out from under this still-running
+                    # workflow (that endpoint deliberately does not terminate
+                    # it, to avoid racing an in-flight flush): the next flush's
+                    # upsert finds no row and INSERTs a fresh one, but
+                    # `self._document_created` was already True and never reset,
+                    # so the old code produced document_delta=0 for a flush that
+                    # just created a brand-new row -- permanently under-counting
+                    # workspace_metadata.document_count. Asking the database what
+                    # it just did, in the SAME transaction as the write, removes
+                    # this whole class of bug instead of patching this one
+                    # instance (mirrors the #110 fencing check's shape: push the
+                    # decision into the transaction that can actually see it).
+                    #
+                    # Only the flush whose upsert INSERTs (row_was_inserted=True)
+                    # counts toward document_delta; every later flush on the SAME
+                    # row goes through DO UPDATE (row_was_inserted=False) and
+                    # must not be re-counted the way DocumentIngestionWorkflow
+                    # counts a document once per whole-document run.
+                    document_delta=(
+                        1 if (pg_result.success and pg_result.document_row_inserted) else 0
+                    ),
+                    chunk_delta=(
+                        chunk_output.chunk_count if (pg_result.success or wv_result.success) else 0
+                    ),
+                    size_delta=flush_size_bytes if pg_result.success else 0,
+                    workflow_run_id=run_id,
+                    document_id=self._document_id,
+                ),
+                start_to_close_timeout=timedelta(seconds=15),
+                retry_policy=RetryPolicy(
+                    maximum_attempts=3,
+                    initial_interval=timedelta(seconds=1),
+                    maximum_interval=timedelta(seconds=5),
+                    backoff_coefficient=2.0,
+                ),
+            )
+        except Exception as exc:
+            # #363: chunk/store/stats all only ever touch ALREADY-REDACTED
+            # text (`redact_output.redacted_turns`), so -- unlike the
+            # redact_turns catch above -- it is safe to persist that text in
+            # the dead-letter row for direct replay.
+            await self._dead_letter_flush(
+                turns_to_flush,
+                run_id,
+                exc,
+                stage=_stage_from_exception(exc),
                 redacted_turns=redact_output.redacted_turns,
-                turn_meta=turn_meta,
-            ),
-            start_to_close_timeout=timedelta(seconds=60),
-            retry_policy=RetryPolicy(
-                maximum_attempts=2,
-                initial_interval=timedelta(seconds=1),
-                maximum_interval=timedelta(seconds=10),
-                backoff_coefficient=2.0,
-            ),
-        )
-
-        if chunk_output.chunk_count == 0:
+            )
             return len(turns_to_flush)
-
-        flush_text_length = sum(len(rt.text) for rt in redact_output.redacted_turns)
-        # size_bytes must stay > 0 (processed_documents' CHECK, migration
-        # 001) -- always true here since this branch only runs when at least
-        # one turn redacted successfully, i.e. flush_text_length >= 1.
-        flush_size_bytes = max(flush_text_length, 1)
-
-        self._total_turns_flushed += len(turns_to_flush)
-
-        store_input = StoreDocumentInput(
-            workflow_run_id=run_id,
-            document_id=self._document_id,
-            workspace_id=self._workspace_id,
-            user_id=self._user_id,
-            filename=self._document_id,
-            original_filename=self._external_id,
-            content_type=CONVERSATION_CONTENT_TYPE,
-            size_bytes=flush_size_bytes,
-            storage_backend=CONVERSATION_STORAGE_BACKEND,
-            storage_path=f"conversation://{self._workspace_id}/{self._external_id}",
-            text_length=flush_text_length,
-            processing_time_ms=0,
-            tenant_id=self._tenant_id,
-            append=True,
-            document_type="conversation",
-            external_id=self._external_id,
-            metadata={
-                "turn_count": self._total_turns_flushed,
-                "last_flushed_at": workflow.now().isoformat(),
-            },
-        )
-
-        pg_task = workflow.execute_activity(
-            store_in_postgresql,
-            store_input,
-            start_to_close_timeout=timedelta(seconds=60),
-            retry_policy=RetryPolicy(
-                maximum_attempts=5,
-                initial_interval=timedelta(seconds=2),
-                maximum_interval=timedelta(seconds=30),
-                backoff_coefficient=2.0,
-            ),
-        )
-        wv_task = workflow.execute_activity(
-            store_in_weaviate,
-            store_input,
-            start_to_close_timeout=timedelta(minutes=2),
-            heartbeat_timeout=timedelta(seconds=30),
-            retry_policy=RetryPolicy(
-                maximum_attempts=5,
-                initial_interval=timedelta(seconds=5),
-                maximum_interval=timedelta(seconds=60),
-                backoff_coefficient=2.0,
-            ),
-        )
-        pg_result, wv_result = await asyncio.gather(pg_task, wv_task)
-
-        # `self._document_created` is workflow-LOCAL memory of "have I ever
-        # successfully stored a document for this conversation" -- still the
-        # right source of truth for get_status()'s observability field, the
-        # continue_as_new carry-over, and _finalize()'s completion-event
-        # `success` flag below, none of which need to survive the row
-        # underneath the workflow being deleted and recreated. Kept for
-        # those; NOT used for document_delta anymore (#364, see below).
-        if pg_result.success and not self._document_created:
-            self._document_created = True
-
-        await workflow.execute_activity(
-            update_workspace_stats,
-            UpdateStatsInput(
-                workspace_id=self._workspace_id,
-                # #364: derived from what THIS upsert actually did in the
-                # database (StoreDocumentOutput.document_row_inserted, set
-                # from Postgres's `(xmax = 0)` on the INSERT ... ON CONFLICT
-                # in store_processed_document), NOT from whether this
-                # workflow run previously believed it had already created
-                # the row (the old `not self._document_created` check). The
-                # old check went stale forever the moment `DELETE
-                # /v1/conversations/{external_id}` removed the
-                # processed_documents row out from under this still-running
-                # workflow (that endpoint deliberately does not terminate
-                # it, to avoid racing an in-flight flush): the next flush's
-                # upsert finds no row and INSERTs a fresh one, but
-                # `self._document_created` was already True and never reset,
-                # so the old code produced document_delta=0 for a flush that
-                # just created a brand-new row -- permanently under-counting
-                # workspace_metadata.document_count. Asking the database what
-                # it just did, in the SAME transaction as the write, removes
-                # this whole class of bug instead of patching this one
-                # instance (mirrors the #110 fencing check's shape: push the
-                # decision into the transaction that can actually see it).
-                #
-                # Only the flush whose upsert INSERTs (row_was_inserted=True)
-                # counts toward document_delta; every later flush on the SAME
-                # row goes through DO UPDATE (row_was_inserted=False) and
-                # must not be re-counted the way DocumentIngestionWorkflow
-                # counts a document once per whole-document run.
-                document_delta=(
-                    1 if (pg_result.success and pg_result.document_row_inserted) else 0
-                ),
-                chunk_delta=(
-                    chunk_output.chunk_count if (pg_result.success or wv_result.success) else 0
-                ),
-                size_delta=flush_size_bytes if pg_result.success else 0,
-                workflow_run_id=run_id,
-                document_id=self._document_id,
-            ),
-            start_to_close_timeout=timedelta(seconds=15),
-            retry_policy=RetryPolicy(
-                maximum_attempts=3,
-                initial_interval=timedelta(seconds=1),
-                maximum_interval=timedelta(seconds=5),
-                backoff_coefficient=2.0,
-            ),
-        )
 
         # Staging is scoped by workflow_run_id, which stays constant across
         # MULTIPLE flushes within one run (only continue_as_new changes it) --
@@ -553,6 +676,135 @@ class ConversationMemoryWorkflow:
             workflow.logger.warning("ConversationMemoryWorkflow: failed to clean up staging")
 
         return len(turns_to_flush)
+
+    async def _dead_letter_flush(
+        self,
+        turns: list[_BufferedTurn],
+        run_id: str,
+        exc: Exception,
+        stage: str,
+        redacted_turns: list[RedactedTurn] | None,
+    ) -> None:
+        """Persist a batch whose flush pipeline failed instead of losing it
+        (#363). See the module docstring's "Durability semantics" section
+        for the full picture; this is the mechanism behind it.
+
+        Reuses the SAME `dead_letter_jobs` mechanism `DocumentIngestionWorkflow`
+        writes via `record_dead_letter` (`src/temporal/activities/
+        dead_letter.py`) -- not a parallel table/activity. `dedup_key` is set
+        to this batch's first turn_id: stable across Temporal retrying THIS
+        `record_dead_letter` call (same input, same first turn_id -> same
+        row, idempotent), but distinct from any OTHER flush of this same
+        long-lived run (different turns -> different first turn_id -> its
+        own row) -- see migration 021 / `DatabaseService.add_dead_letter_job`
+        for why that distinction matters here specifically (a document
+        ingestion run only ever dead-letters once; a conversation run can
+        dead-letter many times).
+
+        `redacted_turns=None` means the failure happened AT `redact_turns`
+        itself, before it produced any output -- there is no text for this
+        batch that has ever passed through redaction, so none is written
+        here (see redact.py's module docstring: it is "the ONE AND ONLY
+        place raw pre-redaction turn text is allowed to exist in the
+        pipeline", and this dead-letter row must not become a second,
+        unaudited place that holds it). The row still carries every
+        `turn_id`, so the batch can be found and its raw text recovered from
+        this workflow's own Temporal event history (the `add_turn` signal
+        payload for each id) if an operator needs to replay it by hand.
+        Otherwise (`chunk_conversation`/store/stats failed) `redact_turns`
+        already ran successfully THIS flush, so `redacted_turns` is
+        already-safe, already-redacted text -- included in full for direct
+        replay.
+        """
+        error_message = f"{type(exc).__name__}: {exc}"
+        payload: dict = {
+            "reason": "conversation_flush_failed",
+            "stage": stage,
+            "workspace_id": self._workspace_id,
+            "external_id": self._external_id,
+            "document_id": self._document_id,
+            "user_id": self._user_id,
+            "workflow_id": workflow.info().workflow_id,
+            "workflow_run_id": run_id,
+            "turn_ids": [t.turn_id for t in turns],
+            "turn_count": len(turns),
+        }
+        if redacted_turns is not None:
+            payload["redacted_turns"] = [
+                {
+                    "turn_id": rt.turn_id,
+                    "role": rt.role,
+                    "text": rt.text,
+                    "original_index": rt.original_index,
+                }
+                for rt in redacted_turns
+            ]
+        else:
+            payload["raw_text_omitted_reason"] = (
+                "redact_turns failed before producing output -- raw "
+                "pre-redaction text is deliberately not stored here (see "
+                "redact.py's module docstring). Recover it from this "
+                "workflow's own Temporal event history: the add_turn "
+                "signal payload for each turn_id above."
+            )
+
+        try:
+            await workflow.execute_activity(
+                record_dead_letter,
+                RecordDeadLetterInput(
+                    document_id=self._document_id,
+                    workspace_id=self._workspace_id,
+                    user_id=self._user_id,
+                    workflow_run_id=run_id,
+                    original_message=payload,
+                    error_message=error_message,
+                    error_type=f"conversation_flush_{stage}_failed",
+                    dedup_key=turns[0].turn_id,
+                ),
+                start_to_close_timeout=timedelta(seconds=15),
+                retry_policy=RetryPolicy(
+                    maximum_attempts=3,
+                    initial_interval=timedelta(seconds=1),
+                    maximum_interval=timedelta(seconds=5),
+                    backoff_coefficient=2.0,
+                ),
+            )
+        except Exception:
+            # (3) The dead-letter write is itself an activity and can itself
+            # fail (exhaust its own retries). Decision: do NOT crash the
+            # workflow over this -- an unhandled exception here would
+            # propagate out of `run()` exactly like the original #363 bug,
+            # costing every FUTURE turn's flush too, in exchange for nothing
+            # (it does not bring this batch back). What must never happen is
+            # SILENCE: log CRITICAL with every identifier an operator needs
+            # to find the batch by hand -- at this point Temporal's own
+            # event history (the add_turn signals for these turn_ids, on
+            # this workflow_id/run_id) is the ONLY remaining record that
+            # this batch ever existed.
+            #
+            # Plain f-string, not structlog-style kwargs: `workflow.logger`
+            # (temporalio.workflow.LoggerAdapter) wraps the STANDARD library
+            # `logging` module, whose `Logger._log` rejects arbitrary keyword
+            # arguments outright (unlike the structlog loggers used
+            # elsewhere in this service, e.g. dead_letter.py's activity-side
+            # logger) -- every identifier is folded into the message text
+            # instead so this line can never itself raise.
+            workflow.logger.critical(
+                "ConversationMemoryWorkflow: flush failed AND dead-letter write "
+                "failed -- batch is unrecorded outside Temporal history "
+                f"(stage={stage}, workspace_id={self._workspace_id}, "
+                f"external_id={self._external_id}, document_id={self._document_id}, "
+                f"workflow_id={workflow.info().workflow_id}, workflow_run_id={run_id}, "
+                f"turn_ids={[t.turn_id for t in turns]}, turn_count={len(turns)}, "
+                f"original_error={error_message})"
+            )
+            return
+
+        workflow.logger.error(
+            "ConversationMemoryWorkflow: flush pipeline failed, batch dead-lettered "
+            f"(stage={stage}, document_id={self._document_id}, turn_count={len(turns)}, "
+            f"error={error_message})"
+        )
 
     async def _finalize(self) -> None:
         """Idle-24h or `close` finalize: publish completion, let the

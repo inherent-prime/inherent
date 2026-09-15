@@ -413,6 +413,12 @@ class DatabaseService:
             Column("original_message", JSONB, nullable=False),
             Column("error_message", Text, nullable=False),
             Column("error_type", String(100), nullable=False),
+            # #363: distinguishes multiple dead-letter rows within the SAME
+            # (document_id, workflow_run_id) pair -- see migration 021's
+            # comment for why ConversationMemoryWorkflow needs this (one run
+            # can dead-letter more than once) while DocumentIngestionWorkflow
+            # (default '', at most one dead-letter per run) is unaffected.
+            Column("dedup_key", String(255), nullable=False, default=""),
             Column("retry_count", Integer, nullable=False, default=0),
             Column("status", String(20), nullable=False, default="pending"),
             Column(
@@ -432,12 +438,16 @@ class DatabaseService:
             Index("idx_dead_letter_jobs_document_id", "document_id"),
             Index("idx_dead_letter_jobs_workspace_id", "workspace_id"),
             Index("idx_dead_letter_jobs_status", "status"),
-            # Dedup record-retries per run (#24). NULL workflow_run_id rows stay
-            # distinct in Postgres, so pre-workflow failures aren't deduped.
+            # Dedup record-retries per run (#24), widened by #363/migration 021
+            # to include dedup_key so a workflow that can dead-letter more than
+            # once per run (ConversationMemoryWorkflow) doesn't collide across
+            # batches. NULL workflow_run_id rows stay distinct in Postgres, so
+            # pre-workflow failures aren't deduped.
             Index(
-                "ux_dead_letter_jobs_document_run",
+                "ux_dead_letter_jobs_document_run_dedup",
                 "document_id",
                 "workflow_run_id",
+                "dedup_key",
                 unique=True,
             ),
         )
@@ -2013,6 +2023,7 @@ class DatabaseService:
         original_message: dict,
         error_message: str,
         error_type: str,
+        dedup_key: str = "",
     ) -> int:
         """Insert a failed ingestion job into the dead-letter table.
 
@@ -2024,6 +2035,15 @@ class DatabaseService:
             original_message: The full original MQ message dict
             error_message: The final error message
             error_type: Classification of the error (e.g. 'extraction_failed')
+            dedup_key: Disambiguates multiple dead-letter rows within the
+                same (document_id, workflow_run_id) pair (#363) -- callers
+                with at most one dead-letter per run (the historical case,
+                e.g. DocumentIngestionWorkflow) leave this at the default
+                '' and get identical dedup behavior to before this
+                parameter existed; ConversationMemoryWorkflow passes a
+                per-batch value (stable across retries of the SAME failed
+                flush, distinct across different flushes) since one run can
+                dead-letter more than once. See migration 021.
 
         Returns:
             The dead-letter job id
@@ -2033,11 +2053,14 @@ class DatabaseService:
 
         with self.get_session() as session:
             now = datetime.now(UTC)
-            # Upsert-do-nothing on (document_id, workflow_run_id): a record-retry
-            # (insert commits then loses its ack) must not create a duplicate
-            # dead-letter row, which the retry API could otherwise re-ingest twice
-            # (#24). NULL workflow_run_id rows are distinct in Postgres, so
-            # pre-workflow failures aren't deduped (correct — no run to key on).
+            # Upsert-do-nothing on (document_id, workflow_run_id, dedup_key):
+            # a record-retry (insert commits then loses its ack) must not
+            # create a duplicate dead-letter row, which the retry API could
+            # otherwise re-ingest twice (#24). NULL workflow_run_id rows are
+            # distinct in Postgres, so pre-workflow failures aren't deduped
+            # (correct — no run to key on). dedup_key (#363) is what lets a
+            # long-lived run dead-letter MULTIPLE distinct batches instead of
+            # every batch after the first silently colliding with it.
             result = session.execute(
                 pg_insert(self.dead_letter_jobs)
                 .values(
@@ -2048,12 +2071,15 @@ class DatabaseService:
                     original_message=original_message,
                     error_message=error_message,
                     error_type=error_type,
+                    dedup_key=dedup_key,
                     retry_count=0,
                     status="pending",
                     created_at=now,
                     updated_at=now,
                 )
-                .on_conflict_do_nothing(index_elements=["document_id", "workflow_run_id"])
+                .on_conflict_do_nothing(
+                    index_elements=["document_id", "workflow_run_id", "dedup_key"]
+                )
                 .returning(self.dead_letter_jobs.c.id)
             )
             job_id = result.scalar_one_or_none()
@@ -2065,6 +2091,7 @@ class DatabaseService:
                     .where(
                         self.dead_letter_jobs.c.document_id == document_id,
                         self.dead_letter_jobs.c.workflow_run_id == workflow_run_id,
+                        self.dead_letter_jobs.c.dedup_key == dedup_key,
                     )
                     .limit(1)
                 ).scalar_one_or_none()

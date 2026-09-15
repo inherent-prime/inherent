@@ -71,6 +71,11 @@ class RecordDeadLetterInput:
     original_message: dict
     error_message: str
     error_type: str
+    # #363: see DatabaseService.add_dead_letter_job's docstring. Default ''
+    # preserves DocumentIngestionWorkflow's existing at-most-one-per-run
+    # dedup behavior untouched; ConversationMemoryWorkflow (which can
+    # dead-letter more than once per run) sets this per batch.
+    dedup_key: str = ""
 
 
 @dataclass
