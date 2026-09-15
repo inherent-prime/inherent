@@ -285,9 +285,14 @@ class ConversationMemoryWorkflow:
         (those come from `ConversationMemoryInput`, see `run()`).
         """
         if turn.turn_id in self._seen_turn_ids:
+            # f-string, not kwargs: `workflow.logger` is a stdlib
+            # LoggerAdapter, which raises TypeError on arbitrary keyword
+            # arguments -- unlike the structlog loggers used on the activity
+            # side. As kwargs this line was a latent crash that only fired
+            # once DEBUG logging was enabled (#363 review).
             workflow.logger.debug(
-                "ConversationMemoryWorkflow: duplicate turn_id ignored (no-op)",
-                turn_id=turn.turn_id,
+                "ConversationMemoryWorkflow: duplicate turn_id ignored "
+                f"(no-op) turn_id={turn.turn_id}"
             )
             return
 

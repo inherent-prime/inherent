@@ -811,9 +811,9 @@ class TestDeadLetterOnFlushFailure:
                     if await _attempted_thrice():
                         break
                     await asyncio.sleep(0.05)
-                assert await _attempted_thrice(), (
-                    "dead-letter write was not retried up to its own budget"
-                )
+                assert (
+                    await _attempted_thrice()
+                ), "dead-letter write was not retried up to its own budget"
 
                 # Still alive: a later, healthy turn flushes through the
                 # real pipeline exactly as if nothing had happened.
