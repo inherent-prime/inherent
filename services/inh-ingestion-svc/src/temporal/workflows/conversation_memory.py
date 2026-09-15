@@ -451,14 +451,6 @@ class ConversationMemoryWorkflow:
             },
         )
 
-        # Captured BEFORE the store calls: whether THIS flush is the one
-        # that creates the conversation's processed_documents row (workspace
-        # stats' document_delta must count it exactly once, ever -- not
-        # once per flush, and not again after a continue_as_new resets
-        # workflow-local counters but NOT `self._document_created`, which
-        # `run()` restores from `ConversationMemoryInput.document_created`).
-        was_already_created = self._document_created
-
         pg_task = workflow.execute_activity(
             store_in_postgresql,
             store_input,
@@ -484,6 +476,13 @@ class ConversationMemoryWorkflow:
         )
         pg_result, wv_result = await asyncio.gather(pg_task, wv_task)
 
+        # `self._document_created` is workflow-LOCAL memory of "have I ever
+        # successfully stored a document for this conversation" -- still the
+        # right source of truth for get_status()'s observability field, the
+        # continue_as_new carry-over, and _finalize()'s completion-event
+        # `success` flag below, none of which need to survive the row
+        # underneath the workflow being deleted and recreated. Kept for
+        # those; NOT used for document_delta anymore (#364, see below).
         if pg_result.success and not self._document_created:
             self._document_created = True
 
@@ -491,13 +490,35 @@ class ConversationMemoryWorkflow:
             update_workspace_stats,
             UpdateStatsInput(
                 workspace_id=self._workspace_id,
-                # Only the FIRST successful flush ever creates the
-                # conversation's one processed_documents row; every later
-                # flush grows the SAME row (append=True), so document_delta
-                # must not be re-counted on every flush the way
-                # DocumentIngestionWorkflow counts it once per whole-document
-                # run.
-                document_delta=1 if (pg_result.success and not was_already_created) else 0,
+                # #364: derived from what THIS upsert actually did in the
+                # database (StoreDocumentOutput.document_row_inserted, set
+                # from Postgres's `(xmax = 0)` on the INSERT ... ON CONFLICT
+                # in store_processed_document), NOT from whether this
+                # workflow run previously believed it had already created
+                # the row (the old `not self._document_created` check). The
+                # old check went stale forever the moment `DELETE
+                # /v1/conversations/{external_id}` removed the
+                # processed_documents row out from under this still-running
+                # workflow (that endpoint deliberately does not terminate
+                # it, to avoid racing an in-flight flush): the next flush's
+                # upsert finds no row and INSERTs a fresh one, but
+                # `self._document_created` was already True and never reset,
+                # so the old code produced document_delta=0 for a flush that
+                # just created a brand-new row -- permanently under-counting
+                # workspace_metadata.document_count. Asking the database what
+                # it just did, in the SAME transaction as the write, removes
+                # this whole class of bug instead of patching this one
+                # instance (mirrors the #110 fencing check's shape: push the
+                # decision into the transaction that can actually see it).
+                #
+                # Only the flush whose upsert INSERTs (row_was_inserted=True)
+                # counts toward document_delta; every later flush on the SAME
+                # row goes through DO UPDATE (row_was_inserted=False) and
+                # must not be re-counted the way DocumentIngestionWorkflow
+                # counts a document once per whole-document run.
+                document_delta=(
+                    1 if (pg_result.success and pg_result.document_row_inserted) else 0
+                ),
                 chunk_delta=(
                     chunk_output.chunk_count if (pg_result.success or wv_result.success) else 0
                 ),

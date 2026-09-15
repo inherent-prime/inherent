@@ -245,10 +245,12 @@ class TestIntakeDocumentExplicitlyRejectedLegacyFormats:
 
 
 class TestIntakeDocumentExtensionFallback:
-    """#122: `intake_document` resolves via `get_spec_for_upload`, which
+    """#122: `intake_document` resolves via `resolve_upload_spec`, which
     consults `filename`'s extension ONLY when `content_type` is generic
     (`application/octet-stream`) or absent -- completing the design
-    `FileTypeSpec.extensions` was reserved for at #117."""
+    `FileTypeSpec.extensions` was reserved for at #117. #211: when that
+    fallback fires, the stored `content_type` is also normalized to the
+    resolved spec's specific MIME -- see the first test below."""
 
     async def test_octet_stream_with_registered_extension_accepted(
         self, mock_db, mock_storage, mock_mq
@@ -264,9 +266,12 @@ class TestIntakeDocumentExtensionFallback:
                 content_type="application/octet-stream",
             )
         assert result.status == "pending"
-        # The client-sent value is preserved verbatim (#122) -- the resolved
-        # 'code' spec validates the upload but never rewrites content_type.
-        assert result.mime_type == "application/octet-stream"
+        # #211: `application/octet-stream` carries no real information (it's
+        # the "I don't know" default, not a client assertion), so once the
+        # 'code' spec is resolved via the extension fallback the stored
+        # label is normalized to the specific MIME that fallback resolved
+        # to -- no longer preserved verbatim as #122 originally left it.
+        assert result.mime_type == "text/x-python"
 
     async def test_octet_stream_with_unregistered_extension_still_rejected(
         self, mock_db, mock_storage, mock_mq

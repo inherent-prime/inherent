@@ -3,6 +3,7 @@
 import enum
 import hashlib
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -60,6 +61,30 @@ class StorageBackendType(enum.StrEnum):
     GCS = "gcs"
     S3 = "s3"
     AZURE = "azure"
+
+
+@dataclass
+class StoreProcessedDocumentInfo:
+    """Mutable out-parameter for `store_processed_document` (#364).
+
+    `store_processed_document` already computes, purely internally, whether
+    its upsert INSERTed a brand-new `processed_documents` row or found one
+    already there and went through `DO UPDATE` instead (`row_was_inserted`,
+    derived from Postgres's `(xmax = 0)` idiom -- see that method's inline
+    comment) -- it only ever used the signal to keep `size_bytes` idempotent
+    on append. Passing an instance of this class as `result_info` lets a
+    caller read that SAME signal back out after the call returns, instead of
+    tracking its own "have I already created this document" flag in memory,
+    which is exactly the bug #364 fixes: ConversationMemoryWorkflow's
+    `self._document_created` went stale the moment `DELETE
+    /v1/conversations/{external_id}` removed the row out from under a still-
+    running workflow, permanently under-counting `workspace_metadata.
+    document_count` from the next flush on. Deriving the signal from what
+    the database actually did, in the SAME transaction as the write,
+    survives that interleaving by construction.
+    """
+
+    row_was_inserted: bool = False
 
 
 class DatabaseService:
@@ -886,6 +911,7 @@ class DatabaseService:
         document_type: str = "file",
         external_id: str | None = None,
         metadata: dict | None = None,
+        result_info: StoreProcessedDocumentInfo | None = None,
     ) -> int | None:
         """Store processed document and its chunks with proper FK relationship.
 
@@ -921,6 +947,19 @@ class DatabaseService:
                 {"turn_count": ..., "last_flushed_at": ...}. None (default)
                 leaves the column untouched on update, and NULL on insert --
                 no existing caller passes this, so behavior is unchanged.
+            result_info (#364): optional out-parameter. When given, this call
+                sets its `row_was_inserted` to whether the upsert below
+                actually INSERTed a brand-new `processed_documents` row
+                (True) or found one already there and went through DO UPDATE
+                instead (False) -- the same `(xmax = 0)` signal already
+                computed below for the size_bytes idempotency fix, now also
+                exposed to the caller. Added as an out-parameter rather than
+                changing the return type so every existing caller (and the
+                many tests asserting `store_processed_document(...)` returns
+                a plain `int | None`) stays byte-identical; only a caller
+                that explicitly wants the insert/update distinction (see
+                store_in_postgresql -> StoreDocumentOutput.document_row_inserted
+                -> ConversationMemoryWorkflow._flush) opts in.
 
         Returns:
             ID of the stored document record, or None if the write was
@@ -1070,6 +1109,14 @@ class DatabaseService:
                 # .scalar_one() again on the same Result (single-use cursor).
                 doc_id: int = row[0]  # type: ignore[assignment]
                 row_was_inserted: bool = bool(row[1])
+                if result_info is not None:
+                    # #364: surface the same DB-verified insert/update signal
+                    # to the caller instead of it having to (wrongly) infer
+                    # "did this create the document" from its own in-memory
+                    # state -- see ConversationMemoryWorkflow's module
+                    # docstring / this dataclass's docstring for why that
+                    # inference goes stale across a delete-then-reflush.
+                    result_info.row_was_inserted = row_was_inserted
 
                 # append (#306): skip the destructive delete entirely -- a
                 # previous flush's chunks must survive this one. This is the

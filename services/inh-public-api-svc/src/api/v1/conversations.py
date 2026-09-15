@@ -15,12 +15,18 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from src.core.exceptions import BadRequestError, ServiceUnavailableError
+from src.mcp_server.quotas import check_quota, quota_denial_to_rate_limit_error
 from src.models.conversation import (
     ConversationResponse,
     ConversationTurnBatchRequest,
     ConversationTurnBatchResponse,
 )
-from src.services.auth import ResolvedAuth, resolve_workspace_read, resolve_workspace_write
+from src.services.auth import (
+    Principal,
+    ResolvedAuth,
+    resolve_workspace_read,
+    resolve_workspace_write,
+)
 from src.services.conversation_intake import intake_turns
 from src.services.database import DatabaseService, get_database
 from src.services.deletion import delete_document_everywhere
@@ -59,6 +65,21 @@ async def append_conversation_turns(
         raise BadRequestError(
             detail="Workspace ID required. Provide X-Workspace-Id header.",
         )
+
+    # Per-identity entitlement/quota enforcement (#365) -- same gap and same
+    # fix as documents.py's upload_document: this route used to go straight
+    # from resolve_workspace_write to intake_turns, unrestricted by any
+    # configured writes_per_day/calls_per_* limit. "append_conversation_turns"
+    # is not in quotas.py's _DOCUMENT_INCREASING_TOOLS (that set is
+    # {"upload_document"} only), so no workspace_ids_for_max_documents
+    # provider is passed here -- max_documents never applies to this tool
+    # name regardless, exactly as it wouldn't for an equivalent MCP tool, so
+    # there's nothing to resolve lazily. writes_per_day/calls_per_minute/
+    # calls_per_month are still fully enforced via the "write" permission.
+    principal = Principal.from_api_key(auth.key_info)
+    denial = await check_quota(principal, "append_conversation_turns", "write")
+    if denial is not None:
+        raise quota_denial_to_rate_limit_error(denial)
 
     return await intake_turns(
         workspace_id=workspace_id,

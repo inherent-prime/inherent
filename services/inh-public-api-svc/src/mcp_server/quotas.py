@@ -280,6 +280,52 @@ async def _check_max_documents(
     )
 
 
+def quota_denial_to_rate_limit_error(denial: QuotaDenial) -> RateLimitError:
+    """Render a ``QuotaDenial`` as REST's EXISTING 429 contract (#365).
+
+    ``src/api/v1/documents.py`` and ``src/api/v1/conversations.py`` both
+    raise the result of this function rather than each inventing their own
+    shape for "quota exceeded" -- ``RateLimitError`` (``src/core/
+    exceptions.py``) is already REST's rate-limit error, already used by
+    ``src/middleware/rate_limiting.py``'s #213 per-key/per-IP limiter and
+    already rendered by ``ErrorHandlerMiddleware`` as a 429 RFC 7807
+    problem+json body with ``limit``/``retry_after``/``remaining``
+    extensions. A per-identity quota rejection and a per-key/IP rate-limit
+    rejection are the SAME kind of thing from a REST client's perspective
+    ("you are over a request budget, here is which one and when it clears")
+    -- reusing the contract means an existing client's 429 handling already
+    covers this without knowing #365 exists. This is deliberately NOT the
+    MCP-shaped ``{"error_class": ..., ...}`` ``structuredContent`` payload
+    ``http_transport._quota_exceeded_result`` builds -- that shape only means
+    something inside a JSON-RPC ``CallToolResult``; leaking it into an HTTP
+    problem-details body would be a new, undocumented error contract for
+    REST callers to learn for no reason.
+
+    ``retry_after`` is only set when ``denial.reset_at`` is not ``None``
+    (i.e. every limit except ``max_documents``, which has no time window --
+    see ``QuotaDenial``'s docstring): a document-count cap does not "reset"
+    on a schedule, so promising a retry time would be a lie the client would
+    reasonably act on.
+    """
+    detail = f"'{denial.limit_name}' limit exceeded (limit: {denial.limit})."
+    if denial.upgrade_url:
+        detail += f" Raise this limit: {denial.upgrade_url}"
+
+    retry_after: int | None = None
+    if denial.reset_at is not None:
+        # Never negative: a reset instant computed moments ago (or a clock
+        # skew edge case) must not surface as "retry -3 seconds ago".
+        retry_after = max(0, round(denial.reset_at - time.time()))
+
+    return RateLimitError(
+        detail=detail,
+        retry_after=retry_after,
+        limit=denial.limit,
+        remaining=0,
+        extensions={"limit_name": denial.limit_name},
+    )
+
+
 async def check_quota(
     principal: Principal,
     tool_name: str,

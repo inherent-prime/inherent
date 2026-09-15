@@ -87,6 +87,18 @@ before anything is stored:
 Between the two checks, any pairwise disagreement among {declared type,
 filename, bytes} is caught by at least one of them.
 
+**Stored `content_type` label (#211).** A validated upload's `content_type`
+is normally stored exactly as the client declared it. The one exception is a
+GENERIC or absent declared type (`application/octet-stream`, or no header at
+all) that only validated because the filename extension resolved it via the
+fallback above: that carries no real information from the client, so the
+stored label is rewritten to the resolved spec's specific MIME (e.g. a `.go`
+file uploaded as `application/octet-stream` stores `text/x-go`, not
+`application/octet-stream`) — matching what MCP's `upload_document` already
+derives when its own `content_type` argument is omitted. A SPECIFIC declared
+type is always preserved verbatim, including one the registry maps to a
+different canonical MIME for that extension.
+
 A content type reaching the ingestion extractor with no registry entry (or a
 registry entry whose extractor isn't wired up) fails the document with a
 clear `error_message` — there is no default "decode it as text and hope"

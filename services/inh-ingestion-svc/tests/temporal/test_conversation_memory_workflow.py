@@ -119,16 +119,36 @@ class _RecordingChunkConversation:
 
 class _RecordingStore:
     """Shared recorder for store_in_postgresql/store_in_weaviate mocks --
-    proves `append=True` was actually threaded through to BOTH calls."""
+    proves `append=True` was actually threaded through to BOTH calls.
 
-    def __init__(self) -> None:
+    `document_row_inserted_sequence` (#364): lets a test control, per flush,
+    what the DB-verified insert/update signal (StoreDocumentOutput.
+    document_row_inserted) reports -- e.g. `[True, True]` simulates the
+    processed_documents row being deleted and re-created between two
+    flushes of the SAME still-running workflow (the #364 scenario), vs.
+    `[True, False]` for the ordinary case of a second flush growing the
+    SAME row. Defaults to always-True (every flush looks like a fresh
+    insert) for tests that don't care about this signal at all.
+    """
+
+    def __init__(self, document_row_inserted_sequence: list[bool] | None = None) -> None:
         self.pg_calls: list[StoreDocumentInput] = []
         self.wv_calls: list[StoreDocumentInput] = []
+        self._document_row_inserted_sequence = list(
+            document_row_inserted_sequence if document_row_inserted_sequence is not None else []
+        )
 
     @activity.defn(name="store_in_postgresql")
     async def store_in_postgresql(self, input: StoreDocumentInput) -> StoreDocumentOutput:
         self.pg_calls.append(input)
-        return StoreDocumentOutput(success=True, chunks_stored=1)
+        row_inserted = (
+            self._document_row_inserted_sequence.pop(0)
+            if self._document_row_inserted_sequence
+            else True
+        )
+        return StoreDocumentOutput(
+            success=True, chunks_stored=1, document_row_inserted=row_inserted
+        )
 
     @activity.defn(name="store_in_weaviate")
     async def store_in_weaviate(self, input: StoreDocumentInput) -> StoreDocumentOutput:
@@ -139,6 +159,22 @@ class _RecordingStore:
 @activity.defn(name="update_workspace_stats")
 async def mock_update_workspace_stats(input: UpdateStatsInput) -> None:
     return None
+
+
+class _RecordingStats:
+    """Records every UpdateStatsInput the workflow sends to
+    update_workspace_stats -- #364's regression tests assert on
+    `document_delta` here, which `mock_update_workspace_stats` above
+    (used by the pre-existing tests, which don't care about this value)
+    discards."""
+
+    def __init__(self) -> None:
+        self.calls: list[UpdateStatsInput] = []
+
+    @activity.defn(name="update_workspace_stats")
+    async def __call__(self, input: UpdateStatsInput) -> None:
+        self.calls.append(input)
+        return None
 
 
 @activity.defn(name="cleanup_staging")
@@ -156,14 +192,16 @@ class _RecordingPublishCompletion:
         return None
 
 
-def _activities(chunker: _RecordingChunkConversation, store: _RecordingStore, publisher):
+def _activities(
+    chunker: _RecordingChunkConversation, store: _RecordingStore, publisher, stats=None
+):
     return [
         mock_ensure_tenant_ready,
         mock_redact_turns_noop,
         chunker.__call__,
         store.store_in_postgresql,
         store.store_in_weaviate,
-        mock_update_workspace_stats,
+        stats.__call__ if stats is not None else mock_update_workspace_stats,
         mock_cleanup_staging,
         publisher.__call__,
     ]
@@ -369,3 +407,110 @@ async def test_duplicate_turn_id_does_not_extend_idle_finalize_deadline():
 
     # The duplicate itself must still be a no-op on the actual pipeline.
     assert len(chunker.calls[0].redacted_turns) == 1
+
+
+async def _run_two_flushes(store: _RecordingStore, stats: _RecordingStats) -> None:
+    """Drive TWO deterministic size-triggered flushes of the same running
+    workflow (no continue_as_new in between -- matches #364's scenario of a
+    delete landing on a conversation whose workflow keeps running), then
+    close. Shared by both tests below so only `store`'s
+    document_row_inserted_sequence differs between "delete-then-reflush"
+    and "ordinary second flush"."""
+    chunker = _RecordingChunkConversation()
+    publisher = _RecordingPublishCompletion()
+
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with Worker(
+            env.client,
+            task_queue=TASK_QUEUE,
+            workflows=[ConversationMemoryWorkflow],
+            activities=_activities(chunker, store, publisher, stats=stats),
+        ):
+            handle = await env.client.start_workflow(
+                ConversationMemoryWorkflow.run,
+                # Low threshold: each individual turn's text alone crosses
+                # it, so each add_turn triggers its OWN flush deterministically.
+                _input(flush_char_threshold=10),
+                id="conv-document-delta-test",
+                task_queue=TASK_QUEUE,
+                start_signal="add_turn",
+                start_signal_args=[_turn(turn_id="t1", text="first turn crosses threshold")],
+            )
+
+            async def _flushed(n: int) -> bool:
+                status = await handle.query(ConversationMemoryWorkflow.get_status)
+                return bool(status["total_turns_flushed"] >= n)
+
+            for _ in range(50):
+                if await _flushed(1):
+                    break
+                await asyncio.sleep(0.05)
+            assert await _flushed(1), "first flush never happened"
+
+            # A later turn on the SAME still-running workflow -- exactly
+            # what a client resumes with after DELETE /v1/conversations/
+            # {external_id} removed the processed_documents row without
+            # terminating this workflow (that endpoint deliberately does
+            # not terminate it -- see conversation_memory.py's #364 comment).
+            await handle.signal(
+                ConversationMemoryWorkflow.add_turn,
+                _turn(turn_id="t2", text="second turn also crosses threshold"),
+            )
+            for _ in range(50):
+                if await _flushed(2):
+                    break
+                await asyncio.sleep(0.05)
+            assert await _flushed(2), "second flush never happened"
+
+            await handle.signal(ConversationMemoryWorkflow.close)
+            await handle.result()
+
+    assert len(store.pg_calls) == 2
+    assert len(stats.calls) == 2
+
+
+class TestDocumentDeltaFromDbInsertSignal:
+    """#364 regression: document_delta must come from the database's own
+    insert/update signal (StoreDocumentOutput.document_row_inserted), not
+    from the workflow's own `self._document_created` memory -- which is
+    exactly what goes stale across a delete-then-reflush (see
+    conversation_memory.py's `_flush` for the full mechanism)."""
+
+    @pytest.mark.asyncio
+    async def test_delete_then_reflush_still_counts_the_new_row(self):
+        """Both flushes' Postgres upserts report an INSERT (the DB's view:
+        flush 1 creates the row, something deletes it out from under the
+        still-running workflow, flush 2 creates it again from scratch).
+
+        Under the OLD bug, flush 2's `document_delta` would be computed from
+        `not self._document_created`, which is False by flush 2 (it was set
+        True after flush 1 and never reset) -- producing document_delta=0
+        for a flush that the database says just INSERTed a brand-new row.
+        This is the exact under-count issue #364 reports. The fix must
+        produce document_delta=1 for BOTH flushes here.
+        """
+        store = _RecordingStore(document_row_inserted_sequence=[True, True])
+        stats = _RecordingStats()
+
+        await _run_two_flushes(store, stats)
+
+        assert stats.calls[0].document_delta == 1, "first flush must count its insert"
+        assert stats.calls[1].document_delta == 1, (
+            "second flush's INSERT (row recreated after a delete) must also count -- "
+            "this is exactly what the stale self._document_created flag used to zero out"
+        )
+
+    @pytest.mark.asyncio
+    async def test_ordinary_second_flush_on_the_same_row_does_not_double_count(self):
+        """The existing idempotency guarantee, preserved under the new
+        mechanism: when the row was NOT deleted, flush 2's upsert goes
+        through DO UPDATE (document_row_inserted=False), and document_delta
+        must stay 0 -- a repeated/ordinary flush of the same conversation
+        must not inflate workspace_metadata.document_count."""
+        store = _RecordingStore(document_row_inserted_sequence=[True, False])
+        stats = _RecordingStats()
+
+        await _run_two_flushes(store, stats)
+
+        assert stats.calls[0].document_delta == 1, "first flush creates the row"
+        assert stats.calls[1].document_delta == 0, "second flush only grows the existing row"

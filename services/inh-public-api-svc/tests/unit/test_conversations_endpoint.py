@@ -255,3 +255,72 @@ class TestDeleteConversation:
             response = await client.delete("/v1/conversations/conv-1")
 
         assert response.status_code == 404
+
+
+class _FixedEntitlementsProvider:
+    """Entitlements provider test double returning one fixed value --
+    mirrors ``tests/unit/test_quotas.py``'s ``_FixedProvider``.
+    ``set_entitlements_provider`` takes an ``EntitlementsProvider`` (an
+    object with an async ``get_entitlements`` method), not a bare
+    ``Entitlements`` value."""
+
+    def __init__(self, entitlements) -> None:
+        self._entitlements = entitlements
+
+    async def get_entitlements(self, principal):  # noqa: ARG002
+        return self._entitlements
+
+
+class TestAppendConversationTurnsQuotaEnforcement:
+    """#365: POST /v1/conversations/{id}/turns was the other REST gap in
+    #309's per-identity quotas. Exercises the real HTTP route (``check_quota``
+    itself is covered directly by ``tests/unit/test_quotas.py``)."""
+
+    def _turns_payload(self) -> dict:
+        return {
+            "turns": [
+                {
+                    "turn_id": "t1",
+                    "role": "user",
+                    "text": "hello",
+                    "ts": "2026-08-31T10:00:00Z",
+                }
+            ]
+        }
+
+    async def test_writes_per_day_exhausted_returns_429(self, client, mock_mq):
+        from src.services.entitlements import Entitlements, set_entitlements_provider
+
+        set_entitlements_provider(_FixedEntitlementsProvider(Entitlements(writes_per_day=0)))
+
+        response = await client.post("/v1/conversations/conv-1/turns", json=self._turns_payload())
+
+        assert response.status_code == 429
+        assert "writes_per_day" in response.json()["detail"]
+        # Denied before intake: no turn published to MQ.
+        mock_mq.publish.assert_not_awaited()
+
+    async def test_max_documents_configured_does_not_block_turns(self, client, mock_mq):
+        """max_documents is checked only against the one action that
+        increases a workspace's document count (``upload_document`` --
+        ``quotas._DOCUMENT_INCREASING_TOOLS``); appending conversation turns
+        is a different action and must never be blocked by it, no matter how
+        low the cap is set. Pins that this route's check_quota call uses a
+        tool name that never matches that set."""
+        from src.services.entitlements import Entitlements, set_entitlements_provider
+
+        set_entitlements_provider(_FixedEntitlementsProvider(Entitlements(max_documents=0)))
+
+        response = await client.post("/v1/conversations/conv-1/turns", json=self._turns_payload())
+
+        assert response.status_code == 202
+        mock_mq.publish.assert_awaited_once()
+
+    async def test_default_deployment_unaffected(self, client, mock_mq):
+        """The regression guard that matters most (#365): with no
+        entitlements provider installed (the shipped
+        ``NullEntitlementsProvider``, every principal unlimited), appending
+        turns behaves exactly as it did before #365."""
+        response = await client.post("/v1/conversations/conv-1/turns", json=self._turns_payload())
+        assert response.status_code == 202
+        mock_mq.publish.assert_awaited_once()

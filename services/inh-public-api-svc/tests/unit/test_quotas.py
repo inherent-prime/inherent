@@ -1,8 +1,10 @@
-"""Unit tests for per-identity quota enforcement (#309).
+"""Unit tests for per-identity quota enforcement (#309, #365, #366).
 
 Exercises ``src.mcp_server.quotas.check_quota`` directly (no HTTP, no
 ``call_tool`` dispatch -- that wiring is covered by
-``tests/contract/test_mcp_quotas.py``), covering:
+``tests/contract/test_mcp_quotas.py`` for MCP and
+``tests/unit/test_upload_document.py`` / ``test_conversations_endpoint.py``
+for REST), covering:
 
 - Default-open: an unlimited principal costs zero rate-limiter/database I/O.
 - Each limit kind rejects at its boundary and reports the right
@@ -12,9 +14,13 @@ Exercises ``src.mcp_server.quotas.check_quota`` directly (no HTTP, no
 - ``writes_per_day`` exhausted still permits a read (acceptance criterion).
 - ``max_documents`` is enforced only for the one tool that can increase a
   workspace's document count, never for delete/refresh.
+- ``max_documents`` is a check-then-act approximation: concurrent callers at
+  the boundary can both pass (#366's ``TestMaxDocumentsRace``).
 - Fail-OPEN on every infrastructure failure (entitlements lookup, rate
   limiter backend, document-count query) vs. fail-CLOSED on genuine
   exhaustion -- #309 design constraint #2.
+- ``quota_denial_to_rate_limit_error`` renders a denial as REST's existing
+  429 contract (#365).
 """
 
 from __future__ import annotations
@@ -25,6 +31,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 import src.mcp_server.quotas as quotas
+from src.core.exceptions import RateLimitError
 from src.core.rate_limiter import InMemoryBackend, TokenBucketRateLimiter
 from src.services.auth import Principal
 from src.services.entitlements import Entitlements, set_entitlements_provider
@@ -247,6 +254,74 @@ class TestMaxDocuments:
 
 
 # --------------------------------------------------------------------------- #
+# max_documents is a check-then-act approximation, not atomic (#366)
+# --------------------------------------------------------------------------- #
+class TestMaxDocumentsRace:
+    """Pins the ACTUAL overshoot behavior described in the block comment on
+    ``_check_max_documents`` -- executable knowledge instead of a comment
+    that could silently drift from what the code does.
+
+    Unreachable in the shipped default (``NullEntitlementsProvider``), same
+    as every other limit in this module -- this only matters the day an
+    operator wires in a real provider with ``max_documents`` set, at which
+    point the bound this test pins (overshoot <= number of concurrent
+    racing callers) is what an operator should actually expect, not "the cap
+    is exact".
+    """
+
+    async def test_concurrent_callers_at_the_boundary_can_both_pass(self):
+        """Two callers racing at count == max_documents - 1 both read the
+        SAME pre-write count and both get allowed -- the unlocked
+        ``SELECT COUNT(*)`` race #366 describes: the write that would bump
+        the real count happens later, elsewhere (S3 upload + persistence in
+        ``document_intake.py``), entirely outside this check. Sequential
+        enforcement of a cap of 5 starting at 4 should only ever let ONE
+        caller through; both passing is precisely the overshoot the #366
+        comment documents as bounded-but-real, not eliminated."""
+        set_entitlements_provider(_FixedProvider(Entitlements(max_documents=5)))
+        db = AsyncMock()
+
+        # A small delay forces both coroutines' awaits to genuinely
+        # interleave under asyncio.gather rather than happening to resolve
+        # sequentially by coincidence -- both observe the same stale count
+        # because nothing here ever increments it (that's the point: in
+        # production the increment is a separate write, reached later, via
+        # an entirely different code path this check has no visibility into).
+        async def _stale_count(_workspace_ids):
+            await asyncio.sleep(0.01)
+            return 4
+
+        db.get_document_count_for_workspaces = AsyncMock(side_effect=_stale_count)
+
+        async def _workspace_ids():
+            return ["ws-1"]
+
+        principal = _principal()
+        with patch("src.services.database.get_database", AsyncMock(return_value=db)):
+            first, second = await asyncio.gather(
+                quotas.check_quota(
+                    principal,
+                    "upload_document",
+                    "write",
+                    workspace_ids_for_max_documents=_workspace_ids,
+                ),
+                quotas.check_quota(
+                    principal,
+                    "upload_document",
+                    "write",
+                    workspace_ids_for_max_documents=_workspace_ids,
+                ),
+            )
+
+        # The documented approximation: BOTH are allowed (denial is None for
+        # both), even though only one more document should logically fit
+        # under a cap of 5 starting from 4.
+        assert first is None
+        assert second is None
+        assert db.get_document_count_for_workspaces.await_count == 2
+
+
+# --------------------------------------------------------------------------- #
 # Fail-open on infrastructure failure (#309 design constraint #2)
 # --------------------------------------------------------------------------- #
 class TestFailOpen:
@@ -288,6 +363,56 @@ class TestFailOpen:
         await quotas.check_quota(principal, "search_documents", "search")
         denial = await quotas.check_quota(principal, "search_documents", "search")
         assert denial is not None
+
+
+# --------------------------------------------------------------------------- #
+# quota_denial_to_rate_limit_error: REST's rendering of a denial (#365)
+# --------------------------------------------------------------------------- #
+class TestQuotaDenialToRateLimitError:
+    def test_renders_as_rate_limit_error_with_reset(self):
+        denial = quotas.QuotaDenial(
+            limit_name="writes_per_day", limit=10, reset_at=1_700_000_060.0, upgrade_url=None
+        )
+        with patch("src.mcp_server.quotas.time.time", return_value=1_700_000_000.0):
+            error = quotas.quota_denial_to_rate_limit_error(denial)
+
+        assert isinstance(error, RateLimitError)
+        assert error.status_code == 429
+        assert "writes_per_day" in error.detail
+        assert error.retry_after == 60
+        assert error.extensions["limit"] == 10
+        assert error.extensions["remaining"] == 0
+        assert error.extensions["limit_name"] == "writes_per_day"
+
+    def test_max_documents_has_no_retry_after(self):
+        """max_documents has no time window -- retry_after must not be
+        fabricated (QuotaDenial.reset_at is None for it)."""
+        denial = quotas.QuotaDenial(
+            limit_name="max_documents", limit=100, reset_at=None, upgrade_url=None
+        )
+        error = quotas.quota_denial_to_rate_limit_error(denial)
+        assert error.retry_after is None
+        assert "retry_after" not in error.extensions
+
+    def test_upgrade_url_surfaced_in_detail(self):
+        denial = quotas.QuotaDenial(
+            limit_name="calls_per_minute",
+            limit=5,
+            reset_at=None,
+            upgrade_url="https://example.com/upgrade",
+        )
+        error = quotas.quota_denial_to_rate_limit_error(denial)
+        assert "https://example.com/upgrade" in error.detail
+
+    def test_retry_after_never_negative(self):
+        """A reset instant already in the past (clock skew, or the instant
+        itself just elapsed) must clamp to 0, not go negative."""
+        denial = quotas.QuotaDenial(
+            limit_name="calls_per_minute", limit=5, reset_at=1_000.0, upgrade_url=None
+        )
+        with patch("src.mcp_server.quotas.time.time", return_value=5_000.0):
+            error = quotas.quota_denial_to_rate_limit_error(denial)
+        assert error.retry_after == 0
 
 
 # --------------------------------------------------------------------------- #

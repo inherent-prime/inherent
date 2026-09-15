@@ -19,6 +19,22 @@ All notable changes to Inherent are documented here. The format follows
   tenant-wide opt-out and rejects only `""`. None of the three was reachable
   from an HTTP route, so this closes a latent shape rather than an active
   vulnerability.
+- **Per-identity entitlement quotas (#309) now also enforced on REST v1
+  writes, not just MCP (#365).** `check_quota` previously had exactly two
+  call sites, both in the MCP dispatcher; `POST /v1/documents` and
+  `POST /v1/conversations/{id}/turns` went straight from auth to intake, so a
+  principal with `max_documents`/`writes_per_day` configured was unrestricted
+  over REST. Both routes now call `check_quota` before intake and render a
+  denial as REST's existing 429 `RateLimitError` contract. No-op for the
+  shipped default (`NullEntitlementsProvider` = unlimited for everyone).
+- **`max_documents`'s check-then-act race documented and pinned by test
+  (#366).** `_check_max_documents`'s unlocked `SELECT COUNT(*)` and the
+  later, separate write that increments it are not atomic; concurrent
+  callers at the boundary can both pass. Left unfixed by design (moving
+  enforcement past the S3 upload in `document_intake.py` is a real,
+  out-of-scope design change) but now documented at the check site with its
+  bound (overshoot <= concurrent racing callers) and pinned by
+  `TestMaxDocumentsRace`. Unreachable in the shipped default, same as #365.
 
 ### Fixed
 
@@ -41,6 +57,19 @@ All notable changes to Inherent are documented here. The format follows
   wrong token budget for anyone reasoning about chunk sizing from it. It now
   points at `EMBEDDING_MAX_TOKENS` as the source of truth, and a test pins
   that default against the default model's limit so the two cannot drift.
+- **`workspace_metadata.document_count` no longer drifts permanently low
+  after a conversation is deleted and re-ingested (#364).**
+  `ConversationMemoryWorkflow` decided `document_delta` from workflow-local
+  `self._document_created`, which stayed `True` forever once set -- a
+  `DELETE /v1/conversations/{external_id}` removes the `processed_documents`
+  row without terminating the still-running workflow, so the next flush's
+  `INSERT ... ON CONFLICT` inserted a brand-new row but the stale flag still
+  produced `document_delta=0`, under-counting the workspace's document total
+  for good. `document_delta` is now derived from the database's own
+  insert-vs-update signal (`(xmax = 0)` on the upsert, threaded out via
+  `StoreDocumentOutput.document_row_inserted`), mirroring the #110 fencing
+  check's shape of pushing the decision into the transaction that can see
+  it.
 
 ### Changed
 
@@ -51,6 +80,7 @@ All notable changes to Inherent are documented here. The format follows
   CI, and skipped the Test and coverage steps behind it. A parity guard test
   now fails if a package CI typechecks is absent from the target.
 - Legacy `.xls`/`.ppt` upload rejections now add a bespoke sentence naming the modern replacement (`.xlsx`/`.pptx`) on top of the existing generic supported-types message, on both REST and MCP (#192).
+- REST uploads declaring the generic `application/octet-stream` now store the resolved spec's specific `content_type` label (e.g. `text/x-go` for a `.go` file) instead of the generic string verbatim, matching what MCP already stores for the identical file; a specific declared type is still preserved verbatim on both surfaces (#211).
 
 ### Removed
 

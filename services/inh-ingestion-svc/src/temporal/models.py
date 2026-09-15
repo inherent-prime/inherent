@@ -319,12 +319,25 @@ class StoreDocumentOutput:
     this can happen, so nothing acts on the distinction at the call site
     today -- it exists for observability (logs/metrics) and so tests can
     assert the fenced path was taken rather than a genuine failure.
+
+    document_row_inserted (#364): True only when THIS call's Postgres upsert
+    actually INSERTed a brand-new `processed_documents` row (as opposed to
+    finding one already there and going through `DO UPDATE` instead) --
+    forwarded verbatim from `DatabaseService.store_processed_document`'s
+    `(xmax = 0)` signal (see `StoreProcessedDocumentInfo`). False for every
+    pre-#364 caller (default, and never set True by store_in_weaviate, which
+    has no row to insert/update) -- only ConversationMemoryWorkflow reads
+    this, to compute `document_delta` from what the database actually did
+    instead of workflow-local memory (`self._document_created`), which goes
+    stale across a `DELETE /v1/conversations/{external_id}` that removes the
+    row out from under a still-running workflow.
     """
 
     success: bool
     chunks_stored: int
     error: str | None = None
     superseded: bool = False
+    document_row_inserted: bool = False
 
 
 @dataclass
