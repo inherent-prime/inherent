@@ -232,3 +232,19 @@ Per-key limits (default 100 requests / 60 s window; key-specific overrides
 supported). Unauthenticated or invalid-key traffic is limited per client IP
 (`RATE_LIMIT_UNAUTHENTICATED`, default 30). See the
 [configuration reference](configuration.md) for the toggles.
+
+## Per-identity entitlement quotas (#309, #365)
+
+`POST /v1/documents` and `POST /v1/conversations/{id}/turns` also enforce
+per-identity entitlements (`calls_per_minute`, `calls_per_month`,
+`writes_per_day`, `max_documents`) — the same `check_quota` MCP's `/mcp`
+transport already ran, now wired into these two REST write routes as well
+(previously REST was unenforced while MCP was not). A denial returns `429`
+with the standard RFC 7807 body plus `limit`, `limit_name`, `remaining: 0`,
+and `retry_after` (omitted for `max_documents`, which has no time window).
+No self-hosted or SaaS deployment ships a configured provider today (the
+default `NullEntitlementsProvider` is unlimited for every caller), so this
+is inert until an operator wires one in. Full limit semantics, fail-open
+behavior, and the `max_documents` check-then-act approximation are
+documented once, in [the MCP tools reference](mcp-tools.md#per-identity-entitlements-and-quotas-309),
+rather than duplicated here.

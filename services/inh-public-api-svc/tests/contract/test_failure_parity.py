@@ -1086,6 +1086,340 @@ class TestUploadCodeContentTypeLabelParity:
 
 
 # ---------------------------------------------------------------------------
+# Upload: normalizing a GENERIC declared content_type to the resolved spec's
+# specific MIME -- both surfaces (#211)
+# ---------------------------------------------------------------------------
+
+
+class TestUploadOctetStreamContentTypeNormalizationParity:
+    """#211: `TestUploadCodeContentTypeLabelParity` above (#197) pins that an
+    ACCURATE declared REST Content-Type and MCP's extension-derived default
+    agree on the specific label for a code file -- but it does not cover a
+    REST client that declares the generic `application/octet-stream` (the
+    common "I don't know" case), which #197 alone left storing that generic
+    string verbatim even though `get_spec_for_upload` had already resolved
+    the specific 'code' spec via the extension fallback to VALIDATE the
+    upload. That is the exact divergence #211 is about: same file, same
+    resolved spec, two different stored labels depending on which surface
+    (and, on REST alone, which Content-Type string) uploaded it.
+
+    The fix is narrow: `application/octet-stream` is not a client assertion
+    (it is the ABSENCE of one), so normalizing it to the resolved spec's
+    specific MIME loses no real information -- but a SPECIFIC declared type
+    (even a "wrong"/unexpected one) IS a real assertion and must keep
+    flowing through untouched. This class pins both halves plus that the
+    generic case generalizes beyond code files, and that the normalization
+    doesn't disturb validation/dispatch (the resolved spec is unchanged --
+    only the STORED LABEL for it can now differ from the declared string).
+    """
+
+    async def test_rest_octet_stream_go_upload_matches_mcp_defaulted_label(
+        self,
+    ):
+        """(a) REST declaring the generic `application/octet-stream` for a
+        `.go` file must now store `text/x-go`, matching MCP's own
+        extension-derived default for the identical file (#197) -- the two
+        surfaces can no longer disagree depending on whether the REST client
+        declared a specific type or the generic fallback."""
+        # --- REST: declared application/octet-stream (the fallback path) --
+        rest_db = _mock_db()
+        rest_db.get_document_id_by_content_hash = AsyncMock(return_value=None)
+        rest_db.get_document_id_by_filename = AsyncMock(return_value=None)
+
+        rest_storage = MagicMock()
+        rest_storage.generate_key.return_value = f"{WS}/fake-uuid/lib.go"
+        rest_storage.upload_file = AsyncMock(return_value=f"{WS}/fake-uuid/lib.go")
+        rest_storage.build_storage_url.return_value = f"s3://docs/{WS}/fake-uuid/lib.go"
+        rest_storage._bucket = "docs"
+        rest_mq = AsyncMock()
+        rest_mq.publish = AsyncMock(return_value="1-0")
+
+        write_key = _write_key()
+        application = create_app()
+        application.dependency_overrides[get_api_key_info] = lambda: write_key
+        application.dependency_overrides[get_write_permission] = lambda: write_key
+        application.dependency_overrides[resolve_workspace_write] = lambda: ResolvedAuth(
+            key_info=write_key, workspace_id=WS
+        )
+        application.dependency_overrides[get_database] = lambda: rest_db
+        try:
+            with (
+                patch(
+                    "src.services.document_intake.get_storage_service",
+                    return_value=rest_storage,
+                ),
+                patch(
+                    "src.services.document_intake.get_mq_service",
+                    new_callable=AsyncMock,
+                    return_value=rest_mq,
+                ),
+            ):
+                transport = ASGITransport(app=application)
+                async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                    rest_response = await ac.post(
+                        "/v1/documents",
+                        headers={"X-API-Key": "ink_test_key"},
+                        files={
+                            "file": (
+                                "lib.go",
+                                io.BytesIO(b"package main\n"),
+                                "application/octet-stream",
+                            )
+                        },
+                    )
+        finally:
+            application.dependency_overrides.clear()
+
+        assert rest_response.status_code == 201
+        rest_stored_content_type = rest_db.create_or_reset_pending_document.call_args.kwargs[
+            "content_type"
+        ]
+        assert rest_stored_content_type == "text/x-go"
+
+        # --- MCP: content_type OMITTED, same file (#197's own fixed path) -
+        mcp_db = _mock_db()
+        mcp_db.get_document_id_by_content_hash = AsyncMock(return_value=None)
+        mcp_db.get_document_id_by_filename = AsyncMock(return_value=None)
+        mcp_storage = MagicMock()
+        mcp_storage.generate_key.return_value = f"{WS}/fake-uuid/lib.go"
+        mcp_storage.upload_file = AsyncMock(return_value=f"{WS}/fake-uuid/lib.go")
+        mcp_storage.build_storage_url.return_value = f"s3://docs/{WS}/fake-uuid/lib.go"
+        mcp_storage._bucket = "docs"
+        mcp_mq = AsyncMock()
+        mcp_mq.publish = AsyncMock(return_value="1-0")
+
+        with (
+            patch(
+                "src.services.document_intake.get_storage_service",
+                return_value=mcp_storage,
+            ),
+            patch(
+                "src.services.document_intake.get_mq_service",
+                new_callable=AsyncMock,
+                return_value=mcp_mq,
+            ),
+        ):
+            mcp_result = await _call_mcp_tool(
+                "upload_document",
+                {
+                    "api_key": "ink_k",
+                    "filename": "lib.go",
+                    "content": "package main\n",
+                    # content_type deliberately omitted.
+                },
+                mcp_db,
+            )
+
+        assert "Error" not in mcp_result[0].text, mcp_result[0].text
+        mcp_stored_content_type = mcp_db.create_or_reset_pending_document.call_args.kwargs[
+            "content_type"
+        ]
+        # The actual point of this test: both surfaces now agree, where
+        # before #211 they stored different labels for the identical file.
+        assert mcp_stored_content_type == rest_stored_content_type == "text/x-go"
+
+    async def test_rest_specific_but_unexpected_alias_preserved_verbatim(self):
+        """(b) Proves the narrow scope: a SPECIFIC, registered declared type
+        is a real client assertion and must keep flowing through untouched,
+        even one that doesn't match what the extension fallback WOULD have
+        picked for this file (`text/javascript` is a registered 'code'
+        alias, but not the canonical one `mime_type_for_extension` maps
+        `.go` to) -- proving this fix did not start overwriting real
+        declarations, only the generic-fallback case."""
+        rest_db = _mock_db()
+        rest_db.get_document_id_by_content_hash = AsyncMock(return_value=None)
+        rest_db.get_document_id_by_filename = AsyncMock(return_value=None)
+
+        rest_storage = MagicMock()
+        rest_storage.generate_key.return_value = f"{WS}/fake-uuid/lib.go"
+        rest_storage.upload_file = AsyncMock(return_value=f"{WS}/fake-uuid/lib.go")
+        rest_storage.build_storage_url.return_value = f"s3://docs/{WS}/fake-uuid/lib.go"
+        rest_storage._bucket = "docs"
+        rest_mq = AsyncMock()
+        rest_mq.publish = AsyncMock(return_value="1-0")
+
+        write_key = _write_key()
+        application = create_app()
+        application.dependency_overrides[get_api_key_info] = lambda: write_key
+        application.dependency_overrides[get_write_permission] = lambda: write_key
+        application.dependency_overrides[resolve_workspace_write] = lambda: ResolvedAuth(
+            key_info=write_key, workspace_id=WS
+        )
+        application.dependency_overrides[get_database] = lambda: rest_db
+        try:
+            with (
+                patch(
+                    "src.services.document_intake.get_storage_service",
+                    return_value=rest_storage,
+                ),
+                patch(
+                    "src.services.document_intake.get_mq_service",
+                    new_callable=AsyncMock,
+                    return_value=rest_mq,
+                ),
+            ):
+                transport = ASGITransport(app=application)
+                async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                    rest_response = await ac.post(
+                        "/v1/documents",
+                        headers={"X-API-Key": "ink_test_key"},
+                        files={
+                            "file": (
+                                "lib.go",
+                                io.BytesIO(b"package main\n"),
+                                # Specific + registered ('code' spec alias),
+                                # but NOT the canonical .go mime -- resolves
+                                # DIRECTLY via get_spec_for_mime, never
+                                # touching the generic-fallback path at all.
+                                "text/javascript",
+                            )
+                        },
+                    )
+        finally:
+            application.dependency_overrides.clear()
+
+        assert rest_response.status_code == 201
+        stored_content_type = rest_db.create_or_reset_pending_document.call_args.kwargs[
+            "content_type"
+        ]
+        # Declared verbatim, untouched -- no fallback occurred, so #211's
+        # normalization never applies, regardless of what the extension
+        # would otherwise have resolved to.
+        assert stored_content_type == "text/javascript"
+
+    async def test_rest_octet_stream_markdown_upload_also_normalizes(self):
+        """(c) Proves the fix is about the FALLBACK MECHANISM generally, not
+        special-cased to code files: a `.md` file declared generically also
+        gets its stored label normalized, from `application/octet-stream`
+        to `text/markdown` (the markdown spec's -- and only -- MIME type)."""
+        rest_db = _mock_db()
+        rest_db.get_document_id_by_content_hash = AsyncMock(return_value=None)
+        rest_db.get_document_id_by_filename = AsyncMock(return_value=None)
+
+        rest_storage = MagicMock()
+        rest_storage.generate_key.return_value = f"{WS}/fake-uuid/notes.md"
+        rest_storage.upload_file = AsyncMock(return_value=f"{WS}/fake-uuid/notes.md")
+        rest_storage.build_storage_url.return_value = f"s3://docs/{WS}/fake-uuid/notes.md"
+        rest_storage._bucket = "docs"
+        rest_mq = AsyncMock()
+        rest_mq.publish = AsyncMock(return_value="1-0")
+
+        write_key = _write_key()
+        application = create_app()
+        application.dependency_overrides[get_api_key_info] = lambda: write_key
+        application.dependency_overrides[get_write_permission] = lambda: write_key
+        application.dependency_overrides[resolve_workspace_write] = lambda: ResolvedAuth(
+            key_info=write_key, workspace_id=WS
+        )
+        application.dependency_overrides[get_database] = lambda: rest_db
+        try:
+            with (
+                patch(
+                    "src.services.document_intake.get_storage_service",
+                    return_value=rest_storage,
+                ),
+                patch(
+                    "src.services.document_intake.get_mq_service",
+                    new_callable=AsyncMock,
+                    return_value=rest_mq,
+                ),
+            ):
+                transport = ASGITransport(app=application)
+                async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                    rest_response = await ac.post(
+                        "/v1/documents",
+                        headers={"X-API-Key": "ink_test_key"},
+                        files={
+                            "file": (
+                                "notes.md",
+                                io.BytesIO(b"# heading\n"),
+                                "application/octet-stream",
+                            )
+                        },
+                    )
+        finally:
+            application.dependency_overrides.clear()
+
+        assert rest_response.status_code == 201
+        stored_content_type = rest_db.create_or_reset_pending_document.call_args.kwargs[
+            "content_type"
+        ]
+        assert stored_content_type == "text/markdown"
+        # Also the response body and the MQ message must agree with the row
+        # -- #211's "the row, the MQ message and the object metadata cannot
+        # disagree with each other" default position.
+        assert rest_response.json()["mime_type"] == "text/markdown"
+        mq_message = rest_mq.publish.call_args.args[1]
+        assert mq_message["content_type"] == "text/markdown"
+
+    async def test_octet_stream_fallback_normalization_does_not_change_sniff_dispatch(
+        self,
+    ):
+        """(d) Validation/dispatch behaviour is unchanged by #211: the label
+        rewrite happens only AFTER a successful magic-byte sniff, so a
+        mismatched upload (real PNG bytes named `lib.go`, declared the
+        generic `application/octet-stream`) is rejected exactly as it was
+        before this fix -- the same 400, the same resolved 'code' spec
+        driving the sniff, no S3 write, no DB row, no MQ publish. The
+        rejection message also still names the ORIGINAL declared string
+        (`application/octet-stream`), not a normalized one, since
+        normalization never runs for a request that fails validation."""
+        rest_db = _mock_db()
+        rest_db.get_document_id_by_content_hash = AsyncMock(return_value=None)
+        rest_db.get_document_id_by_filename = AsyncMock(return_value=None)
+
+        rest_storage = MagicMock()
+        rest_storage.generate_key.return_value = f"{WS}/fake-uuid/lib.go"
+        rest_storage.upload_file = AsyncMock(return_value=f"{WS}/fake-uuid/lib.go")
+        rest_storage.build_storage_url.return_value = f"s3://docs/{WS}/fake-uuid/lib.go"
+        rest_storage._bucket = "docs"
+        rest_mq = AsyncMock()
+        rest_mq.publish = AsyncMock(return_value="1-0")
+
+        write_key = _write_key()
+        application = create_app()
+        application.dependency_overrides[get_api_key_info] = lambda: write_key
+        application.dependency_overrides[get_write_permission] = lambda: write_key
+        application.dependency_overrides[resolve_workspace_write] = lambda: ResolvedAuth(
+            key_info=write_key, workspace_id=WS
+        )
+        application.dependency_overrides[get_database] = lambda: rest_db
+        try:
+            with (
+                patch(
+                    "src.services.document_intake.get_storage_service",
+                    return_value=rest_storage,
+                ),
+                patch(
+                    "src.services.document_intake.get_mq_service",
+                    new_callable=AsyncMock,
+                    return_value=rest_mq,
+                ),
+            ):
+                transport = ASGITransport(app=application)
+                async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                    rest_response = await ac.post(
+                        "/v1/documents",
+                        headers={"X-API-Key": "ink_test_key"},
+                        files={
+                            "file": (
+                                "lib.go",
+                                io.BytesIO(b"\x89PNG\r\n\x1a\n fake png pretending to be code"),
+                                "application/octet-stream",
+                            )
+                        },
+                    )
+        finally:
+            application.dependency_overrides.clear()
+
+        assert rest_response.status_code == 400
+        assert "application/octet-stream" in rest_response.json()["detail"]
+        rest_storage.upload_file.assert_not_awaited()
+        rest_db.create_or_reset_pending_document.assert_not_awaited()
+        rest_mq.publish.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
 # Auth: an expired key must be rejected on both surfaces, INDEPENDENT of
 # whether the DatabaseService implementation itself filters expiry (#180)
 # ---------------------------------------------------------------------------

@@ -50,6 +50,7 @@ async def record_dead_letter(input: RecordDeadLetterInput) -> bool:
         original_message=input.original_message,
         error_message=input.error_message,
         error_type=input.error_type,
+        dedup_key=input.dedup_key,
     )
 
     logger.info(

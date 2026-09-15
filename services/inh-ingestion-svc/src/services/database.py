@@ -3,6 +3,7 @@
 import enum
 import hashlib
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -60,6 +61,30 @@ class StorageBackendType(enum.StrEnum):
     GCS = "gcs"
     S3 = "s3"
     AZURE = "azure"
+
+
+@dataclass
+class StoreProcessedDocumentInfo:
+    """Mutable out-parameter for `store_processed_document` (#364).
+
+    `store_processed_document` already computes, purely internally, whether
+    its upsert INSERTed a brand-new `processed_documents` row or found one
+    already there and went through `DO UPDATE` instead (`row_was_inserted`,
+    derived from Postgres's `(xmax = 0)` idiom -- see that method's inline
+    comment) -- it only ever used the signal to keep `size_bytes` idempotent
+    on append. Passing an instance of this class as `result_info` lets a
+    caller read that SAME signal back out after the call returns, instead of
+    tracking its own "have I already created this document" flag in memory,
+    which is exactly the bug #364 fixes: ConversationMemoryWorkflow's
+    `self._document_created` went stale the moment `DELETE
+    /v1/conversations/{external_id}` removed the row out from under a still-
+    running workflow, permanently under-counting `workspace_metadata.
+    document_count` from the next flush on. Deriving the signal from what
+    the database actually did, in the SAME transaction as the write,
+    survives that interleaving by construction.
+    """
+
+    row_was_inserted: bool = False
 
 
 class DatabaseService:
@@ -388,6 +413,12 @@ class DatabaseService:
             Column("original_message", JSONB, nullable=False),
             Column("error_message", Text, nullable=False),
             Column("error_type", String(100), nullable=False),
+            # #363: distinguishes multiple dead-letter rows within the SAME
+            # (document_id, workflow_run_id) pair -- see migration 021's
+            # comment for why ConversationMemoryWorkflow needs this (one run
+            # can dead-letter more than once) while DocumentIngestionWorkflow
+            # (default '', at most one dead-letter per run) is unaffected.
+            Column("dedup_key", String(255), nullable=False, default=""),
             Column("retry_count", Integer, nullable=False, default=0),
             Column("status", String(20), nullable=False, default="pending"),
             Column(
@@ -407,12 +438,16 @@ class DatabaseService:
             Index("idx_dead_letter_jobs_document_id", "document_id"),
             Index("idx_dead_letter_jobs_workspace_id", "workspace_id"),
             Index("idx_dead_letter_jobs_status", "status"),
-            # Dedup record-retries per run (#24). NULL workflow_run_id rows stay
-            # distinct in Postgres, so pre-workflow failures aren't deduped.
+            # Dedup record-retries per run (#24), widened by #363/migration 021
+            # to include dedup_key so a workflow that can dead-letter more than
+            # once per run (ConversationMemoryWorkflow) doesn't collide across
+            # batches. NULL workflow_run_id rows stay distinct in Postgres, so
+            # pre-workflow failures aren't deduped.
             Index(
-                "ux_dead_letter_jobs_document_run",
+                "ux_dead_letter_jobs_document_run_dedup",
                 "document_id",
                 "workflow_run_id",
+                "dedup_key",
                 unique=True,
             ),
         )
@@ -886,6 +921,7 @@ class DatabaseService:
         document_type: str = "file",
         external_id: str | None = None,
         metadata: dict | None = None,
+        result_info: StoreProcessedDocumentInfo | None = None,
     ) -> int | None:
         """Store processed document and its chunks with proper FK relationship.
 
@@ -921,6 +957,19 @@ class DatabaseService:
                 {"turn_count": ..., "last_flushed_at": ...}. None (default)
                 leaves the column untouched on update, and NULL on insert --
                 no existing caller passes this, so behavior is unchanged.
+            result_info (#364): optional out-parameter. When given, this call
+                sets its `row_was_inserted` to whether the upsert below
+                actually INSERTed a brand-new `processed_documents` row
+                (True) or found one already there and went through DO UPDATE
+                instead (False) -- the same `(xmax = 0)` signal already
+                computed below for the size_bytes idempotency fix, now also
+                exposed to the caller. Added as an out-parameter rather than
+                changing the return type so every existing caller (and the
+                many tests asserting `store_processed_document(...)` returns
+                a plain `int | None`) stays byte-identical; only a caller
+                that explicitly wants the insert/update distinction (see
+                store_in_postgresql -> StoreDocumentOutput.document_row_inserted
+                -> ConversationMemoryWorkflow._flush) opts in.
 
         Returns:
             ID of the stored document record, or None if the write was
@@ -1070,6 +1119,14 @@ class DatabaseService:
                 # .scalar_one() again on the same Result (single-use cursor).
                 doc_id: int = row[0]  # type: ignore[assignment]
                 row_was_inserted: bool = bool(row[1])
+                if result_info is not None:
+                    # #364: surface the same DB-verified insert/update signal
+                    # to the caller instead of it having to (wrongly) infer
+                    # "did this create the document" from its own in-memory
+                    # state -- see ConversationMemoryWorkflow's module
+                    # docstring / this dataclass's docstring for why that
+                    # inference goes stale across a delete-then-reflush.
+                    result_info.row_was_inserted = row_was_inserted
 
                 # append (#306): skip the destructive delete entirely -- a
                 # previous flush's chunks must survive this one. This is the
@@ -1966,6 +2023,7 @@ class DatabaseService:
         original_message: dict,
         error_message: str,
         error_type: str,
+        dedup_key: str = "",
     ) -> int:
         """Insert a failed ingestion job into the dead-letter table.
 
@@ -1977,6 +2035,15 @@ class DatabaseService:
             original_message: The full original MQ message dict
             error_message: The final error message
             error_type: Classification of the error (e.g. 'extraction_failed')
+            dedup_key: Disambiguates multiple dead-letter rows within the
+                same (document_id, workflow_run_id) pair (#363) -- callers
+                with at most one dead-letter per run (the historical case,
+                e.g. DocumentIngestionWorkflow) leave this at the default
+                '' and get identical dedup behavior to before this
+                parameter existed; ConversationMemoryWorkflow passes a
+                per-batch value (stable across retries of the SAME failed
+                flush, distinct across different flushes) since one run can
+                dead-letter more than once. See migration 021.
 
         Returns:
             The dead-letter job id
@@ -1986,11 +2053,14 @@ class DatabaseService:
 
         with self.get_session() as session:
             now = datetime.now(UTC)
-            # Upsert-do-nothing on (document_id, workflow_run_id): a record-retry
-            # (insert commits then loses its ack) must not create a duplicate
-            # dead-letter row, which the retry API could otherwise re-ingest twice
-            # (#24). NULL workflow_run_id rows are distinct in Postgres, so
-            # pre-workflow failures aren't deduped (correct — no run to key on).
+            # Upsert-do-nothing on (document_id, workflow_run_id, dedup_key):
+            # a record-retry (insert commits then loses its ack) must not
+            # create a duplicate dead-letter row, which the retry API could
+            # otherwise re-ingest twice (#24). NULL workflow_run_id rows are
+            # distinct in Postgres, so pre-workflow failures aren't deduped
+            # (correct — no run to key on). dedup_key (#363) is what lets a
+            # long-lived run dead-letter MULTIPLE distinct batches instead of
+            # every batch after the first silently colliding with it.
             result = session.execute(
                 pg_insert(self.dead_letter_jobs)
                 .values(
@@ -2001,12 +2071,15 @@ class DatabaseService:
                     original_message=original_message,
                     error_message=error_message,
                     error_type=error_type,
+                    dedup_key=dedup_key,
                     retry_count=0,
                     status="pending",
                     created_at=now,
                     updated_at=now,
                 )
-                .on_conflict_do_nothing(index_elements=["document_id", "workflow_run_id"])
+                .on_conflict_do_nothing(
+                    index_elements=["document_id", "workflow_run_id", "dedup_key"]
+                )
                 .returning(self.dead_letter_jobs.c.id)
             )
             job_id = result.scalar_one_or_none()
@@ -2018,6 +2091,7 @@ class DatabaseService:
                     .where(
                         self.dead_letter_jobs.c.document_id == document_id,
                         self.dead_letter_jobs.c.workflow_run_id == workflow_run_id,
+                        self.dead_letter_jobs.c.dedup_key == dedup_key,
                     )
                     .limit(1)
                 ).scalar_one_or_none()

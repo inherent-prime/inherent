@@ -10,6 +10,7 @@ import structlog
 from temporalio import activity
 
 from src.models.document import DocumentChunk, DocumentUploadMessage
+from src.services.database import StoreProcessedDocumentInfo
 from src.temporal.models import StoreDocumentInput, StoreDocumentOutput
 
 logger = structlog.get_logger(__name__)
@@ -117,6 +118,14 @@ async def store_in_postgresql(input: StoreDocumentInput) -> StoreDocumentOutput:
             timestamp="",  # Not needed for storage
         )
 
+        # #364: out-parameter that store_processed_document fills in with
+        # whether its upsert INSERTed a new processed_documents row or
+        # UPDATEd an existing one -- the DB-verified signal ConversationMemory
+        # Workflow needs for document_delta (see StoreDocumentOutput.
+        # document_row_inserted's docstring for why this replaces trusting
+        # the workflow's own in-memory "have I created this document" flag).
+        result_info = StoreProcessedDocumentInfo()
+
         doc_pk = await db_service.store_processed_document(
             message=message,
             chunks=chunks,
@@ -131,6 +140,7 @@ async def store_in_postgresql(input: StoreDocumentInput) -> StoreDocumentOutput:
             document_type=input.document_type,
             external_id=input.external_id,
             metadata=input.metadata,
+            result_info=result_info,
         )
 
         duration_ms = int((time.monotonic() - start) * 1000)
@@ -200,6 +210,7 @@ async def store_in_postgresql(input: StoreDocumentInput) -> StoreDocumentOutput:
             success=True,
             chunks_stored=len(chunks),
             error=None,
+            document_row_inserted=result_info.row_was_inserted,
         )
 
     except Exception as e:
