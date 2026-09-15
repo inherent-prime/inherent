@@ -779,16 +779,51 @@ def mime_type_for_extension(spec: FileTypeSpec, extension: str) -> str:
 GENERIC_CONTENT_TYPES = frozenset({"application/octet-stream", ""})
 
 
-def get_spec_for_upload(content_type: str, filename: str) -> FileTypeSpec | None:
+@dataclass(frozen=True)
+class UploadResolution:
+    """A resolved upload spec, plus HOW it was resolved (#211).
+
+    `get_spec_for_upload` -- kept as a thin wrapper around
+    `resolve_upload_spec` below -- collapses this down to just the `spec`
+    for its existing callers, since widening ITS return type would have
+    forced every current caller (REST/MCP validation, both services' test
+    suites) to unpack a richer value they don't need. A caller that DOES
+    need to know whether resolution went through the generic/extension
+    fallback -- #211's normalize-the-stored-label decision hinges on
+    exactly that -- gets it from here instead, where it is a plain fact
+    recorded at the point of resolution, rather than re-derived at the call
+    site via a fragile, easily-drifting re-implementation of this
+    function's own resolution order (e.g. re-checking
+    `content_type in GENERIC_CONTENT_TYPES` independently).
+    """
+
+    spec: FileTypeSpec
+
+    # True only when `content_type` itself carried no real information (was
+    # generic/absent, see `GENERIC_CONTENT_TYPES`) and `spec` was recovered
+    # from `filename`'s extension instead (resolution order step 2 below).
+    # False for a direct hit on `content_type` (step 1) -- including a
+    # SPECIFIC MIME type that happens to also match a generic-looking
+    # filename; only the CONTENT TYPE'S own genericness decides this, never
+    # the filename's.
+    via_generic_fallback: bool
+
+
+def resolve_upload_spec(content_type: str, filename: str) -> UploadResolution | None:
     """Resolve the spec for an upload, consulting the filename extension as
-    a FALLBACK only when `content_type` is generic or absent (#122).
+    a FALLBACK only when `content_type` is generic or absent (#122), and
+    report which of those two paths was actually taken.
 
     This completes the design `FileTypeSpec.extensions` was reserved for at
     #117 ("a fallback classifier for a generic/absent content-type ... not
     yet consulted") rather than working around it: the extension was always
     intended to answer "what is this file" when the declared MIME type
     can't, and this is that consultation, finally wired into the upload
-    path via `get_spec_for_upload`.
+    path. See `get_spec_for_upload` for the plain-`FileTypeSpec` wrapper
+    most callers want; use THIS function instead when the caller also needs
+    `UploadResolution.via_generic_fallback` (#211: deciding whether a
+    generic declared type may be normalized to the resolved spec's specific
+    MIME for storage).
 
     Resolution order:
     1. `content_type` maps to a registered spec directly -> that spec wins,
@@ -810,14 +845,14 @@ def get_spec_for_upload(content_type: str, filename: str) -> FileTypeSpec | None
     declares a real, WRONG, specific type is still flatly rejected; only a
     client that admits it doesn't know gets the extension consulted.
 
-    Callers that also need to sniff the bytes should pass the returned spec
-    into `sniff_content_type`'s `resolved_spec` parameter -- re-deriving a
-    spec from `content_type` alone inside that function would fail for
+    Callers that also need to sniff the bytes should pass the returned
+    spec into `sniff_content_type`'s `resolved_spec` parameter -- re-deriving
+    a spec from `content_type` alone inside that function would fail for
     exactly the generic-content-type case this function exists to resolve.
     """
     spec = get_spec_for_mime(content_type)
     if spec is not None:
-        return spec
+        return UploadResolution(spec=spec, via_generic_fallback=False)
 
     normalized = content_type.split(";", 1)[0].strip().lower()
     if normalized not in GENERIC_CONTENT_TYPES:
@@ -826,7 +861,25 @@ def get_spec_for_upload(content_type: str, filename: str) -> FileTypeSpec | None
     if "." not in filename:
         return None
     extension = "." + filename.rsplit(".", 1)[-1]
-    return get_spec_for_extension(extension)
+    fallback_spec = get_spec_for_extension(extension)
+    if fallback_spec is None:
+        return None
+    return UploadResolution(spec=fallback_spec, via_generic_fallback=True)
+
+
+def get_spec_for_upload(content_type: str, filename: str) -> FileTypeSpec | None:
+    """Resolve the spec for an upload, consulting the filename extension as
+    a FALLBACK only when `content_type` is generic or absent (#122).
+
+    A thin wrapper around `resolve_upload_spec` (see that function for the
+    full resolution-order docstring) that keeps this function's original,
+    simpler `FileTypeSpec | None` signature for every existing caller that
+    only needs "what spec does this upload resolve to", not "and did that
+    go through the fallback". Use `resolve_upload_spec` directly for the
+    latter.
+    """
+    resolution = resolve_upload_spec(content_type, filename)
+    return resolution.spec if resolution is not None else None
 
 
 def get_spec_by_key(key: str) -> FileTypeSpec | None:

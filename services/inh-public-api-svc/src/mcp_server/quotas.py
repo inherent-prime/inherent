@@ -1,11 +1,29 @@
-"""Per-identity entitlement and quota enforcement for the MCP dispatcher (#309).
+"""Per-identity entitlement and quota enforcement (#309), now shared by the
+MCP dispatcher AND REST v1 writes (#365).
 
-Sits between ``http_transport.py``'s permission check and ``tool.handler``
-dispatch: by the time ``check_quota`` runs, the caller is already
-authenticated and holds the tool's required permission/scope -- this module
-answers ONE further question, "has this identity got budget left for this
-call", keyed off ``Principal`` (``principal_type`` + ``principal_id``, #295)
-rather than a second identity notion of its own, per the issue's design.
+Sits between the caller's permission/scope check and the actual write --
+``http_transport.py``'s ``call_tool``/``_call_tool_oauth`` for MCP,
+``src/api/v1/documents.py``'s ``upload_document`` and
+``src/api/v1/conversations.py``'s ``append_conversation_turns`` for REST.
+By the time ``check_quota`` runs, the caller is already authenticated and
+holds the required permission/scope -- this module answers ONE further
+question, "has this identity got budget left for this call", keyed off
+``Principal`` (``principal_type`` + ``principal_id``, #295) rather than a
+second identity notion of its own, per the issue's design.
+
+Surface scope (#365): #309 shipped this enforced on MCP only -- every
+docstring here said "MCP dispatcher" specifically, and that was SCOPE, not a
+bug (``Principal`` is a seam for identity-source-agnosticism, not
+surface-agnosticism). #365 widens it: the same ``check_quota`` call, the same
+``Principal``, the same fail-open/fail-closed rules now also guard REST
+writes, because a principal with real limits configured must not be able to
+bypass them just by calling the REST route instead of the MCP tool. This
+changes NOTHING for the shipped default (``NullEntitlementsProvider`` ==
+unlimited, see below) -- it only starts mattering the day an operator wires
+in a real ``EntitlementsProvider``, which is exactly when an unenforced REST
+surface would become a silent bypass. ``quota_denial_to_rate_limit_error``
+below is REST's side of rendering a denial, the twin of
+``http_transport._quota_exceeded_result`` for MCP.
 
 Reuses ``src/core/rate_limiter.py``'s ``TokenBucketRateLimiter`` for every
 time-windowed limit (``calls_per_minute`` / ``calls_per_month`` /
@@ -67,6 +85,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
+from src.core.exceptions import RateLimitError
 from src.core.rate_limiter import TokenBucketRateLimiter, get_rate_limiter
 from src.services.auth import Principal
 from src.services.entitlements import Entitlements, get_entitlements_provider
@@ -172,6 +191,48 @@ async def _check_max_documents(
     offer yet -- see ``http_transport._call_tool_oauth``'s docstring) is
     treated as an infrastructure gap, not a quota breach: fails OPEN with a
     loud log, same as a backend error below.
+
+    Known approximation -- check-then-act, not atomic (#366)
+    -----------------------------------------------------------
+    The ``SELECT COUNT(*)`` below and the write that actually creates the new
+    document row happen in TWO SEPARATE, UNSYNCHRONIZED steps: this function
+    reads the count in its own short-lived session and returns; the caller
+    (``upload_document``'s handler/route) does the S3 upload and the
+    persistence insert LATER, with no lock held across the gap. Two
+    concurrent callers who both read the count while it sits at
+    ``max_documents - 1`` will BOTH see "under the cap", BOTH proceed, and
+    BOTH insert -- the classic TOCTOU race. This is deliberately NOT fixed
+    here:
+
+    - The overshoot is BOUNDED, not unbounded: at most N documents over the
+      cap, where N is the number of requests racing at that exact boundary
+      at that exact moment -- not "the cap stops meaning anything". For a
+      soft usage cap (this is explicitly not a security boundary -- nothing
+      behind ``max_documents`` protects data confidentiality or integrity,
+      only "how many documents can this identity accumulate"), a bounded,
+      rare overshoot is an acceptable approximation, the same tradeoff class
+      as the fail-open behavior above.
+    - A real fix means moving enforcement from "check before dispatch" to
+      "enforce at the write itself" -- inside ``document_intake.py``'s
+      persistence step, which would need a new write-time error path threaded
+      back through four modules (intake -> both callers -> both surfaces'
+      error rendering). That is a real design change to WHERE enforcement
+      lives, not a bug fix to this function, and is explicitly out of scope
+      here.
+    - Holding a lock across the gap instead is not an option: the S3 upload
+      happens BETWEEN this check and the eventual insert (see
+      ``document_intake.intake_document``), and holding a DB lock across an
+      external network call to S3 is the kind of thing that turns a slow S3
+      request into a stuck transaction/connection-pool exhaustion incident --
+      strictly worse than the race it would close.
+
+    Reachability today: same as every other check in this module, this is
+    completely unreachable in the shipped default (``NullEntitlementsProvider``
+    means ``entitlements.unlimited`` is always true, so ``check_quota`` never
+    even calls this function) -- see ``TestMaxDocumentsRace`` in
+    ``tests/unit/test_quotas.py`` for a test that pins the overshoot itself
+    (two concurrent callers at the boundary both passing), not just this
+    comment describing it.
     """
     if workspace_ids_provider is None:
         logger.warning(

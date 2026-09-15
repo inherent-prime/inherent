@@ -17,8 +17,9 @@ from inh_contracts.file_types import (
     ExtensionMismatchError,
     check_extension_consistency,
     explicitly_unsupported_message_for_mime,
-    get_spec_for_upload,
     legacy_format_hint_for_mime,
+    mime_type_for_extension,
+    resolve_upload_spec,
     sniff_content_type,
 )
 
@@ -59,11 +60,14 @@ async def intake_document(
        (#124/#126) -- before falling through to the generic registry lookup.
        A GENERIC or absent content type (``application/octet-stream``, the
        REST route's own fallback for a missing header) additionally
-       consults `filename`'s extension via ``get_spec_for_upload`` (#122) --
+       consults `filename`'s extension via ``resolve_upload_spec`` (#122) --
        completing the design ``FileTypeSpec.extensions`` was reserved for at
        #117. This never widens acceptance of a SPECIFIC-but-unregistered
        declared type -- see that function's docstring for the security
-       rationale.
+       rationale. When resolution DID go through this fallback, the stored
+       ``content_type`` is normalized to the resolved spec's specific MIME
+       before it is threaded onward (#211) -- see the normalization block
+       below step 4 for the full rationale.
     2. Cross-check the filename's extension against the declared type
        (#117). A known BINARY-format extension (e.g. ``.pdf``, ``.docx``,
        ``.png``) registered to a DIFFERENT type than the one declared is a
@@ -110,13 +114,17 @@ async def intake_document(
     if rejection_message is not None:
         raise BadRequestError(detail=rejection_message)
 
-    # `get_spec_for_upload` resolves the declared MIME type directly when
+    # `resolve_upload_spec` resolves the declared MIME type directly when
     # it's registered (the common case, filename never inspected); it only
     # falls back to `filename`'s extension when `content_type` is generic/
     # absent (#122) -- see that function's docstring for why a SPECIFIC but
     # unregistered MIME type is deliberately NOT widened by this fallback.
-    spec = get_spec_for_upload(content_type, filename)
-    if spec is None:
+    # Unlike the plain `get_spec_for_upload` lookup, this also reports
+    # WHETHER resolution went through that fallback (`via_generic_fallback`)
+    # -- needed below (#211) to decide whether the stored `content_type`
+    # label may be rewritten.
+    resolution = resolve_upload_spec(content_type, filename)
+    if resolution is None:
         detail = (
             f"Unsupported file type '{content_type}'. "
             f"Allowed types: {', '.join(ALLOWED_MIME_TYPES)}"
@@ -130,6 +138,7 @@ async def intake_document(
         if legacy_hint is not None:
             detail = f"{detail} {legacy_hint}"
         raise BadRequestError(detail=detail)
+    spec = resolution.spec
 
     # --- 2. Cross-check the filename extension against the declared type ----
     # (#117). Independent of the byte-level sniff below: this catches a file
@@ -170,6 +179,47 @@ async def intake_document(
         sniff_content_type(content_bytes, content_type, resolved_spec=spec)
     except ContentTypeMismatchError as exc:
         raise BadRequestError(detail=str(exc)) from exc
+
+    # --- 4b. Normalize a GENERIC declared type to the resolved spec's
+    # specific MIME (#211) ----------------------------------------------------
+    # #197 made `mime_type_for_extension` resolve a source file's specific
+    # MIME (e.g. "text/x-go") instead of the "code" spec's arbitrary
+    # `mime_types[0]` ("text/x-python") -- but only for MCP, whose
+    # `upload_document` tool has no declared Content-Type to defer to at
+    # all. REST always has SOME declared string, so it kept storing that
+    # string verbatim even when it was `application/octet-stream` -- the
+    # exact "wrong/uninformative label on a retrieved chunk" integrity
+    # problem #197 itself was about, just reintroduced on the surface #197
+    # didn't touch.
+    #
+    # The fix is narrow, not "always trust the resolved spec over the
+    # client": `application/octet-stream` is not an assertion about the
+    # file -- it is the ABSENCE of one, the default a client sends when it
+    # genuinely doesn't know what it's uploading (see `GENERIC_CONTENT_TYPES`).
+    # "Preserve what the client declared" protects zero information in that
+    # case, so there is nothing lost by replacing it with the specific MIME
+    # `resolve_upload_spec` already had to derive from the filename to
+    # validate this upload at all. A SPECIFIC declared type (including a
+    # WRONG one that happened to still resolve, or one this registry
+    # doesn't consider "the" canonical alias for its extension) IS a real
+    # client assertion and keeps flowing through untouched -- only
+    # `resolution.via_generic_fallback` (never resolved as a rejection: see
+    # `resolve_upload_spec`'s docstring) marks the "carried no information"
+    # case, so this can't accidentally start overwriting a real assertion.
+    #
+    # Rewritten HERE, once, before `content_type` is threaded to every
+    # downstream consumer -- the persisted document row
+    # (`create_or_reset_pending_document`), the S3 object's own stored
+    # content type (`storage.upload_file`), and the `document.uploaded` MQ
+    # message that ingestion's `extract_text` ultimately reads its content
+    # type from -- rather than normalizing only the DB row. The three are
+    # meant to describe the exact same upload; leaving any of them on the
+    # generic label while the others carry the specific one would just
+    # relocate the disagreement #211 exists to close from "REST vs MCP" to
+    # "this row vs its own MQ message / S3 metadata".
+    if resolution.via_generic_fallback:
+        extension = "." + filename.rsplit(".", 1)[-1]
+        content_type = mime_type_for_extension(spec, extension)
 
     content_hash = hashlib.sha256(content_bytes).hexdigest()
 
