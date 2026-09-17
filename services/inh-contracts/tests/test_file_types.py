@@ -787,6 +787,17 @@ class TestSniffContentType:
         webp = b"RIFF\x00\x00\x00\x00WEBP" + b"fake"
         assert sniff_content_type(webp, "image/webp").key == "webp"
 
+    def test_webp_declared_bytes_without_riff_are_rejected(self):
+        with pytest.raises(ContentTypeMismatchError):
+            sniff_content_type(b"NOPE\x00\x00\x00\x00WEBPfake", "image/webp")
+
+    def test_webp_marker_outside_offset_8_is_rejected(self):
+        with pytest.raises(ContentTypeMismatchError):
+            sniff_content_type(b"RIFFWEBP\x00\x00\x00\x00fake", "image/webp")
+
+    def test_text_plain_starting_with_webp_is_not_mislabeled(self):
+        assert sniff_content_type(b"WEBP is a format name in this sentence.", "text/plain").key == "txt"
+
     def test_bmp_prose_mention_does_not_false_positive(self):
         """#120: BMP's 'BM' magic is anchored to the first 2 bytes so a
         prose sentence containing 'BM' later in a text/plain upload is not

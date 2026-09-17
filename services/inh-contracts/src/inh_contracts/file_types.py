@@ -1078,6 +1078,8 @@ def _spec_magics(spec: FileTypeSpec) -> tuple[bytes, ...]:
 
 def _content_matches_spec(content: bytes, spec: FileTypeSpec) -> bool:
     """Whether `content` matches any of `spec`'s magic signatures."""
+    if spec.key == "webp":
+        return len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP"
     magics = _spec_magics(spec)
     if not magics:
         return False
