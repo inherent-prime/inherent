@@ -165,16 +165,32 @@ def _file_payload(
 def _content_for_mime(mime: str) -> bytes:
     """Bytes that pass the #117 magic-byte sniff for `mime`.
 
-    Prefixed with the registry's own signature for `mime` (if it has one) so
-    this helper -- and TestUploadAllowedMimeTypes, which parametrizes over
+    Built from the registry's own signature data for `mime` (if it has any)
+    so this helper -- and TestUploadAllowedMimeTypes, which parametrizes over
     EVERY registered MIME type -- can never drift from the sniffing rule it
-    exercises: a binary type's placeholder content must start with that
-    type's real magic bytes, or intake now rejects it as mismatched before
-    this test gets to assert 201.
+    exercises: a binary type's placeholder content must carry that type's
+    real magic bytes, or intake rejects it as mismatched before this test
+    gets to assert 201.
+
+    A format declaring `magic_segments` (WebP, whose identity is `RIFF` at
+    byte 0 plus `WEBP` at byte 8 with a per-file size field between) needs
+    its signatures at EXACT offsets rather than as one leading prefix, so
+    they are laid into a zero-filled header of the right length. Reading
+    those offsets off the spec instead of hardcoding them here is the whole
+    point of the helper: a version that reimplements the matching rule drifts
+    from it the moment the rule tightens, which is exactly what happened when
+    WebP's sniff became RIFF-aware while this helper still built `magic` as a
+    bare prefix.
     """
     spec = get_spec_for_mime(mime)
+    filler = b"sample content for upload test"
+    if spec and spec.magic_segments:
+        header = bytearray(max(at + len(sig) for at, sig in spec.magic_segments))
+        for at, sig in spec.magic_segments:
+            header[at : at + len(sig)] = sig
+        return bytes(header) + filler
     magic = spec.magic if spec and spec.magic else b""
-    return magic + b"sample content for upload test"
+    return magic + filler
 
 
 # ---------------------------------------------------------------------------

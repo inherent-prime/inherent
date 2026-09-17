@@ -846,6 +846,42 @@ class TestSniffContentType:
         prose = b"WEBP is a format name in this sentence."
         assert sniff_content_type(prose, "text/plain").key == "txt"
 
+    def test_webp_rule_lives_in_spec_data_not_in_a_key_special_case(self):
+        """WebP's RIFF+WEBP rule is declared in the registry, not hardcoded.
+
+        Guards the SHAPE of a past defect, not only its symptom. The rule was
+        briefly implemented as `if spec.key == "webp"` inside the matcher,
+        which left `spec.magic` describing bytes the sniff no longer accepted.
+        Every caller that builds content from registry data then went stale
+        without any test in this package failing -- the break surfaced as an
+        unrelated-looking 400 on upload in another service.
+
+        So this asserts the property those callers actually depend on: a
+        minimal file assembled purely FROM the spec's declared data is
+        accepted by the sniff that reads the same data.
+        """
+        spec = get_spec_by_key("webp")
+        assert spec is not None
+        assert spec.magic == b"WEBP"
+        assert spec.magic_segments == ((0, b"RIFF"), (8, b"WEBP"))
+
+        header = bytearray(max(at + len(sig) for at, sig in spec.magic_segments))
+        for at, sig in spec.magic_segments:
+            header[at : at + len(sig)] = sig
+        assert sniff_content_type(bytes(header) + b"body", "image/webp").key == "webp"
+
+    def test_magic_segments_specs_declare_offsets_in_order(self):
+        """Segmented specs keep their pairs sorted, as the field documents.
+
+        Consumers that synthesize a minimal file write the segments in
+        sequence, so an out-of-order pair would have them seeking backwards.
+        """
+        for spec in FILE_TYPE_REGISTRY:
+            if not spec.magic_segments:
+                continue
+            offsets = [at for at, _ in spec.magic_segments]
+            assert offsets == sorted(offsets), spec.key
+
     def test_bmp_prose_mention_does_not_false_positive(self):
         """#120: BMP's 'BM' magic is anchored to the first 2 bytes so a
         prose sentence containing 'BM' later in a text/plain upload is not

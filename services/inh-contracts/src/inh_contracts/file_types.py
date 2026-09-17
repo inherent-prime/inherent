@@ -184,6 +184,27 @@ class FileTypeSpec:
     # declared type when ANY of them appears in the anchor window.
     magic_alternates: tuple[bytes, ...] = ()
 
+    # `(offset, signature)` pairs that must ALL match at those EXACT offsets
+    # for content to be this type. Where `magic`/`magic_alternates` are an OR
+    # of "appears somewhere in the window", this is an AND of "is exactly
+    # here" -- the shape a container format needs when its identity is split
+    # across fixed positions rather than carried by one leading signature.
+    #
+    # WebP is the concrete case: it is a RIFF container, so `RIFF` occupies
+    # bytes 0-3, bytes 4-7 are a file-size field that varies per file (so no
+    # single contiguous signature spans the header), and `WEBP` sits at bytes
+    # 8-11. A window search for `WEBP` alone accepts prose that merely
+    # mentions the string, and accepts a RIFF-less file; requiring both
+    # segments rejects both while still accepting every real WebP.
+    #
+    # When set, this REPLACES the `magic`/`magic_alternates` window search
+    # for matching -- `magic` stays populated as the format's identifying
+    # signature (it is what the shared-magic-family logic and the docs
+    # compare against), but it is not what the sniff tests. Keep the pairs
+    # sorted by offset: consumers that synthesize a minimal file of this
+    # type write them in order.
+    magic_segments: tuple[tuple[int, bytes], ...] = ()
+
     # Whether the extension-mismatch check (`check_extension_consistency`)
     # should be SKIPPED for this format, even though it has a `magic`
     # signature (used for sniffing above). Set for a format whose bytes are
@@ -402,17 +423,22 @@ FILE_TYPE_REGISTRY: tuple[FileTypeSpec, ...] = (
         key="webp",
         mime_types=("image/webp",),
         extensions=(".webp",),
-        # WebP is a RIFF container: bytes 0-3 are "RIFF", bytes 8-11 are
-        # "WEBP". Matching on "WEBP" (not the shared "RIFF" prefix) avoids
-        # treating WAV/AVI as WebP; the 16-byte window covers the fixed
-        # offset-8 location without a 1024-byte prose false-positive risk.
+        # WebP is a RIFF container: bytes 0-3 are "RIFF", bytes 4-7 are a
+        # per-file size field, and bytes 8-11 are "WEBP". `magic` names the
+        # signature that identifies the format ("WEBP", not the "RIFF"
+        # prefix WAV/AVI also carry), but identity needs BOTH fixed
+        # positions, which is what magic_segments expresses -- see that
+        # field's comment for why a window search for "WEBP" alone is not
+        # enough (it accepts prose mentioning the string, and RIFF-less
+        # files). No magic_anchor_window: the segments pin exact offsets,
+        # so there is no window to widen or narrow.
         magic=b"WEBP",
+        magic_segments=((0, b"RIFF"), (8, b"WEBP")),
         surfaces=frozenset({"rest"}),
         extractor="image_ocr",
         chunking_hint="media",
         optional_extra="ocr",
         degradation="placeholder",
-        magic_anchor_window=16,
     ),
     FileTypeSpec(
         key="tiff",
@@ -1084,9 +1110,20 @@ def _spec_magics(spec: FileTypeSpec) -> tuple[bytes, ...]:
 
 
 def _content_matches_spec(content: bytes, spec: FileTypeSpec) -> bool:
-    """Whether `content` matches any of `spec`'s magic signatures."""
-    if spec.key == "webp":
-        return len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP"
+    """Whether `content` matches `spec`'s magic signature(s).
+
+    A spec declaring `magic_segments` is matched by those exact offsets (an
+    AND); every other spec is matched by the `magic`/`magic_alternates` OR
+    within its anchor window. The branch is on the spec's declared DATA, not
+    on `spec.key`: a rule keyed to a format name lives only in this function,
+    so `spec.magic` stops describing what the sniff actually accepts and any
+    caller that builds bytes from the registry (or any doc generated from it)
+    silently goes stale.
+    """
+    if spec.magic_segments:
+        # Slice comparison subsumes the length check: a truncated file yields
+        # a short slice, which cannot equal the full signature.
+        return all(content[at : at + len(sig)] == sig for at, sig in spec.magic_segments)
     magics = _spec_magics(spec)
     if not magics:
         return False

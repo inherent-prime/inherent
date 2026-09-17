@@ -83,7 +83,12 @@ before anything is stored:
   A format may have more than one legal signature, and any of them satisfies
   the sniff: TIFF has four — an `II` (little-endian) or `MM` (big-endian)
   byte-order mark followed by version 42 for classic TIFF or 43 for BigTIFF,
-  so all four combinations are accepted under `image/tiff`.
+  so all four combinations are accepted under `image/tiff`. A container
+  format can instead require several signatures at fixed positions: WebP is
+  checked as a RIFF container, needing `RIFF` at bytes 0-3 *and* `WEBP` at
+  bytes 8-11, so neither a RIFF-less file that merely contains the string
+  `WEBP` nor a genuine RIFF file that is actually WAV or AVI is accepted as
+  `image/webp`.
 - **Filename vs. declared type.** A filename extension the registry
   recognizes (e.g. `.pdf`) must belong to the SAME type as the declared
   `Content-Type`, or the upload is rejected. Catches e.g. a file named
