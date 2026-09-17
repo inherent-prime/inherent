@@ -17,6 +17,7 @@ tesseract system binary installed:
 
 from __future__ import annotations
 
+import io
 import sys
 import types
 
@@ -129,6 +130,21 @@ def _block_ocr_imports(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(builtins, "__import__", _fake_import)
 
 
+def _render_text_fixture_bytes(image_format: str, text: str = "INHERENT OCR") -> bytes:
+    """Render real image bytes in the requested format for decode/OCR tests."""
+    image_module = pytest.importorskip("PIL.Image")
+    image_draw = pytest.importorskip("PIL.ImageDraw")
+    image_font = pytest.importorskip("PIL.ImageFont")
+
+    image = image_module.new("RGB", (600, 200), "white")
+    draw = image_draw.Draw(image)
+    draw.text((40, 80), text, fill="black", font=image_font.load_default())
+
+    buffer = io.BytesIO()
+    image.save(buffer, format=image_format)
+    return buffer.getvalue()
+
+
 # ---------------------------------------------------------------------------
 # Activity helper: extract.py::_extract_image_text
 # ---------------------------------------------------------------------------
@@ -180,6 +196,46 @@ class TestActivityImageOCR:
 
         _block_ocr_imports(monkeypatch)
         assert _extract_image_text(content, filename) == (f"[image: {filename}, no text extracted]")
+
+    @pytest.mark.parametrize(
+        ("image_format", "filename"),
+        [
+            ("JPEG", "scan.jpg"),
+            ("WEBP", "scan.webp"),
+            ("TIFF", "scan.tiff"),
+            ("BMP", "scan.bmp"),
+        ],
+        ids=["jpeg", "webp", "tiff", "bmp"],
+    )
+    def test_sibling_formats_decode_real_fixtures(self, monkeypatch, image_format, filename):
+        """#120: real format bytes must decode through Pillow before OCR runs."""
+        pytesseract = pytest.importorskip("pytesseract")
+        monkeypatch.setattr(pytesseract, "image_to_string", lambda _image: "Decoded fixture text")
+
+        content = _render_text_fixture_bytes(image_format)
+        assert _extract_image_text(content, filename) == "Decoded fixture text"
+
+    @pytest.mark.parametrize(
+        ("image_format", "filename"),
+        [
+            ("JPEG", "scan.jpg"),
+            ("WEBP", "scan.webp"),
+            ("TIFF", "scan.tiff"),
+            ("BMP", "scan.bmp"),
+        ],
+        ids=["jpeg", "webp", "tiff", "bmp"],
+    )
+    def test_sibling_formats_optional_integration_ocr(self, image_format, filename):
+        """#120: optional integration check with rendered text fixtures."""
+        pytesseract = pytest.importorskip("pytesseract")
+        try:
+            pytesseract.get_tesseract_version()
+        except pytesseract.TesseractNotFoundError:
+            pytest.skip("tesseract binary not available")
+
+        content = _render_text_fixture_bytes(image_format)
+        text = _extract_image_text(content, filename)
+        assert "inherent" in text.lower()
 
     def test_multipage_tiff_joins_pages_with_markers(self, monkeypatch):
         """#120: multi-frame TIFF yields per-page text with ``## Page N`` markers."""
