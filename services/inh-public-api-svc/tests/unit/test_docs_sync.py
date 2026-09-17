@@ -38,6 +38,7 @@ from inh_contracts.file_types import all_mime_types, render_markdown_table
 REPO_ROOT = Path(__file__).resolve().parents[4]
 DOC_PATH = REPO_ROOT / "docs" / "reference" / "file-types.md"
 EXAMPLES_DOC_PATH = REPO_ROOT / "docs" / "examples" / "README.md"
+POSTMAN_COLLECTION_PATH = REPO_ROOT / "docs" / "examples" / "inherent.postman_collection.json"
 MCP_TOOLS_DOC_PATH = REPO_ROOT / "docs" / "reference" / "mcp-tools.md"
 
 
@@ -147,6 +148,15 @@ def test_examples_readme_mentions_every_mime_type():
     text = _read_utf8(EXAMPLES_DOC_PATH)
     for mime in all_mime_types():
         assert mime in text, f"{mime} not mentioned anywhere in {EXAMPLES_DOC_PATH}"
+
+
+def test_postman_upload_description_mentions_supported_ocr_image_types():
+    """Postman's upload-field description must mention all supported OCR image types."""
+    text = _read_utf8(POSTMAN_COLLECTION_PATH)
+    for mime in ("image/png", "image/jpeg", "image/webp", "image/tiff", "image/bmp"):
+        assert mime in text, (
+            f"{POSTMAN_COLLECTION_PATH} upload description must mention {mime}"
+        )
 
 
 # ---------------------------------------------------------------------------

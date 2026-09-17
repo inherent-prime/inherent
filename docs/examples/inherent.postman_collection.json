@@ -244,7 +244,7 @@
                   "key": "file",
                   "type": "file",
                   "src": [],
-                  "description": "Pick a file. Allowed: text/plain, text/markdown, text/csv, text/html, application/pdf, application/json, application/vnd.openxmlformats-officedocument.wordprocessingml.document, image/png. See docs/reference/file-types.md for the current list. Max 50 MB. e.g. docs/examples/sample-documents/sample.txt"
+                  "description": "Pick a file. Allowed: text/plain, text/markdown, text/csv, text/html, application/pdf, application/json, application/vnd.openxmlformats-officedocument.wordprocessingml.document, image/png, image/jpeg, image/webp, image/tiff, image/bmp. See docs/reference/file-types.md for the current list. Max 50 MB. e.g. docs/examples/sample-documents/sample.txt"
                 }
               ]
             },
