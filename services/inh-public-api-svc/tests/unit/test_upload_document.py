@@ -165,16 +165,32 @@ def _file_payload(
 def _content_for_mime(mime: str) -> bytes:
     """Bytes that pass the #117 magic-byte sniff for `mime`.
 
-    Prefixed with the registry's own signature for `mime` (if it has one) so
-    this helper -- and TestUploadAllowedMimeTypes, which parametrizes over
+    Built from the registry's own signature data for `mime` (if it has any)
+    so this helper -- and TestUploadAllowedMimeTypes, which parametrizes over
     EVERY registered MIME type -- can never drift from the sniffing rule it
-    exercises: a binary type's placeholder content must start with that
-    type's real magic bytes, or intake now rejects it as mismatched before
-    this test gets to assert 201.
+    exercises: a binary type's placeholder content must carry that type's
+    real magic bytes, or intake rejects it as mismatched before this test
+    gets to assert 201.
+
+    A format declaring `magic_segments` (WebP, whose identity is `RIFF` at
+    byte 0 plus `WEBP` at byte 8 with a per-file size field between) needs
+    its signatures at EXACT offsets rather than as one leading prefix, so
+    they are laid into a zero-filled header of the right length. Reading
+    those offsets off the spec instead of hardcoding them here is the whole
+    point of the helper: a version that reimplements the matching rule drifts
+    from it the moment the rule tightens, which is exactly what happened when
+    WebP's sniff became RIFF-aware while this helper still built `magic` as a
+    bare prefix.
     """
     spec = get_spec_for_mime(mime)
+    filler = b"sample content for upload test"
+    if spec and spec.magic_segments:
+        header = bytearray(max(at + len(sig) for at, sig in spec.magic_segments))
+        for at, sig in spec.magic_segments:
+            header[at : at + len(sig)] = sig
+        return bytes(header) + filler
     magic = spec.magic if spec and spec.magic else b""
-    return magic + b"sample content for upload test"
+    return magic + filler
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +364,56 @@ class TestUploadDocumentValidation:
 
         assert response.status_code == 201, f"PNG should be accepted but got {response.status_code}"
         assert response.json()["mime_type"] == "image/png"
+        application.dependency_overrides.clear()
+
+    @pytest.mark.parametrize(
+        ("content", "filename", "content_type"),
+        [
+            (b"\xff\xd8\xff fake jpeg", "scan.jpg", "image/jpeg"),
+            (b"RIFF\x00\x00\x00\x00WEBP fake", "scan.webp", "image/webp"),
+            (b"II*\x00 fake tiff", "scan.tiff", "image/tiff"),
+            (b"MM\x00* fake tiff be", "scan.tif", "image/tiff"),
+            (b"BM fake bmp", "scan.bmp", "image/bmp"),
+        ],
+        ids=["jpeg", "webp", "tiff-le", "tiff-be", "bmp"],
+    )
+    async def test_image_ocr_siblings_accepted(
+        self, write_key, mock_db, mock_storage, mock_mq, content, filename, content_type
+    ):
+        """#120: JPEG/WebP/TIFF/BMP are accepted on REST (OCR in ingestion)."""
+        application = create_app()
+        application.dependency_overrides[get_api_key_info] = lambda: write_key
+        application.dependency_overrides[get_write_permission] = lambda: write_key
+        application.dependency_overrides[resolve_workspace_write] = lambda: ResolvedAuth(
+            key_info=write_key, workspace_id=write_key.workspace_id
+        )
+        application.dependency_overrides[get_database] = lambda: mock_db
+
+        with (
+            patch.object(document_intake, "get_storage_service", return_value=mock_storage),
+            patch.object(
+                document_intake,
+                "get_mq_service",
+                new_callable=AsyncMock,
+                return_value=mock_mq,
+            ),
+        ):
+            transport = ASGITransport(app=application)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                response = await ac.post(
+                    "/v1/documents",
+                    files=_file_payload(
+                        content=content,
+                        filename=filename,
+                        content_type=content_type,
+                    ),
+                    headers={"X-API-Key": "ink_test_key"},
+                )
+
+        assert response.status_code == 201, (
+            f"{content_type} should be accepted but got {response.status_code}: " f"{response.text}"
+        )
+        assert response.json()["mime_type"] == content_type
         application.dependency_overrides.clear()
 
     async def test_empty_file(self, write_key, mock_db, mock_storage, mock_mq):

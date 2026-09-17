@@ -5,6 +5,22 @@ All notable changes to Inherent are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Image OCR for JPEG, WebP, TIFF, and BMP (#120).** Extends the existing
+  PNG OCR path (`image_ocr` extractor, optional `ocr` extra, placeholder
+  degradation) to `image/jpeg` (`.jpg`/`.jpeg`), `image/webp`, `image/tiff`
+  (`.tif`/`.tiff`), and `image/bmp`. Multi-page TIFF iterates frames via
+  `PIL.ImageSequence`, joins page text with `## Page N` markers, and caps
+  at 50 pages. Magic-byte sniffing covers all four legal TIFF headers via
+  `FileTypeSpec.magic_alternates` — both byte orders for classic TIFF
+  (`II*\x00` / `MM\x00*`) and for BigTIFF (`II+\x00` / `MM\x00+`). WebP is
+  validated as a RIFF container via the new `FileTypeSpec.magic_segments`
+  (`RIFF` at bytes 0-3 plus `WEBP` at bytes 8-11), so prose mentioning
+  `WEBP` and non-WebP RIFF files such as WAV/AVI are both rejected.
+  REST-only; GIF remains out of scope. Docs regenerated from
+  `FILE_TYPE_REGISTRY`. (#233, #120)
+
 ### Security
 
 - **Empty-string workspace scopes now raise instead of silently widening a

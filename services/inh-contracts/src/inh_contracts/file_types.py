@@ -175,6 +175,36 @@ class FileTypeSpec:
     # legitimate text/markdown/html/eml uploads that merely discuss RTF).
     magic_anchor_window: int | None = None
 
+    # Additional magic-byte signatures accepted as equivalent to `magic`
+    # for THIS spec (#120). Used when one MIME type has two legitimate
+    # on-disk layouts that cannot share a single signature -- TIFF is the
+    # concrete case (little-endian `II*\x00` vs big-endian `MM\x00*`).
+    # Empty (the default) for every format with one signature. Sniffing
+    # treats `magic` plus these alternates as an OR: content matches the
+    # declared type when ANY of them appears in the anchor window.
+    magic_alternates: tuple[bytes, ...] = ()
+
+    # `(offset, signature)` pairs that must ALL match at those EXACT offsets
+    # for content to be this type. Where `magic`/`magic_alternates` are an OR
+    # of "appears somewhere in the window", this is an AND of "is exactly
+    # here" -- the shape a container format needs when its identity is split
+    # across fixed positions rather than carried by one leading signature.
+    #
+    # WebP is the concrete case: it is a RIFF container, so `RIFF` occupies
+    # bytes 0-3, bytes 4-7 are a file-size field that varies per file (so no
+    # single contiguous signature spans the header), and `WEBP` sits at bytes
+    # 8-11. A window search for `WEBP` alone accepts prose that merely
+    # mentions the string, and accepts a RIFF-less file; requiring both
+    # segments rejects both while still accepting every real WebP.
+    #
+    # When set, this REPLACES the `magic`/`magic_alternates` window search
+    # for matching -- `magic` stays populated as the format's identifying
+    # signature (it is what the shared-magic-family logic and the docs
+    # compare against), but it is not what the sniff tests. Keep the pairs
+    # sorted by offset: consumers that synthesize a minimal file of this
+    # type write them in order.
+    magic_segments: tuple[tuple[int, bytes], ...] = ()
+
     # Whether the extension-mismatch check (`check_extension_consistency`)
     # should be SKIPPED for this format, even though it has a `magic`
     # signature (used for sniffing above). Set for a format whose bytes are
@@ -370,6 +400,83 @@ FILE_TYPE_REGISTRY: tuple[FileTypeSpec, ...] = (
         chunking_hint="media",
         optional_extra="ocr",
         degradation="placeholder",
+    ),
+    # -- Image OCR siblings (#120) -- same extractor/extra/degradation as
+    # png. Pillow already decodes these; the previous allowlist was the only
+    # gate keeping JPEG/WebP/TIFF/BMP out. GIF is deliberately excluded in
+    # v1 (animation / multi-frame ambiguity). Magic sniffing is mandatory
+    # here: images are the canonical mislabeled-binary case (#117).
+    FileTypeSpec(
+        key="jpeg",
+        mime_types=("image/jpeg",),
+        extensions=(".jpg", ".jpeg"),
+        # SOI marker; real JPEGs always start with these three bytes.
+        magic=b"\xff\xd8\xff",
+        surfaces=frozenset({"rest"}),
+        extractor="image_ocr",
+        chunking_hint="media",
+        optional_extra="ocr",
+        degradation="placeholder",
+        magic_anchor_window=3,
+    ),
+    FileTypeSpec(
+        key="webp",
+        mime_types=("image/webp",),
+        extensions=(".webp",),
+        # WebP is a RIFF container: bytes 0-3 are "RIFF", bytes 4-7 are a
+        # per-file size field, and bytes 8-11 are "WEBP". `magic` names the
+        # signature that identifies the format ("WEBP", not the "RIFF"
+        # prefix WAV/AVI also carry), but identity needs BOTH fixed
+        # positions, which is what magic_segments expresses -- see that
+        # field's comment for why a window search for "WEBP" alone is not
+        # enough (it accepts prose mentioning the string, and RIFF-less
+        # files). No magic_anchor_window: the segments pin exact offsets,
+        # so there is no window to widen or narrow.
+        magic=b"WEBP",
+        magic_segments=((0, b"RIFF"), (8, b"WEBP")),
+        surfaces=frozenset({"rest"}),
+        extractor="image_ocr",
+        chunking_hint="media",
+        optional_extra="ocr",
+        degradation="placeholder",
+    ),
+    FileTypeSpec(
+        key="tiff",
+        mime_types=("image/tiff",),
+        extensions=(".tif", ".tiff"),
+        # A TIFF header is a 2-byte order mark ("II" little-endian / "MM"
+        # big-endian) followed by a 2-byte version: 42 for classic TIFF,
+        # 43 for BigTIFF (the 64-bit-offset variant). That is four legal
+        # signatures, and all four are real files a client can declare as
+        # image/tiff -- sniffing only the classic pair rejected valid
+        # BigTIFF uploads at intake. Primary stays classic little-endian
+        # (overwhelmingly the common case); the other three are alternates,
+        # which sniffing ORs together via _spec_magics.
+        magic=b"II*\x00",
+        surfaces=frozenset({"rest"}),
+        extractor="image_ocr",
+        chunking_hint="media",
+        optional_extra="ocr",
+        degradation="placeholder",
+        # Every TIFF signature is exactly 4 bytes at offset 0, so a 4-byte
+        # window means "must start with one of them" -- no prose can match.
+        magic_anchor_window=4,
+        magic_alternates=(b"MM\x00*", b"II+\x00", b"MM\x00+"),
+    ),
+    FileTypeSpec(
+        key="bmp",
+        mime_types=("image/bmp",),
+        extensions=(".bmp",),
+        # "BM" is two ASCII letters -- plausible in ordinary prose -- so
+        # the signature is anchored to the first 2 bytes (same RTF lesson,
+        # #126 review item 5 / magic_anchor_window).
+        magic=b"BM",
+        surfaces=frozenset({"rest"}),
+        extractor="image_ocr",
+        chunking_hint="media",
+        optional_extra="ocr",
+        degradation="placeholder",
+        magic_anchor_window=2,
     ),
     # -- Long-tail formats (#124/#125/#126) -- the low-dependency group: EML
     # needs only the stdlib `email` package, EPUB needs stdlib `zipfile` plus
@@ -988,6 +1095,42 @@ def _contains_signature(content: bytes, magic: bytes, window: int = _SNIFF_WINDO
     return magic in content[:window]
 
 
+def _spec_magics(spec: FileTypeSpec) -> tuple[bytes, ...]:
+    """All magic signatures that identify `spec` (#120).
+
+    Returns ``()`` when the spec has no binary signature (text formats).
+    Otherwise returns ``magic`` plus any ``magic_alternates`` -- sniffing
+    treats the set as an OR (content matches when ANY signature is found).
+    """
+    if spec.magic is None:
+        return ()
+    if not spec.magic_alternates:
+        return (spec.magic,)
+    return (spec.magic, *spec.magic_alternates)
+
+
+def _content_matches_spec(content: bytes, spec: FileTypeSpec) -> bool:
+    """Whether `content` matches `spec`'s magic signature(s).
+
+    A spec declaring `magic_segments` is matched by those exact offsets (an
+    AND); every other spec is matched by the `magic`/`magic_alternates` OR
+    within its anchor window. The branch is on the spec's declared DATA, not
+    on `spec.key`: a rule keyed to a format name lives only in this function,
+    so `spec.magic` stops describing what the sniff actually accepts and any
+    caller that builds bytes from the registry (or any doc generated from it)
+    silently goes stale.
+    """
+    if spec.magic_segments:
+        # Slice comparison subsumes the length check: a truncated file yields
+        # a short slice, which cannot equal the full signature.
+        return all(content[at : at + len(sig)] == sig for at, sig in spec.magic_segments)
+    magics = _spec_magics(spec)
+    if not magics:
+        return False
+    window = spec.magic_anchor_window if spec.magic_anchor_window is not None else _SNIFF_WINDOW
+    return any(_contains_signature(content, magic, window) for magic in magics)
+
+
 def _magic_families_overlap(a: bytes, b: bytes) -> bool:
     """Whether two magic signatures belong to the same underlying container
     format (#117 structural fix -- see the `docx` registry entry's comment).
@@ -1007,6 +1150,20 @@ def _magic_families_overlap(a: bytes, b: bytes) -> bool:
     sibling-format issue must not be able to introduce.
     """
     return a.startswith(b) or b.startswith(a)
+
+
+def _specs_share_magic_family(a: FileTypeSpec, b: FileTypeSpec) -> bool:
+    """Whether any magic of `a` overlaps any magic of `b` (#120).
+
+    Extends `_magic_families_overlap` across ``magic_alternates`` so a
+    multi-signature format (TIFF LE/BE) still participates correctly in the
+    shared-family allow path used by the OOXML/ZIP group.
+    """
+    for magic_a in _spec_magics(a):
+        for magic_b in _spec_magics(b):
+            if _magic_families_overlap(magic_a, magic_b):
+                return True
+    return False
 
 
 def sniff_content_type(
@@ -1061,8 +1218,9 @@ def sniff_content_type(
     # property of THAT spec (`magic_anchor_window`), not of the sniff call
     # site -- whether junk may legitimately precede the signature depends on
     # the format itself (PDF: yes: RTF: no, see the field's docstring).
-    own_window = spec.magic_anchor_window if spec.magic_anchor_window is not None else _SNIFF_WINDOW
-    if spec.magic is not None and not _contains_signature(content, spec.magic, own_window):
+    # #120: a spec may have multiple equivalent signatures (TIFF LE/BE);
+    # matching ANY of them satisfies check 1.
+    if spec.magic is not None and not _content_matches_spec(content, spec):
         raise ContentTypeMismatchError(
             declared_mime,
             f"expected the '{spec.key}' file signature but the bytes did not match it",
@@ -1071,12 +1229,9 @@ def sniff_content_type(
     for other in FILE_TYPE_REGISTRY:
         if other.magic is None or other.key == spec.key:
             continue
-        if spec.magic is not None and _magic_families_overlap(spec.magic, other.magic):
+        if _specs_share_magic_family(spec, other):
             continue
-        other_window = (
-            other.magic_anchor_window if other.magic_anchor_window is not None else _SNIFF_WINDOW
-        )
-        if _contains_signature(content, other.magic, other_window):
+        if _content_matches_spec(content, other):
             raise ContentTypeMismatchError(
                 declared_mime,
                 f"the bytes match the '{other.key}' file signature instead",

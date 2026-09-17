@@ -34,6 +34,10 @@ the build if this table and the registry ever disagree.
 | xlsx | `.xlsx` | `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` | rest | tabular | — |
 | pptx | `.pptx` | `application/vnd.openxmlformats-officedocument.presentationml.presentation` | rest | structured | — |
 | png | `.png` | `image/png` | rest | media | `ocr` |
+| jpeg | `.jpg`, `.jpeg` | `image/jpeg` | rest | media | `ocr` |
+| webp | `.webp` | `image/webp` | rest | media | `ocr` |
+| tiff | `.tif`, `.tiff` | `image/tiff` | rest | media | `ocr` |
+| bmp | `.bmp` | `image/bmp` | rest | media | `ocr` |
 | eml | `.eml` | `message/rfc822` | rest | prose | — |
 | epub | `.epub` | `application/epub+zip` | rest | prose | — |
 | rtf | `.rtf` | `application/rtf`, `text/rtf` | rest | prose | — |
@@ -57,9 +61,10 @@ type (`prose`, `tabular`, `structured`, `media`).
 
 **Extra required**: a pyproject optional-dependency group that must be
 installed for extraction to produce real text instead of degrading. Today
-only `image/png` has one (`ocr` — pytesseract + Pillow, plus the `tesseract`
-system binary): without it, OCR falls back to a placeholder string instead of
-failing the upload.
+only the image OCR formats (`image/png`, `image/jpeg`, `image/webp`,
+`image/tiff`, `image/bmp`) share one (`ocr` — pytesseract + Pillow, plus the
+`tesseract` system binary): without it, OCR falls back to a placeholder
+string instead of failing the upload.
 
 ## Validation at upload
 
@@ -75,6 +80,15 @@ before anything is stored:
   file declared `application/pdf` whose bytes aren't actually a PDF. Text
   formats have no binary signature of their own to check directly, but are
   still caught if their bytes match a *different* format's known signature.
+  A format may have more than one legal signature, and any of them satisfies
+  the sniff: TIFF has four — an `II` (little-endian) or `MM` (big-endian)
+  byte-order mark followed by version 42 for classic TIFF or 43 for BigTIFF,
+  so all four combinations are accepted under `image/tiff`. A container
+  format can instead require several signatures at fixed positions: WebP is
+  checked as a RIFF container, needing `RIFF` at bytes 0-3 *and* `WEBP` at
+  bytes 8-11, so neither a RIFF-less file that merely contains the string
+  `WEBP` nor a genuine RIFF file that is actually WAV or AVI is accepted as
+  `image/webp`.
 - **Filename vs. declared type.** A filename extension the registry
   recognizes (e.g. `.pdf`) must belong to the SAME type as the declared
   `Content-Type`, or the upload is rejected. Catches e.g. a file named
@@ -91,8 +105,9 @@ A content type reaching the ingestion extractor with no registry entry (or a
 registry entry whose extractor isn't wired up) fails the document with a
 clear `error_message` — there is no default "decode it as text and hope"
 fallback. A format whose extraction needs an optional dependency that isn't
-installed (currently only PNG OCR, via the `ocr` extra) degrades to a
-placeholder instead of failing, per that format's `degradation` setting.
+installed (currently image OCR via the `ocr` extra — PNG/JPEG/WebP/TIFF/BMP)
+degrades to a placeholder instead of failing, per that format's `degradation`
+setting.
 
 **Legacy formats.** Legacy `application/msword` (.doc) and Outlook
 `application/vnd.ms-outlook` (.msg) have no registry entry and are rejected

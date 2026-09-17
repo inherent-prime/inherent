@@ -304,6 +304,59 @@ def test_docx_becomes_searchable(client: httpx.Client) -> None:
     )
 
 
+# Smoke: #120 extended the OCR path from PNG to four more image formats, and
+# the offline lanes cannot prove the registry's image entries work against a
+# running stack -- CI's fast lane installs neither the `ocr` extra nor the
+# tesseract binary, so every offline image test either mocks Pillow away or
+# skips outright. This lane's Compose image is the only place in CI that
+# carries a real OCR stack.
+#
+# Deliberately scoped to INTAKE (201 + the persisted mime_type), not to OCR
+# output: these payloads are valid file *signatures* rather than decodable
+# images, so asserting on extracted text would make a merge gate depend on
+# Tesseract's behavior for synthetic input. Extracted-text proof stays with
+# test_pdf_becomes_searchable and the offline OCR suites.
+@pytest.mark.smoke
+@pytest.mark.parametrize(
+    ("content", "filename", "content_type"),
+    [
+        (b"\xff\xd8\xff" + b"e2e-intake-jpeg", "e2e-intake.jpg", "image/jpeg"),
+        (b"RIFF\x00\x00\x00\x00WEBP" + b"e2e-intake-webp", "e2e-intake.webp", "image/webp"),
+        (b"BM" + b"e2e-intake-bmp", "e2e-intake.bmp", "image/bmp"),
+        (b"II*\x00" + b"e2e-intake-tiff-classic-le", "e2e-intake.tiff", "image/tiff"),
+        (b"MM\x00*" + b"e2e-intake-tiff-classic-be", "e2e-intake.tiff", "image/tiff"),
+        (b"II+\x00" + b"e2e-intake-bigtiff-le", "e2e-intake.tiff", "image/tiff"),
+        (b"MM\x00+" + b"e2e-intake-bigtiff-be", "e2e-intake.tiff", "image/tiff"),
+    ],
+    ids=["jpeg", "webp", "bmp", "tiff-classic-le", "tiff-classic-be", "bigtiff-le", "bigtiff-be"],
+)
+def test_image_formats_accepted_at_intake(
+    client: httpx.Client, content: bytes, filename: str, content_type: str
+) -> None:
+    """#120: every OCR image format is accepted by the LIVE intake path.
+
+    Exercises the whole intake chain against a running stack -- MIME
+    allow-list, magic-byte sniff, filename/extension cross-check, the object
+    write and the MQ publish -- for each format the registry claims to
+    accept, including both classic TIFF byte orders (version 42) and both
+    BigTIFF byte orders (version 43). A registry entry whose signature set is
+    wrong returns 400 here, which is exactly how BigTIFF's absence surfaced:
+    valid `II+\\x00` / `MM\\x00+` uploads were rejected at intake.
+
+    Asserts the persisted `mime_type` and not just the 201, so a type that is
+    accepted but stored as something else (and therefore routed to the wrong
+    extractor) still fails.
+    """
+    document_id = _upload_bytes(client, content, filename, content_type)
+    resp = client.get(f"{API_URL}/v1/documents/{document_id}", headers=HEADERS)
+    assert resp.status_code == 200, f"{filename} GET failed: {resp.status_code} {resp.text}"
+    persisted = resp.json()["mime_type"]
+    assert persisted == content_type, (
+        f"{filename} was accepted at intake but persisted as {persisted!r} "
+        f"instead of {content_type!r}"
+    )
+
+
 def test_refresh_document_flow(client: httpx.Client) -> None:
     """``POST /v1/documents/{id}/refresh`` re-ingests an UPLOADED document.
 
