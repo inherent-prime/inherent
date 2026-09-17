@@ -12,9 +12,11 @@ All notable changes to Inherent are documented here. The format follows
   degradation) to `image/jpeg` (`.jpg`/`.jpeg`), `image/webp`, `image/tiff`
   (`.tif`/`.tiff`), and `image/bmp`. Multi-page TIFF iterates frames via
   `PIL.ImageSequence`, joins page text with `## Page N` markers, and caps
-  at 50 pages. Magic-byte sniffing covers both TIFF endiannesses
-  (`II*\x00` / `MM\x00*`) via `FileTypeSpec.magic_alternates`. REST-only;
-  GIF remains out of scope. Docs regenerated from `FILE_TYPE_REGISTRY`.
+  at 50 pages. Magic-byte sniffing covers all four legal TIFF headers via
+  `FileTypeSpec.magic_alternates` — both byte orders for classic TIFF
+  (`II*\x00` / `MM\x00*`) and for BigTIFF (`II+\x00` / `MM\x00+`).
+  REST-only; GIF remains out of scope. Docs regenerated from
+  `FILE_TYPE_REGISTRY`. (#233, #120)
 
 ### Security
 

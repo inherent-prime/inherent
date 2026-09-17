@@ -418,17 +418,24 @@ FILE_TYPE_REGISTRY: tuple[FileTypeSpec, ...] = (
         key="tiff",
         mime_types=("image/tiff",),
         extensions=(".tif", ".tiff"),
-        # TIFF has two on-disk byte orders. Primary is little-endian (II);
-        # big-endian (MM) is accepted via magic_alternates so a BE TIFF
-        # declared image/tiff is not rejected at sniff.
+        # A TIFF header is a 2-byte order mark ("II" little-endian / "MM"
+        # big-endian) followed by a 2-byte version: 42 for classic TIFF,
+        # 43 for BigTIFF (the 64-bit-offset variant). That is four legal
+        # signatures, and all four are real files a client can declare as
+        # image/tiff -- sniffing only the classic pair rejected valid
+        # BigTIFF uploads at intake. Primary stays classic little-endian
+        # (overwhelmingly the common case); the other three are alternates,
+        # which sniffing ORs together via _spec_magics.
         magic=b"II*\x00",
         surfaces=frozenset({"rest"}),
         extractor="image_ocr",
         chunking_hint="media",
         optional_extra="ocr",
         degradation="placeholder",
+        # Every TIFF signature is exactly 4 bytes at offset 0, so a 4-byte
+        # window means "must start with one of them" -- no prose can match.
         magic_anchor_window=4,
-        magic_alternates=(b"MM\x00*",),
+        magic_alternates=(b"MM\x00*", b"II+\x00", b"MM\x00+"),
     ),
     FileTypeSpec(
         key="bmp",

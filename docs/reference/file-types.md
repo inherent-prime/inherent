@@ -80,6 +80,10 @@ before anything is stored:
   file declared `application/pdf` whose bytes aren't actually a PDF. Text
   formats have no binary signature of their own to check directly, but are
   still caught if their bytes match a *different* format's known signature.
+  A format may have more than one legal signature, and any of them satisfies
+  the sniff: TIFF has four — an `II` (little-endian) or `MM` (big-endian)
+  byte-order mark followed by version 42 for classic TIFF or 43 for BigTIFF,
+  so all four combinations are accepted under `image/tiff`.
 - **Filename vs. declared type.** A filename extension the registry
   recognizes (e.g. `.pdf`) must belong to the SAME type as the declared
   `Content-Type`, or the upload is rejected. Catches e.g. a file named

@@ -258,10 +258,54 @@ class TestLookups:
         does not reject a legitimately big-endian TIFF declared image/tiff."""
         spec = get_spec_by_key("tiff")
         assert spec.magic == b"II*\x00"
-        assert spec.magic_alternates == (b"MM\x00*",)
+        # Classic BE plus both BigTIFF byte orders; order pins the tuple, not
+        # just membership, so a reordering that changes sniff precedence is
+        # visible here.
+        assert spec.magic_alternates == (b"MM\x00*", b"II+\x00", b"MM\x00+")
         # Both endiannesses must sniff-accept under image/tiff.
         assert sniff_content_type(b"II*\x00" + b"le-tiff", "image/tiff").key == "tiff"
         assert sniff_content_type(b"MM\x00*" + b"be-tiff", "image/tiff").key == "tiff"
+
+    @pytest.mark.parametrize(
+        ("header", "label"),
+        [
+            (b"II*\x00", "classic little-endian (version 42)"),
+            (b"MM\x00*", "classic big-endian (version 42)"),
+            (b"II+\x00", "BigTIFF little-endian (version 43)"),
+            (b"MM\x00+", "BigTIFF big-endian (version 43)"),
+        ],
+        ids=["classic-le", "classic-be", "bigtiff-le", "bigtiff-be"],
+    )
+    def test_tiff_accepts_every_legal_header(self, header, label):
+        """All four legal TIFF headers sniff-accept under image/tiff.
+
+        A TIFF header is a 2-byte order mark ("II"/"MM") plus a 2-byte
+        version -- 42 for classic, 43 for BigTIFF. Sniffing only the classic
+        pair rejected valid BigTIFF uploads at intake with
+        ContentTypeMismatchError; all four are real files a client can
+        legitimately declare as image/tiff.
+        """
+        content = header + b"\x08\x00\x00\x00rest of the header"
+        assert sniff_content_type(content, "image/tiff").key == "tiff", label
+
+    @pytest.mark.parametrize(
+        "header",
+        [
+            b"II\x00\x00",  # order mark present, version 0 -- not a TIFF
+            b"II*\x01",  # version 298, neither 42 nor 43
+            b"XX*\x00",  # valid version, bogus byte-order mark
+            b"I*\x00I",  # right bytes, wrong order
+        ],
+        ids=["version-zero", "unknown-version", "bad-order-mark", "transposed"],
+    )
+    def test_tiff_rejects_non_tiff_headers(self, header):
+        """Widening to BigTIFF must not widen to arbitrary 4-byte prefixes.
+
+        Guards the obvious over-correction: accepting any "II"/"MM" prefix, or
+        any version byte, instead of exactly the four legal combinations.
+        """
+        with pytest.raises(ContentTypeMismatchError):
+            sniff_content_type(header + b"padding bytes", "image/tiff")
 
     def test_all_mime_types_exact_set_and_order(self):
         """Pins the FULL registered MIME list, set AND order.

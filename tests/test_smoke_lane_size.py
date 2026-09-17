@@ -33,7 +33,13 @@ SERVICES_DIR = REPO_ROOT / "services"
 # so update this constant deliberately (and consider whether
 # `timeout-minutes: 40` in `.github/workflows/e2e-smoke.yml` still holds)
 # rather than bumping it reflexively to make the test pass.
-EXPECTED_SMOKE_TEST_COUNT = 6
+# Raised 6 -> 7 for #120: test_image_formats_accepted_at_intake in
+# inh-public-api-svc's test_compose_lifecycle.py. Cheap by smoke-lane
+# standards -- it is seven uploads against the already-booted stack with no
+# search polling and no ingestion wait -- and it is the only CI coverage of
+# the image registry entries against a running intake path, because the fast
+# lane installs neither the `ocr` extra nor the tesseract binary.
+EXPECTED_SMOKE_TEST_COUNT = 7
 
 _SMOKE_MARKER = re.compile(r"^@pytest\.mark\.smoke$", re.MULTILINE)
 
