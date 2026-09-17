@@ -426,7 +426,10 @@ class TenantManager:
                     if wv_stats and "error" not in wv_stats:
                         pg_info["weaviate_stats"] = wv_stats
                 except Exception:
-                    pass  # Weaviate stats are optional
+                    # nosec B110 -- Weaviate stats are optional enrichment on
+                    # top of the Postgres metadata; a vector-store outage must
+                    # not fail the whole workspace-metadata read.
+                    pass
 
             return pg_info
 

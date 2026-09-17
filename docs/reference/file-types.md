@@ -100,6 +100,16 @@ installed (currently image OCR via the `ocr` extra — PNG/JPEG/WebP/TIFF/BMP)
 degrades to a placeholder instead of failing, per that format's `degradation`
 setting.
 
+**Legacy formats.** Legacy `application/msword` (.doc) and Outlook
+`application/vnd.ms-outlook` (.msg) have no registry entry and are rejected
+with a `400` naming the supported replacement (.docx / .eml) instead of the
+generic allow-list. Legacy `application/vnd.ms-excel` (.xls) and
+`application/vnd.ms-powerpoint` (.ppt) likewise have no registry entry and
+also `400` — but since neither is a plain drop-in swap for its OOXML
+successor, that rejection keeps the full allow-list and adds one sentence
+naming the replacement (.xlsx / .pptx), rather than replacing the list
+outright.
+
 ## Adding a new format
 
 Landing support for a new type ([#118](https://github.com/inherent-prime/inherent/issues/118)

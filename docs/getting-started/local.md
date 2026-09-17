@@ -3,6 +3,23 @@
 Use this guide to start the full Inherent stack, upload a sample document, wait
 for ingestion, and run your first search.
 
+## Pip-first (no checkout)
+
+Adopters who only have Docker:
+
+```bash
+pip install inherent
+inherent up
+inherent docs upload ./README.md
+inherent search "what is inherent?"
+inherent connect claude --print
+```
+
+`inherent up` pulls published images, waits for healthchecks, seeds one
+workspace, and writes `~/.inherent/config.toml`. Full command reference:
+[CLI](../reference/cli.md). Contributors with a checkout keep using
+`make setup` / `make dev` below.
+
 ## What You Will Run
 
 Local development uses Docker Compose for the backing services and the two
@@ -12,6 +29,11 @@ Inherent services:
 - `inh-ingestion-svc` on `http://localhost:18002`
 - PostgreSQL, MongoDB, Weaviate, Valkey, s3rver, Temporal, and the embedding
   sidecar
+
+The checkout-free release stack also runs one-shot `postgres-init` and
+`bootstrap` containers before the public API. `bootstrap` seeds one workspace
+and API key from environment variables. The contributor `make dev` path keeps
+using `scripts/dev/bootstrap.sh` so tenancy tests can seed a second fixture.
 
 The Makefile wraps the common commands so you do not need to memorize the
 underlying `docker compose` and `uv` calls.
@@ -65,6 +87,18 @@ export INGEST_BASE="http://localhost:18002"
 export API_KEY="ink_dev_local_key_001"
 export WORKSPACE_ID="ws_local_001"
 ```
+
+`make bootstrap` (run by `quickstart` and `dev`) is **local/dev only**. It
+creates dev workspaces and API keys in **both** the PostgreSQL `api_keys` table
+and the MongoDB `workspaces` collection — the two control-plane records the
+protected API needs before any upload or search call works. It is safe to
+re-run. Two principals are seeded: `ink_dev_local_key_001` in `ws_local_001`
+(the identity every example on this page uses) and `ink_dev_local_key_002` in
+`ws_local_002`, a **separate owner** that the tenancy isolation E2E needs in
+order to prove one tenant cannot reach another's content. The second principal
+is seeded only when `API_KEY` is the local default (as it is here) or
+`SEED_PRINCIPAL_B=1` is set — running the script against a real deployment
+with your own `API_KEY` never plants the well-known second key.
 
 Check service health:
 
@@ -201,6 +235,54 @@ Notes: capture is on by default and raw query events are kept for 30 days
 `EVAL_CAPTURE_DISABLED_WORKSPACES` or purge with `DELETE /v1/evals/events`.
 Promoted eval cases persist until you disable them via
 `PATCH /v1/evals/cases/{case_id}`.
+
+## Smoke Test Script
+
+Copy-paste version of steps 3-5 above, once `make dev` has succeeded, to
+verify the full document path end-to-end in one shot:
+
+```bash
+export API_BASE="http://localhost:18000"
+export API_KEY="ink_dev_local_key_001"
+export WORKSPACE_ID="ws_local_001"
+
+# 1. Upload a sample document
+curl -s -X POST "$API_BASE/v1/documents" \
+  -H "X-API-Key: $API_KEY" \
+  -H "X-Workspace-Id: $WORKSPACE_ID" \
+  -F "file=@docs/examples/sample-documents/sample.txt;type=text/plain" \
+  | tee /tmp/inherent-upload.json | jq .
+
+export DOC_ID="$(jq -r .document_id /tmp/inherent-upload.json)"
+
+# 2. Poll until status is "processed" (re-run until you see "processed")
+curl -s "$API_BASE/v1/documents/$DOC_ID" \
+  -H "X-API-Key: $API_KEY" \
+  -H "X-Workspace-Id: $WORKSPACE_ID" | jq .status
+
+# 3. Search the indexed document
+curl -s -X POST "$API_BASE/v1/search" \
+  -H "X-API-Key: $API_KEY" \
+  -H "X-Workspace-Id: $WORKSPACE_ID" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"what retrieval modes does Inherent support","limit":3}' | jq .
+```
+
+A non-empty `results` array in the search response confirms the full path is
+healthy.
+
+## Local Endpoints
+
+- Public API: `http://localhost:18000`
+- Public API docs: `http://localhost:18000/docs`
+- Ingestion API: `http://localhost:18002`
+- Ingestion health: `http://localhost:18002/health`
+- Temporal UI: `http://localhost:18233`
+- Weaviate: `http://localhost:18080`
+- S3-compatible storage: `http://localhost:19000`
+- PostgreSQL: `localhost:15432`
+- MongoDB: `localhost:27018`
+- Valkey: `localhost:16379`
 
 ## Common Commands
 
@@ -410,6 +492,13 @@ boot. Watch logs until `Ready` appears:
 ```bash
 make logs SVC=text-embeddings-inference
 ```
+
+The embedding backend is swappable via `EMBEDDING_PROVIDER` (`tei` by
+default, or a hosted OpenAI-compatible API with `EMBEDDING_API_KEY`). A
+model-identity guard rejects queries against a Weaviate collection built
+with a different `(model_id, dimension)` pair than the active provider, so
+switching providers on an existing collection fails loudly instead of
+returning silent noise.
 
 ## Next Steps
 

@@ -4,6 +4,7 @@ Service modes:
     worker     — Temporal worker + MQ subscriber (production default)
     standalone — HTTP API + Temporal worker (manual triggers, health checks)
     migrate    — Apply pending SQL migrations, then exit (DB init container)
+    bootstrap  — Seed the local workspace and API key, then exit
 
 Configure via SERVICE_MODE environment variable.
 """
@@ -72,6 +73,7 @@ async def run_worker(settings: Settings) -> None:
     from prometheus_client import start_http_server
 
     from src.api import create_app
+    from src.temporal.conversation_trigger import get_conversation_trigger
     from src.temporal.trigger import get_workflow_trigger
     from src.temporal.worker import run_worker as run_temporal_worker
 
@@ -121,6 +123,22 @@ async def run_worker(settings: Settings) -> None:
         "Subscribed to upload topic",
         topic=settings.mq_upload_topic,
         group=settings.mq_consumer_group,
+    )
+
+    # 3a. Subscribe to the conversation-turn topic (#306). Own consumer
+    # group -- a conversation-turn message must never be interleaved with
+    # (or lost to) the document-upload consumer group's own cursor.
+    conversation_trigger = get_conversation_trigger(settings, db_service=get_db_service())
+    await conversation_trigger.initialize()
+    await mq_service.subscribe(
+        topic=settings.mq_conversation_topic,
+        handler=conversation_trigger.trigger_turn_async,  # type: ignore[arg-type]
+        group_id=settings.mq_conversation_consumer_group,
+    )
+    logger.info(
+        "Subscribed to conversation-turn topic",
+        topic=settings.mq_conversation_topic,
+        group=settings.mq_conversation_consumer_group,
     )
 
     # 3b. Create audit Temporal client and subscribe audit consumer
@@ -174,6 +192,7 @@ async def run_worker(settings: Settings) -> None:
             api_task.cancel()
         await mq_service.disconnect()
         trigger.shutdown()
+        conversation_trigger.shutdown()
 
 
 # =============================================================================
@@ -265,6 +284,12 @@ async def main() -> None:
             from src.services.migrations import run_migrations
 
             run_migrations(settings)
+            return
+        if mode == "bootstrap":
+            # One-shot identity seed for checkout-free release stacks.
+            from src.services.bootstrap import run_bootstrap
+
+            await run_bootstrap(settings)
             return
         if mode == "standalone":
             await run_standalone(settings)

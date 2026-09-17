@@ -3,6 +3,7 @@
 {"query_id": "q2", "query": "how does hybrid search combine BM25 and vectors with alpha", "document_id": "sample.md", "chunk_index": 0, "relevance": 3}
 {"query_id": "q2", "query": "how does hybrid search combine BM25 and vectors with alpha", "document_id": "sample.txt", "chunk_index": 0, "relevance": 2}
 {"query_id": "q3", "query": "what is a workspace", "document_id": "sample.txt", "chunk_index": 0, "relevance": 3}
+{"query_id": "q3", "query": "what is a workspace", "document_id": "sample.html", "chunk_index": 0, "relevance": 1}
 {"query_id": "q4", "query": "how are documents turned into chunks and embeddings", "document_id": "sample.txt", "chunk_index": 0, "relevance": 3}
 {"query_id": "q4", "query": "how are documents turned into chunks and embeddings", "document_id": "sample.md", "chunk_index": 0, "relevance": 2}
 {"query_id": "q5", "query": "which file formats can be ingested", "document_id": "sample.json", "chunk_index": 0, "relevance": 3}
@@ -20,3 +21,60 @@
 {"query_id": "q13", "query": "what is the refund policy for enterprise annual contracts", "document_id": "sample.txt", "chunk_index": 0, "relevance": 0, "category": "abstention"}
 {"query_id": "q14", "query": "how does Inherent enforce per-API-key rate limits", "document_id": "rate-limiting-deep-dive.txt", "chunk_index": 0, "relevance": 3, "category": "multi_doc_crowding"}
 {"query_id": "q14", "query": "how does Inherent enforce per-API-key rate limits", "document_id": "rate-limit-quick-reference.txt", "chunk_index": 0, "relevance": 3, "category": "multi_doc_crowding"}
+{"query_id": "q15", "query": "what does error code ERR-5030 mean", "document_id": "error-codes.txt", "chunk_index": 0, "relevance": 3, "category": "exact_id"}
+{"query_id": "q16", "query": "which error code is returned when the API key cannot access the requested workspace", "document_id": "error-codes.txt", "chunk_index": 0, "relevance": 3, "category": "exact_id"}
+{"query_id": "q17", "query": "does the rate limiter use a sliding window or a fixed window algorithm", "document_id": "rate-limiting-deep-dive.txt", "chunk_index": 0, "relevance": 3}
+{"query_id": "q18", "query": "which HTTP status and response header tell a client how long to wait after being throttled", "document_id": "rate-limiting-deep-dive.txt", "chunk_index": 0, "relevance": 3}
+{"query_id": "q18", "query": "which HTTP status and response header tell a client how long to wait after being throttled", "document_id": "rate-limit-quick-reference.txt", "chunk_index": 0, "relevance": 1}
+{"query_id": "q19", "query": "are rate limits tracked per IP address or per API key", "document_id": "rate-limiting-deep-dive.txt", "chunk_index": 0, "relevance": 3}
+{"query_id": "q19", "query": "are rate limits tracked per IP address or per API key", "document_id": "rate-limit-quick-reference.txt", "chunk_index": 0, "relevance": 2}
+{"query_id": "q20", "query": "where does the rate limiting middleware run relative to authentication", "document_id": "rate-limiting-deep-dive.txt", "chunk_index": 0, "relevance": 3}
+{"query_id": "q21", "query": "what is the maximum number of search results a request can return", "document_id": "sample.json", "chunk_index": 0, "relevance": 3}
+{"query_id": "q22", "query": "which local ports serve Weaviate and the Temporal UI", "document_id": "sample.json", "chunk_index": 0, "relevance": 3}
+{"query_id": "q22", "query": "which local ports serve Weaviate and the Temporal UI", "document_id": "sample.html", "chunk_index": 0, "relevance": 2}
+{"query_id": "q23", "query": "which header do I need to send so my requests are not rejected as unauthenticated", "document_id": "sample.html", "chunk_index": 0, "relevance": 3, "category": "paraphrase"}
+{"query_id": "q23", "query": "which header do I need to send so my requests are not rejected as unauthenticated", "document_id": "sample.md", "chunk_index": 0, "relevance": 2, "category": "paraphrase"}
+{"query_id": "q24", "query": "how many tokens of overlap sit between consecutive chunks today", "document_id": "release-notes-v2.txt", "chunk_index": 0, "relevance": 3, "category": "stale_version"}
+{"query_id": "q24", "query": "how many tokens of overlap sit between consecutive chunks today", "document_id": "release-notes-v1.txt", "chunk_index": 0, "relevance": 0, "category": "stale_version"}
+{"query_id": "q25", "query": "what uptime SLA and support response time does Inherent commit to", "document_id": "sample.txt", "chunk_index": 0, "relevance": 0, "category": "abstention"}
+{"query_id": "q26", "query": "how do I configure SAML single sign-on for my workspace", "document_id": "sample.txt", "chunk_index": 0, "relevance": 0, "category": "abstention"}
+{"query_id": "q27", "query": "what role does Valkey play in the architecture", "document_id": "sample.md", "chunk_index": 0, "relevance": 3}
+{"query_id": "q27", "query": "what role does Valkey play in the architecture", "document_id": "sample.json", "chunk_index": 0, "relevance": 2}
+{"query_id": "q28", "query": "if I send requests too fast what happens and how long should I wait before retrying", "document_id": "rate-limiting-deep-dive.txt", "chunk_index": 0, "relevance": 3, "category": "paraphrase"}
+{"query_id": "q28", "query": "if I send requests too fast what happens and how long should I wait before retrying", "document_id": "rate-limit-quick-reference.txt", "chunk_index": 0, "relevance": 2, "category": "paraphrase"}
+{"query_id": "q29", "query": "what is the quokka telemetry digest ZZE2EPDFQUOKKA", "document_id": "e2e-lifecycle.pdf", "chunk_index": 0, "relevance": 3, "category": "exact_id"}
+{"query_id": "q30", "query": "narwhal acoustics ledger ZZE2EDOCXNARWHAL", "document_id": "e2e-lifecycle.docx", "chunk_index": 0, "relevance": 3, "category": "exact_id"}
+{"query_id": "q31", "query": "which row carries lane code LN-317", "document_id": "e2e-tabular.xlsx", "chunk_index": 0, "relevance": 3, "category": "exact_id"}
+{"query_id": "q32", "query": "what is dependency dep-004 in the service inventory", "document_id": "sample.csv", "chunk_index": 0, "relevance": 3, "category": "exact_id"}
+{"query_id": "q33", "query": "what does note N1 say about the revenue figures", "document_id": "sample.xlsx", "chunk_index": 0, "relevance": 3, "category": "exact_id"}
+{"query_id": "q34", "query": "how many harbour crossings were recorded during the 2026 winter survey", "document_id": "e2e-lifecycle.pdf", "chunk_index": 0, "relevance": 3}
+{"query_id": "q35", "query": "how many deep dive pings did the Baffin Bay hydrophone array catalogue", "document_id": "e2e-lifecycle.docx", "chunk_index": 0, "relevance": 3}
+{"query_id": "q36", "query": "which regions appear in the quarterly revenue table", "document_id": "e2e-tabular.xlsx", "chunk_index": 0, "relevance": 3}
+{"query_id": "q36", "query": "which regions appear in the quarterly revenue table", "document_id": "sample.xlsx", "chunk_index": 0, "relevance": 2}
+{"query_id": "q37", "query": "what revenue did Gizmo record in APAC", "document_id": "sample.xlsx", "chunk_index": 0, "relevance": 3}
+{"query_id": "q37", "query": "what revenue did Gizmo record in APAC", "document_id": "e2e-tabular.xlsx", "chunk_index": 0, "relevance": 2}
+{"query_id": "q38", "query": "which component generates text embeddings for ingested chunks", "document_id": "sample.csv", "chunk_index": 0, "relevance": 3}
+{"query_id": "q39", "query": "what role does MongoDB play as an auxiliary store", "document_id": "sample.csv", "chunk_index": 0, "relevance": 3}
+{"query_id": "q39", "query": "what role does MongoDB play as an auxiliary store", "document_id": "sample.json", "chunk_index": 0, "relevance": 2}
+{"query_id": "q40", "query": "which dependency provides S3-compatible object storage for raw uploaded files", "document_id": "sample.csv", "chunk_index": 0, "relevance": 3}
+{"query_id": "q41", "query": "does the public API return citations alongside relevant passages", "document_id": "sample.docx", "chunk_index": 0, "relevance": 3}
+{"query_id": "q42", "query": "how is text extracted from PDF files before indexing", "document_id": "sample.pdf", "chunk_index": 0, "relevance": 3}
+{"query_id": "q42", "query": "how is text extracted from PDF files before indexing", "document_id": "sample.docx", "chunk_index": 0, "relevance": 1}
+{"query_id": "q43", "query": "what is the status of the ingestion and retrieval services in the inventory", "document_id": "sample.csv", "chunk_index": 0, "relevance": 3}
+{"query_id": "q44", "query": "what is the default result limit in the service configuration file", "document_id": "sample.yaml", "chunk_index": 0, "relevance": 3}
+{"query_id": "q44", "query": "what is the default result limit in the service configuration file", "document_id": "sample.toml", "chunk_index": 0, "relevance": 2}
+{"query_id": "q45", "query": "which vector store is named in the storage configuration block", "document_id": "sample.yaml", "chunk_index": 0, "relevance": 3}
+{"query_id": "q45", "query": "which vector store is named in the storage configuration block", "document_id": "sample.toml", "chunk_index": 0, "relevance": 2}
+{"query_id": "q46", "query": "how were the ping timestamps depth corrected and cross checked", "document_id": "e2e-lifecycle.docx", "chunk_index": 0, "relevance": 3}
+{"query_id": "q47", "query": "what were the crossing totals reconciled against", "document_id": "e2e-lifecycle.pdf", "chunk_index": 0, "relevance": 3}
+{"query_id": "q48", "query": "what happens to a Word file after I upload it", "document_id": "sample.docx", "chunk_index": 0, "relevance": 3, "category": "paraphrase"}
+{"query_id": "q49", "query": "which engine holds the vectors used for similarity lookups", "document_id": "sample.md", "chunk_index": 0, "relevance": 3, "category": "paraphrase"}
+{"query_id": "q49", "query": "which engine holds the vectors used for similarity lookups", "document_id": "sample.json", "chunk_index": 0, "relevance": 2, "category": "paraphrase"}
+{"query_id": "q50", "query": "roughly how large can a file be before the upload is rejected", "document_id": "sample.json", "chunk_index": 0, "relevance": 3, "category": "paraphrase"}
+{"query_id": "q50", "query": "roughly how large can a file be before the upload is rejected", "document_id": "error-codes.txt", "chunk_index": 0, "relevance": 2, "category": "paraphrase"}
+{"query_id": "q51", "query": "quarterly product revenue broken down by region", "document_id": "e2e-tabular.xlsx", "chunk_index": 0, "relevance": 3, "category": "multi_doc_crowding"}
+{"query_id": "q51", "query": "quarterly product revenue broken down by region", "document_id": "sample.xlsx", "chunk_index": 0, "relevance": 3, "category": "multi_doc_crowding"}
+{"query_id": "q52", "query": "walkthrough transcript covering ingestion indexing and retrieval", "document_id": "sample.srt", "chunk_index": 0, "relevance": 3, "category": "multi_doc_crowding"}
+{"query_id": "q52", "query": "walkthrough transcript covering ingestion indexing and retrieval", "document_id": "sample.vtt", "chunk_index": 0, "relevance": 3, "category": "multi_doc_crowding"}
+{"query_id": "q53", "query": "was any chunk overlap used in the earlier superseded release", "document_id": "release-notes-v1.txt", "chunk_index": 0, "relevance": 3, "category": "stale_version"}
+{"query_id": "q53", "query": "was any chunk overlap used in the earlier superseded release", "document_id": "release-notes-v2.txt", "chunk_index": 0, "relevance": 2, "category": "stale_version"}

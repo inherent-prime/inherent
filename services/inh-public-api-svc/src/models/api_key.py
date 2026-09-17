@@ -10,6 +10,7 @@ class APIKeyInfo(BaseModel):
     """Information about a validated API key."""
 
     key_id: str
+    name: str | None = None
     user_id: str
     workspace_id: str | None = None  # Null for user-scoped keys (works across all workspaces)
     permissions: list[Literal["read", "search", "write"]] = Field(default=["read", "search"])

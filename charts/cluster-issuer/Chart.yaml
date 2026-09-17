@@ -1,0 +1,15 @@
+apiVersion: v2
+name: cluster-issuer
+description: >-
+  cert-manager ClusterIssuer for Inherent's AKS deployment — issue #323
+  finding #15. Deliberately its own tiny chart, not a template folded into
+  charts/inherent: see values.yaml's purpose comment for why.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - inherent
+  - azure
+  - aks
+  - cert-manager
+  - clusterissuer

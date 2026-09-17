@@ -57,6 +57,23 @@ class TestDatabaseServiceExtended:
         assert len(docs_status) == 1
 
     @pytest.mark.asyncio
+    async def test_get_documents_by_tenant_empty_workspace_id_raises(
+        self, db_service: DatabaseService
+    ):
+        """#212: an empty-string workspace_id must raise rather than being
+        treated the same as "not provided" (``None``) -- a bare
+        ``if workspace_id:`` guard couldn't tell the two apart, so it
+        silently widened results to every workspace in the tenant instead
+        of narrowing to one. tenant_id itself still scopes every row, so
+        this is a cross-workspace-within-tenant bug, not a cross-tenant one,
+        but it must still fail loudly rather than fall through.
+        """
+        tenant_id = await db_service.upsert_tenant("user_tenant_empty_ws_test")
+
+        with pytest.raises(ValueError, match="workspace_id"):
+            await db_service.get_documents_by_tenant(tenant_id, workspace_id="")
+
+    @pytest.mark.asyncio
     async def test_get_chunks_by_workspace(self, db_service: DatabaseService):
         """Test getting chunks by workspace."""
         # Insert doc and chunks

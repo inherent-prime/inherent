@@ -16,6 +16,693 @@ All notable changes to Inherent are documented here. The format follows
   (`II*\x00` / `MM\x00*`) via `FileTypeSpec.magic_alternates`. REST-only;
   GIF remains out of scope. Docs regenerated from `FILE_TYPE_REGISTRY`.
 
+### Security
+
+- **Empty-string workspace scopes now raise instead of silently widening a
+  query (#212).** Three `inh-ingestion-svc` methods guarded a WHERE clause
+  with a bare `if workspace_id:`, which is falsy for `""` and so dropped the
+  filter entirely -- the same fail-open shape #177 closed in
+  `get_dead_letter_jobs`. `WeaviateService.search_chunks` and
+  `DatabaseService.get_processing_stats` now reject a blank scope outright
+  (neither has a legitimate unscoped meaning; `get_processing_stats`'s
+  `workspace_id` is mandatory as a result), while
+  `DatabaseService.get_documents_by_tenant` keeps `None` as a deliberate
+  tenant-wide opt-out and rejects only `""`. None of the three was reachable
+  from an HTTP route, so this closes a latent shape rather than an active
+  vulnerability.
+
+### Fixed
+
+- **`_delivery_count` and five sibling Redis MQ guards survive `python -O`
+  (#256).** Bare `assert self._redis is not None` statements are stripped
+  under `-O`/`PYTHONOPTIMIZE=1`, moving the failure from a clear assertion to
+  an `AttributeError` frames away from the cause. All six now raise
+  `RuntimeError` naming the violated boundary.
+- **PPTX speaker-note extraction reports object-model drift instead of
+  swallowing it (#255).** `_pptx_slide_notes` reads python-pptx attributes
+  via `getattr` (the library ships no usable stubs), which made a renamed or
+  removed attribute indistinguishable from a slide that legitimately has no
+  notes. A missing attribute now logs a warning naming it; a real
+  `has_notes_slide=False` stays silent. Extraction still never fails a
+  document over one slide's notes.
+- **Embedder truncation comment no longer cites a model the stack does not
+  run (#201).** `inh-public-api-svc`'s `embed_passage` documented "TEI's
+  256-token cap" while `EMBEDDING_MODEL_ID` defaults to
+  `BAAI/bge-small-en-v1.5`, whose real ceiling is 512 -- a comment naming the
+  wrong token budget for anyone reasoning about chunk sizing from it. It now
+  points at `EMBEDDING_MAX_TOKENS` as the source of truth, and a test pins
+  that default against the default model's limit so the two cannot drift.
+
+### Changed
+
+- **`make type-check` covers all four Python packages (#360).** It ran mypy
+  for only `inh-public-api-svc` and `inh-cli` while CI's matrix typechecks
+  all four, so the documented pre-push gate was strictly weaker than CI --
+  #357 shipped a real ingestion-svc type error that passed locally, failed
+  CI, and skipped the Test and coverage steps behind it. A parity guard test
+  now fails if a package CI typechecks is absent from the target.
+- Legacy `.xls`/`.ppt` upload rejections now add a bespoke sentence naming the modern replacement (`.xlsx`/`.pptx`) on top of the existing generic supported-types message, on both REST and MCP (#192).
+
+### Removed
+
+- **Legacy `DocumentProcessor` / `src/services/processor.py` deleted (#185).** The pre-Temporal synchronous ingestion pipeline was dead code (no runtime entrypoint imported it, per its own deprecation docstring from #23) carrying a duplicate file-type dispatch chain and `errors="ignore"` decoding already superseded by the live `FILE_TYPE_REGISTRY`-driven Temporal activities; its OCR/extraction test coverage was confirmed fully duplicated by `test_image_ocr.py`'s `TestActivityImageOCR`, `test_extraction_by_type.py`, and `test_temporal_activities.py` before deletion, so `processor.py` and its processor-only tests (`test_processor.py`, `test_processor_extraction.py`, `test_processor_backend.py`, `test_integration.py`, and the `TestProcessorImageOCR` / `TestProcessorCompletionPublishing` classes) were removed with no coverage loss.
+
+## [0.7.0] — 2026-09-11
+
+### Fixed
+
+- **Conversations are exempt from the `is_stale` freshness rule (#306
+  follow-up).** `is_stale` (#42) compares a chunk's `ingested_at` against
+  `FRESHNESS_MAX_AGE_DAYS`, a rule written for documents whose chunks are all
+  re-stamped together — a re-upload or refresh resets every chunk at once, so
+  an old timestamp really does mean "nothing re-ingested since". A
+  conversation does not have that shape: `ConversationMemoryWorkflow` appends
+  each flush's NEW chunks (`append=True`) and leaves earlier flushes' chunks
+  untouched by design, so an active conversation's opening turns would age
+  past the threshold and read `is_stale=true` while nothing about them is
+  stale — with no re-upload or refresh path to clear the flag. The shared
+  `SearchService._compute_is_stale` now takes optional `content_type` /
+  `document_type` signals and resolves a conversation chunk to
+  `is_stale=False` at any age, on BOTH read paths (`POST /v1/search` and
+  `GET /v1/documents/{id}/lineage`, which already shared this method). The
+  search query selects the chunk's `content_type` property so the signal
+  reaches it. File documents are unchanged: a caller passing neither signal
+  gets the pre-existing behavior exactly. `CONVERSATION_CONTENT_TYPE` moved to
+  the shared `inh_contracts.conversation` module (alongside the
+  `document_type` values) so the writing service (`inh-ingestion-svc`) and the
+  reading service (`inh-public-api-svc`) cannot drift.
+
+### Added
+
+- **Conversation ingestion: `/v1/conversations` API + signal-driven
+  `ConversationMemoryWorkflow` (#306).** A conversation is append-only and
+  grows, which `POST /v1/documents` cannot serve without either flooding the
+  embedding pipeline with per-turn documents or re-chunking/re-embedding the
+  whole history on every turn. `inh-public-api-svc` adds
+  `POST /v1/conversations/{external_id}/turns` (202, batch append, idempotent
+  per `turn_id`), `GET /v1/conversations/{external_id}` (turn/chunk counts,
+  last flush time), and `DELETE /v1/conversations/{external_id}` (cascades
+  chunks + vectors, reusing `delete_document_everywhere` unmodified) —
+  `src/api/v1/conversations.py` / `src/services/conversation_intake.py` /
+  `src/models/conversation.py`. POST publishes ONE MQ message PER TURN to the
+  new `core.conversation.turn.v1` topic (`ConversationTurnMessage`,
+  `inh_contracts.events`, mirroring `DocumentUploadMessage`) — public-api
+  still never talks to Temporal directly.
+  `inh-ingestion-svc`'s new `ConversationMemoryWorkflow`
+  (`src/temporal/workflows/conversation_memory.py`) is signaled via
+  `signal_with_start` with `WorkflowIDConflictPolicy.USE_EXISTING` (not
+  `TERMINATE_EXISTING` like the document path — a later turn must add itself
+  to the running conversation, never kill and restart it), buffers turns, and
+  flushes on a size-or-idle debounce (`wait_condition`, both configurable) —
+  the embedding-pipeline protection this issue exists for. Each flush runs
+  `redact_turns` (#307) → `chunk_conversation` (new, turn-aware: never splits
+  across a turn boundary, stamps `turn_index`/`role`/`ts`/`client` per chunk)
+  → `store_in_postgresql`/`store_in_weaviate` with a new `append=True` mode
+  (`StoreDocumentInput.append`, threaded through
+  `DatabaseService.store_processed_document` and the Weaviate store path) →
+  `update_workspace_stats`. `append=True` is additive growth (skip the
+  destructive full-replace delete; grow `chunk_count`/`text_length`/
+  `size_bytes` instead of overwriting them) so previously-flushed turns
+  survive every later flush; `append=False` (the default) is byte-identical
+  to `DocumentIngestionWorkflow`'s existing behavior. `continue_as_new` fires
+  every 500 turns; 24h with no new turns finalizes the conversation and
+  publishes `core.document.processed.v1`. `chunk_conversation` reads turn
+  text ONLY from `redact_turns`'s output, never the workflow's raw
+  pre-redaction buffer — the flush pipeline ordering is a security property,
+  not just an ordering convenience. Migration `020_conversation_documents.sql`
+  adds `document_type`/`external_id` (+ a partial unique index on
+  `(workspace_id, external_id)`) to `processed_documents`, which had neither
+  before this.
+- **Per-identity entitlements and quotas in the MCP dispatcher, keyed off
+  the `Principal` seam (#309).** Any valid key previously got unlimited
+  access to every HTTP-exposed MCP tool — #213's rate limiting bounds a
+  connection, not an identity's budget, so plan tiering on a hosted
+  deployment was decorative and one runaway self-hosted agent loop could
+  exhaust the box for every other tenant. `src/services/entitlements.py`
+  adds an `Entitlements` value (`calls_per_month` / `writes_per_day` /
+  `calls_per_minute` / `max_documents` / `upgrade_url`, all optional —
+  absent means unlimited) behind a pluggable `EntitlementsProvider`; the
+  shipped `NullEntitlementsProvider` returns unlimited for every principal,
+  so an API-key caller with no entitlement record configured is byte-for-
+  byte unchanged (no plan names or tier values ship in this repo — a
+  deployment wires in its own provider via `set_entitlements_provider`).
+  `src/mcp_server/quotas.py` enforces the configured limits in both
+  `call_tool` and `_call_tool_oauth`, after the existing permission/scope
+  check and before the handler runs, reusing #213's own
+  `TokenBucketRateLimiter` (Redis-backed when configured, in-memory
+  otherwise) for the three time-windowed limits rather than a second
+  limiter; `max_documents` is checked against a live `COUNT(*)` on
+  `processed_documents` and applies only to `upload_document` — never to
+  `delete_document` / `refresh_stale_source`, which don't increase the
+  count and would otherwise trap a caller at the cap with no way back
+  under it. A denial is `isError=True` with `structuredContent.error_class
+  == "quota_exceeded"` naming the limit, its value, the reset time (`null`
+  for `max_documents`, which has no time window), and an operator
+  `upgrade_url` when configured — the same shape `_call_tool_oauth`'s
+  `insufficient_scope` result already uses, since the MCP SDK's
+  `StreamableHTTPSessionManager(json_response=True)` has no status-code
+  override reachable from inside `tools/call`, the same constraint #295's
+  scope check already documented. Any infrastructure failure (entitlements
+  lookup, rate-limiter backend, the document-count query) fails OPEN with a
+  loud `logger.error` rather than locking out every caller on a sink blip;
+  only a genuinely observed over-limit fails closed. Per-call usage is
+  published via a fire-and-forget `asyncio.create_task`, so a metering sink
+  can never add latency to, or fail, a tool call.
+- **`redact_turns` Temporal activity: non-retryable, per-turn credential
+  redaction ahead of conversation ingestion (#307).** Conversations
+  captured from an assistant contain credentials by default — API keys
+  pasted for debugging, connection strings, bearer tokens, private keys —
+  and once embedded that material is in the vector store, in search
+  results, and in every agent context that retrieves it, with no remedy
+  after the fact. `services/inh-ingestion-svc/src/services/
+  redaction_patterns.py` adds a pattern-based detector registry (API-key
+  prefixes, JWTs, PEM private-key blocks, connection strings with embedded
+  credentials, and a high-entropy-token catch-all), extensible by
+  self-hosters via the new `REDACTION_PATTERNS_EXTRA` setting.
+  `src/temporal/activities/redact.py`'s `redact_turns` activity applies it
+  per turn: a turn whose own redaction pass raises is dropped (not the
+  whole batch) and audited to the new `redaction_audit` table (migration
+  `019_redaction_audit.sql`, `DatabaseService.record_redaction_failure`) —
+  by construction that audit row can never carry raw turn text, only
+  `turn_id`, which detector fired, and an error class/message. Two
+  independent non-retryable guards (`ApplicationError(non_retryable=True)`
+  plus the documented caller contract of `RetryPolicy(maximum_attempts=1)`)
+  keep a redaction failure from ever being retried, since retrying risks
+  storing the raw turn on a later attempt. Ships standalone and inert —
+  wired into no workflow yet, changing no existing pipeline's behaviour —
+  ahead of the conversation-ingestion workflow (#306) that will consume it.
+- **`/mcp` can now serve as an RFC 9728 OAuth 2.1 resource server, flag-gated
+  off by default (#295).** MCP clients (Claude Code included) discover an
+  authorization server via `WWW-Authenticate: Bearer` + a
+  `GET /.well-known/oauth-protected-resource` metadata document instead of
+  guessing — the prerequisite for a browser-popup sign-in flow, ahead of a
+  hosted OAuth rollout via Clerk. Everything is inert unless
+  `OAUTH_ENABLED=true` (default `false`): with it off, `/mcp`'s 401 and the
+  well-known route's absence are byte-identical to before this change — a
+  self-hosted stack must never advertise an authorization server it doesn't
+  run. With it on: `/mcp`'s 401 advertises `ApiKey` and `Bearer` together
+  (never silently dropping the scheme existing clients use); a presented
+  bearer token is verified against the configured authorization server's
+  JWKS (signature, `iss`, `exp`, and non-negotiably `aud` — a token minted
+  for a different resource is rejected, not warned about, per RFC 8707 Sec
+  2); an expired token is always 401, never 403; a token missing a tool's
+  required scope gets the spec's `insufficient_scope` shape as a JSON-RPC
+  `tools/call` result (HTTP 200, `isError: true`,
+  `structuredContent.error: "insufficient_scope"`) rather than an HTTP 403 —
+  the Streamable HTTP transport has no way to attach a custom status code to
+  a parsed `tools/call` response, so a per-tool scope check (which needs the
+  tool name inside that parsed body) cannot raise a transport-level
+  challenge the way the connection-level 401 above does; see
+  `src/mcp_server/http_transport.py`'s `_call_tool_oauth` docstring.
+  `X-API-Key` /
+  `Bearer ink_...` auth is completely unchanged, on `/mcp` and REST alike. A
+  new `Principal` abstraction (`src/services/auth.py`) is the seam #309's
+  per-identity entitlements/quotas will build on; #295 itself stops at
+  authentication — executing a tool call as an OAuth-authenticated identity
+  needs the account-linking work the commercial platform owns, not this
+  repo, so a validated OAuth caller gets an honest "not yet available"
+  rather than a guessed workspace. See `docs/reference/mcp-tools.md`
+  (#295).
+
+### Changed
+
+- **`infra/` is now segregated per cloud provider: `infra/hetzner/` and
+  `infra/azure/` (#338, #355).** The Hetzner Terraform root moved from the
+  flat `infra/` directory into `infra/hetzner/` unchanged — remote state
+  keys are unaffected (they live in `backend.hcl`, not the path) — and
+  `infra/README.md` became a per-provider index. Operator commands change
+  from `cd infra` to `cd infra/hetzner`.
+- **Retrieval-eval golden corpus grown from 13 to 50 gated queries, closing
+  the eval gate's ~7.7pp blind spot (#265).** #236 correctly derived the
+  gate's per-metric tolerance as `max(EVAL_GATE_TOLERANCE,
+  min_detectable_delta(metric, n))`, but at `n = 13` the `1/n` term dominated
+  every metric — a real `recall@5` regression up to ~7.7 percentage points
+  could pass the gate silently. `corpus/qrels.jsonl` now carries 50 gated
+  queries over 20 fixtures instead of 13 over 9 — the prior 13 plus 37 new
+  gated ones among q15–q53, a range spanning 39 ids of which q25/q26 are
+  `abstention` and so do not count toward `n` — which brings the
+  tabular (`.xlsx`, `.csv`), binary-document (`.pdf`, `.docx`), subtitle
+  (`.srt`, `.vtt`) and config (`.yaml`, `.toml`) extraction paths under the
+  gate for the first time. All three tolerances now sit at the `0.02` floor
+  (`recall@5` `0.0769 → 0.0200`, `mrr` `0.0385 → 0.0200`, `ndcg@5` `0.0284 →
+  0.0200`), so the silent-pass window is **~2 percentage points** and `1/n`
+  is no longer the binding term for any metric. `n = 50` is the deliberate
+  stopping point: it is exactly where `recall@5`'s `1/n` step meets the
+  floor, so further growth buys no gate sensitivity until the floor itself is
+  lowered (a `0.01` floor would need `n > 100`). q3's judgment was also
+  completed — it graded only `sample.txt`, marking a defensible top-1 result
+  wrong and pinning the query at 0.0 in every mode; `sample.html` now grades
+  `1` alongside, so `ndcg@5` (~0.13) still reports the real ranking weakness
+  the query found. `retrieval_baseline.json` is re-seeded accordingly: pooled
+  means over a larger query set are **not comparable** to the `n = 13`
+  numbers, and two of nine metrics moved down on composition alone
+  (`keyword.recall@5`, `semantic.recall@5`; the other seven rose), which the
+  ratchet cannot do by construction. `_content_type()` in the compose
+  eval now resolves MIME types from `inh_contracts.file_types` rather than a
+  local 7-extension table, so the corpus can reference any format the product
+  accepts without the test drifting behind the registry. Each
+  `retrieval_history.jsonl` line now also records `n`, the gated query count
+  that produced it: a history line is a pooled mean over the corpus, so two
+  lines are only comparable when `n` matches, and without it this growth would
+  read as a quality trend rather than the corpus change it is. Lines written
+  before the field have no `n` and are not assumed to be any particular size —
+  the corpus also grew during #139, so backfilling one value would invent
+  precision the log never had.
+
+### Fixed
+
+- **Documents stored before #208 keep stale `text/markdown` content_type for
+  files like Dockerfile/Makefile/README/.gitignore/archive.tar.gz — backfilled
+  to `text/plain` to match the #208 fix (#288).** #208 changed the MCP fallback
+  for extensionless/unregistered-extension uploads from `text/markdown` to
+  `text/plain`, but only affected new uploads — existing documents retained the
+  wrong label, so a caller filtering `content_type = "text/markdown"` still got
+  Dockerfiles and tarballs. The correct type is now derived from the filename
+  for all affected documents via `scripts/backfill_stale_content_type.py`, which
+  syncs both Postgres and Weaviate in one pass. No re-indexing is required:
+  both types use the same extractor and chunking hint.
+- **`store_in_weaviate` no longer fails deterministically on chunk-heavy
+  documents on CPU TEI (#298).** #239 scaled `store_in_weaviate`'s
+  `StartToClose` with chunk count but capped it at 15 minutes so one
+  pathological document couldn't pin a worker slot forever — a 60,215-chunk
+  document (real-world repro, #298) needs well over 15 minutes to embed even
+  with zero retries, so it hit that cap on every attempt and never
+  completed. `store_chunks_with_tenant` now embeds via
+  `embedder.embed_texts_with_progress`, which drives the batch loop on the
+  event loop instead of one opaque blocking call, so `store_in_weaviate` can
+  heartbeat real per-batch progress; the activity's `execute_activity` call
+  pairs that with a `heartbeat_timeout` (~2× one batch's worst-case retry
+  window) so a worker that genuinely stops advancing is still caught in
+  roughly that same window, independent of document size. That is what makes
+  it safe to raise the StartToClose cap 15m → 2h
+  (`STORE_MAX_TIMEOUT_SECONDS`, `embedding_defaults.py`) instead of just
+  moving the same indeterminate hang further out. See
+  `docs/developer/learnings.md` #298 for the chunked-continuation
+  alternative considered and rejected.
+- **`s3rver` no longer installs itself at container start (#353).** It ran
+  `npx s3rver` on a bare `node:20-alpine`, downloading from npm on every
+  start while health probes were already counting against a `10s x 5 = 50s`
+  budget; a slow registry pushed it past that and `up --wait` tore the whole
+  stack down, failing the required `E2E smoke` gate on four unrelated
+  branches. The dev/CI stack now builds `docker/s3rver`, so the install
+  happens at build time and cannot race a probe. The release compose has no
+  build context (a pip-installed `inherent up` runs it from a wheel), so it
+  keeps `npx` with the version pinned to `s3rver@3.7.1` and the same
+  `90s + 12 x 10s` budget `text-embeddings-inference` uses. Both are pinned
+  to an exact version: a floating `s3rver` changed the S3 implementation
+  under every integration and E2E run with no commit.
+- **`inh-public-api-svc` reports its installed package version instead of a
+  hardcoded `0.2.0` (#278).** The literal had drifted from `pyproject.toml`, so
+  `/health/ready`, the OpenAPI document, and the new `whoami` surfaces all
+  published a stale number.
+- **`BOOTSTRAP_ACTION=create` now ensures the key's workspace exists (#277).**
+  It previously skipped MongoDB entirely, so a key created against a new
+  workspace id reported `workspace_ids: []` from `whoami` and failed every
+  request with `403`. An existing workspace is never renamed.
+- **A `403` from the API is no longer reported as a rejected key (#281).**
+  The CLI collapsed `401` and `403` into "API key rejected", so a
+  workspace-scope error told users to rotate a working key instead of passing
+  `--workspace`. The server's problem+json detail is now shown as-is.
+- **Table output no longer parses document content as Rich markup (#281).**
+  A search snippet containing `[bold]` or `[/]` had those spans silently
+  deleted, and a malformed tag raised `MarkupError`.
+- **`inherent docs show` prints one field per row (#281).** Eleven columns on
+  a single row elided every value at normal terminal widths.
+- **`inherent status --json` reports a real `engine_version` (#280).** It read
+  `/health`, which carries only `status` and `service`; the version lives on
+  `/health/ready`.
+- **`inherent up` names the engine version when its images are missing
+  (#280).** The default tag is the CLI's own version, so an unpublished
+  engine failed with a raw registry manifest error.
+- **`inherent connect` leaves no backup when nothing changes (#283).** A
+  re-run against the same stack wrote a fresh timestamped backup every time,
+  each holding a plaintext API key.
+- **Dead-letter rows left at `pending` for a document that later succeeded no
+  longer read as broken, and can no longer replay a stale payload (#287).**
+  #249 made a successful ingestion resolve that document's dead-letter rows,
+  but scoped the write to `status='retrying'` — so it never reached rows
+  nobody had pressed Retry on. Since `GET /dead-letter` **defaults to
+  `status=pending`**, those were exactly the rows the default listing shows: a
+  document repaired by re-uploading corrected content (same filename reuses
+  the original `document_id`, the #60 reindex-on-edit path) went on being
+  reported as broken forever. Pressing Retry on such a row was also still
+  accepted, re-publishing the *original failed* payload over the now-healthy
+  document — `supersede_running=False` is no defence, since nothing is in
+  flight by then. The resolve now covers both unresolved statuses
+  (`pending` and `retrying`); `abandoned` is still left alone, since it
+  records an explicit operator decision. The retry route's `409` guard now
+  reads the same `DEAD_LETTER_UNRESOLVED_STATUSES` constant as the resolve, so
+  the two cannot drift apart and silently reopen the replay hole.
+
+- **MCP `search_documents` / `search_memory` now mint an eval capture
+  `event_id`, so `report_feedback` is usable over MCP (#241).**
+  `record_query_event` was called only from the REST search handler
+  (`src/api/v1/search.py`) — a single-workspace MCP search returned
+  `{query, results, workspaces_searched}` and nothing else, while
+  `report_feedback`'s schema told the agent to "pass the event_id from the
+  search response." No MCP tool ever produced one, so the evals flywheel was
+  dead on the surface the product tells customers to use
+  (`claude mcp add --transport http`). The mint-record-stamp sequence now
+  lives in one shared helper, `eval_capture.capture_search_event`, which both
+  REST and MCP call for a single-workspace search — not a second,
+  independently-written capture call on the MCP side, so a field added to
+  capture in the future cannot land on one transport and silently miss the
+  other. A single-workspace `search_documents` / `search_memory` result now
+  carries `event_id` in its structured payload (`null` when capture is
+  disabled or the write failed, exactly like REST's `SearchResponse.event_id`
+  today); a multi-workspace fan-out still carries none, matching REST's own
+  single-workspace-only capture scope. REST's request/response shape and
+  captured fields are unchanged. Captured events also record which transport
+  produced them (`eval_query_events.transport`, migration 018, backfilled
+  `'rest'` for pre-existing rows), so analytics can tell MCP traffic from
+  REST traffic. **Capture is opt-in at the shared `_run_search` call site,
+  not an implicit side effect of calling it** (review finding): only
+  `search_documents` / `search_memory` request capture; `get_citations`
+  shares the identical retrieval path but never does, since it is a citation
+  *view* and has never returned an `event_id` an agent could attach feedback
+  to — minting one there would only have double-counted the query in MCP
+  analytics and permanently depressed MCP feedback-rate metrics with events
+  no agent could ever judge. Also disclosed: `eval_query_events.quality_verdict`
+  is always `NULL` for `transport='mcp'` rows and never reflects a fallback —
+  REST populates it from the adaptive quality gate that runs before its own
+  capture, and that gate does not exist on the MCP retrieval path. Record
+  *shape* cannot drift between the two transports (one shared
+  `capture_search_event` call, one field list); record *inputs* already do,
+  and that asymmetry is now pinned by a test and documented in
+  `docs/developer/search-sequence.md` and `docs/reference/mcp-tools.md`
+  rather than obscured by a test that patched the difference away.
+
+### Security
+
+- **The OpenAPI schema is no longer served outside development (#279).**
+  `docs_url` and `redoc_url` were already gated, but the unauthenticated
+  `/openapi.json` still listed every route — including the flag-gated
+  `/v1/admin/*` surface, whose 404-not-403 design exists precisely so its
+  existence is not confirmable.
+
+### Added
+
+- **Chunk CRUD on public-API REST + MCP (#133).** Agents can append, edit, and
+  hard-delete individual chunks on both surfaces: `POST` /
+  `PATCH` / `DELETE /v1/chunks/{document_id}/index/{chunk_index}` and MCP
+  `create_chunk` / `edit_chunk` / `delete_chunk` (write permission). Ordering
+  is Option A — append at `max(chunk_index)+1`, delete leaves gaps
+  (`chunk_index` is a stable id). Write routes use `/index/{chunk_index}` so
+  they cannot collide with `GET` by BIGSERIAL `id`. Writes run synchronously
+  in public-api (PG + Weaviate via the shared `EmbeddingProvider` from #311);
+  empty content is rejected on both surfaces. Vector failure compensates
+  (Create rolls back PG; Update restores prior content only if this request's
+  hash is still on the row; Delete aborts before PG). Create scans
+  `content_risk` rather than writing `"none"`. PG delete is workspace-scoped
+  and aborts (no `chunk_count` decrement) when `DELETE` rowcount ≠ 1 under
+  concurrent races. A concurrent edit is refused (not silently overwritten)
+  by carrying the prior content_hash forward; ingestion's reprocess path logs
+  CRITICAL instead of silently discarding chunks created here; a Weaviate 204
+  on merge-update no longer trips the create/update success check as a
+  failure. `chunk_count` upper-bound checks in inh-ingestion-svc now ask the
+  database instead of trusting a monotonic counter, since append/hard-delete
+  leaves gaps. Failure parity pinned in `test_failure_parity.py`. MCP surface
+  is stdio 19 / HTTP 15 (16/12 baseline on `main` + this PR's 3 write tools).
+
+- **Release-gated PyPI wheels and CLI adopter-path smoke proof (#284, #285).** `inherent` and its shared contract dependency publish through OIDC approval, while the PR smoke lane installs the wheel into a clean virtual environment and exercises locally built engine images end to end. An image-only release tag (CLI version unchanged) now publishes `inh-contracts` without the `inherent` wheel build blocking it; the clean-venv wheel install check is now a real gate in front of PyPI publish, not a sibling job; `workflow_dispatch` runs off a tag route to TestPyPI instead of production PyPI by default; and CLI↔engine version-drift detection uses `packaging.version` so it no longer silently disables itself on PEP 440 prerelease builds (`0.7.0rc1`). `inherent up --engine-version` now hard-refuses a major-version mismatch unless passed `--force`, matching #284's acceptance criteria; `inh-contracts` publishes its normal sdist + wheel pair again (only the CLI needs the wheel-only build, for its force-included Compose file).
+
+- **Shared `EmbeddingProvider` abstraction: provider choice, auth, and a
+  Weaviate model-identity guard (#311).** inh-ingestion-svc and
+  inh-public-api-svc each carried their own TEI-only HTTP client with
+  divergent behavior — only the ingestion write path retried transient
+  failures; the public-api query path (`embed_query`) had none at all. Both
+  now build their client through one `EmbeddingProvider` interface in the
+  shared `inh-contracts` package (mirroring the existing `BaseMQService` /
+  `create_mq_service()` pattern), with `TEIProvider` (default, non-negotiable
+  — `make up`/docker-compose with no new env vars behaves exactly as before)
+  and a new `OpenAICompatibleProvider`. `EMBEDDING_PROVIDER` selects the
+  backend; switching is an env change only, with no call-site changes in
+  `weaviate.py` or `search.py`. `EMBEDDING_API_KEY` adds
+  `Authorization: Bearer` auth (never logged, and a key accidentally
+  embedded in `EMBEDDING_SERVICE_URL` is redacted before that URL is
+  logged) — TEI still works with no key set. The ingestion write path's
+  exponential-backoff-with-jitter retry (4xx except 429 fails fast; total
+  sleep time is now an *enforced* ceiling, not just an estimate) is shared
+  by both paths, closing the query-path retry gap — with independently
+  tuned wall-clock budgets, since the query path sits inside a synchronous,
+  user-facing request while the ingestion path embeds in a background
+  Temporal activity: `inh-public-api-svc`'s query embed defaults to 2
+  attempts × 5s timeout + 2s sleep budget (12s worst case, under the
+  incident's own 15s consumer ceiling), not the ingestion batch path's 3 ×
+  30s + 10s (100s, sized into `store_in_weaviate`'s StartToClose via
+  `weaviate_store_budget.py`) — the retry-budget constant alone bounds
+  cumulative sleep, not the attempts themselves, so reusing the batch
+  numbers on the query path (as first shipped) let retries there add up to
+  ~91.5s, blowing well past its own caller's ceiling. And a model-identity
+  mismatch on the query path now fails the whole request even inside a
+  multi-workspace search, instead of degrading to partial results for that
+  workspace. Separately — and highest severity — Weaviate collections are
+  created with `Configure.Vectorizer.none()` and never declare a dimension,
+  so querying with model A against a collection built with model B
+  previously returned plausible-looking noise with no error anywhere. The
+  active provider's identity (`EMBEDDING_MODEL_ID` + `EMBEDDING_DIM`) is now
+  persisted as each collection's Weaviate `description` and asserted on
+  every write (`WeaviateService`) and vector query (`SearchService`): a
+  mismatch is a hard error (`EmbeddingIdentityMismatchError`), always, never
+  a warning. An unstamped legacy collection is adopted (stamped) by the
+  write path only when it is verifiably EMPTY; a non-empty unstamped
+  collection is refused by default (`EmbeddingIdentityAdoptionRequiredError`)
+  rather than silently certified as matching the active provider, unless an
+  operator opts in via `EMBEDDING_ADOPT_UNSTAMPED_COLLECTIONS=true` after
+  confirming its vectors actually match. The read-only query path never
+  stamps or adopts, and now logs loudly (rather than staying silent) the
+  first time it queries a still-unstamped collection. See the "Embedding
+  provider & model-identity guard" section of `docs/reference/
+  configuration.md` for the wire formats, the full identity-guard policy,
+  and how to recover from a mismatch.
+
+- **MCP: `list_workspaces` tool returns caller's authorized workspaces and
+  enables discovery of valid `workspace_id` values (#297).** Agents can now
+  call `list_workspaces` to discover which workspaces an API key is authorized
+  for, fixing the previous pattern where workspace-targeted tools like
+  `upload_document` and `get_retrieval_health` required out-of-band knowledge
+  of a valid `workspace_id`. A workspace-scoped key sees exactly its one bound
+  workspace; a user-scoped key sees every workspace its owner owns. Response
+  includes `workspace_id`, `name` (from workspace metadata if present), 
+  `document_count`, and `is_scoped_binding` flag. Exported on both stdio and
+  HTTP transports with `read` permission.
+
+- **Azure cloud-native production Terraform target: AKS, HA, DR, one-click
+  deploy script, and docs (#338, #320).** `infra/azure/` provisions a full
+  production stack on AKS (3 zones, autoscaling node pools), Postgres
+  Flexible Server (zone-redundant HA), Cosmos DB for MongoDB (vCore), Azure
+  Cache for Redis (TLS, `noeviction`), Key Vault, and self-hosted TEI on AKS
+  as the default embedding path — an Azure OpenAI resource is provisioned
+  alongside it, one tfvar away, but stays inactive until the
+  `openai_compatible` provider path merges
+  ([#311](https://github.com/inherent-prime/inherent/issues/311),
+  [PR #314](https://github.com/inherent-prime/inherent/pull/314)) — with
+  MinIO on-cluster mirrored hourly to Blob Storage (GRS) for DR, keeping
+  object-storage RPO within the stack's ≤1h target — see
+  [#329](https://github.com/inherent-prime/inherent/issues/329) for native
+  Blob support. `scripts/deploy-azure.sh` bootstraps remote state and
+  applies the stack end to end; `docs/deploy/azure.md` documents every
+  layer, tfvar, and TCO estimate, and `docs/deploy/azure-dr-runbook.md` covers
+  zone/region-loss and PITR restore procedures. `ingress_profile = "appgw_waf"`
+  and least-privilege Postgres app roles remain tracked follow-ups under this
+  same epic.
+- **Installable `inherent` CLI groundwork with shared config, HTTP, and
+  agent-safe JSON output contracts (#276).**
+- **Checkout-free release bootstrap service that idempotently seeds one local
+  workspace and API key before the public API starts (#277).** `BOOTSTRAP_ACTION`
+  selects `seed` (start-up), `create` (mint an extra key, creating its
+  workspace only if absent and never renaming one), or `revoke` (by key prefix; refuses an ambiguous or unmatched
+  prefix rather than reporting a revocation that did not happen) — this is the
+  path `inherent keys create|revoke` uses so the CLI never opens a database.
+- **Authenticated `GET /v1/whoami` and MCP `whoami` identity surfaces using
+  the shared workspace-authorization rule (#278).**
+- **Flag-gated, read-only local admin listings for workspaces and API keys,
+  disabled by default for SaaS safety (#279).**
+
+- **`inherent up/down/status/logs/doctor` — one-command local stack lifecycle
+  from a pip-installed CLI, with secrets persisted at 0600 and service
+  counts taken from compose rather than hardcoded (#280).**
+- **`inherent docs/chunks/search` REST client commands that work against
+  local and remote stacks via `INHERENT_URL` / `INHERENT_API_KEY` (#281).**
+- **`inherent whoami/workspaces/keys` identity commands, with admin 404
+  fallback only for workspaces list and key writes local-only (#282).**
+- **`inherent connect claude|cursor` MCP config writer that merges into
+  existing agent config, backs up, and verifies `POST /mcp` initialize
+  (#283).**
+- **Evals: `POST /v1/evals/runs` accepts optional replay scoping, and
+  `DELETE /v1/evals/events` an opt-in case purge (#250).** Run-replay was
+  unscoped — `start_run` and `execute_run` each independently selected *every*
+  active case for the workspace — so any caller expecting a run to reflect
+  only what it just promoted was fragile to promotion order and to how many
+  prior sessions had run against the same workspace. The request body now
+  takes optional `case_ids` and `since` filters, which AND together and are
+  threaded through *both* selection paths. Omitting the body is unchanged
+  behavior (replay everything active, ADR 0003's accumulate-over-time
+  default), so pre-#250 clients keep working. A `case_ids` entry that is
+  unknown or belongs to another workspace rejects the whole request with
+  `404` rather than being silently dropped (which would quietly narrow the
+  run) or silently honored (which would leak existence across tenants).
+  Separately, labeled cases previously accumulated forever with no supported
+  reset; `DELETE /v1/evals/events?include_cases=true` now also purges
+  `eval_cases`. The default stays `false`, preserving the documented "raw
+  events ephemeral, labeled cases durable" contract. Note the purge covers
+  captured events and labeled cases only — `eval_feedback`, `eval_runs` and
+  `eval_run_results` survive it, so a scorecard can still report a completed
+  last run against zero cases.
+
+- **Retrieval-eval baseline published on the docs site (#153).** The per-mode
+  floor table already rendered into `README.md` (#158) is now also written to
+  `docs/_generated/retrieval-baseline.md` by the same
+  `render_baseline_table.py` / `eval-baseline-ratchet` path, and included in
+  `docs/testing.md` via `pymdownx.snippets`. The docs site therefore shows the
+  live gated numbers without hand-copying, and a ratchet PR updates README and
+  docs together.
+
+### Removed
+
+- **Hetzner real-VM e2e lane removed; e2e now lives entirely in GitHub
+  Actions.** `.github/workflows/hetzner-e2e.yml` is deleted. The lane had not
+  produced a genuine pass since 2026-07-13, and — more seriously — its skip
+  path reported **success**: the final-tag filter lived inside the first step
+  while every other step carried `if: steps.meta.outputs.skip != 'true'`, so a
+  skipped run completed with zero work done and a green check identical to a
+  full-stack pass. `v0.6.0-rc1` produced exactly that, and since
+  `docs/maintainers/releasing.md` pointed maintainers at the signal, **v0.6.0
+  shipped believing it had e2e coverage it never had**. A gate that can be
+  silently absent is worse than no gate. `integration.yml` (full Compose stack
+  on the runner, gating every merge to `main`) is now the sole e2e lane.
+  `hetzner-e2e-recover.yml` is retained as a manual cleanup tool, and
+  `infra/` Terraform is untouched — production deploys and the laptop VM path
+  still use it.
+
+  When the lane first really ran (on the v0.6.0 publish) it found two genuine
+  harness gaps, recorded in `docs/testing.md` for whoever reinstates it: the
+  **stdio** MCP test needs direct datastore access that
+  `docker-compose.release.yml` deliberately does not publish, and
+  `scripts/dev/bootstrap.sh` seeds the second tenancy principal only under
+  `SEED_PRINCIPAL_B=1`, so the cross-workspace isolation tests were 401ing
+  rather than verifying isolation.
+
+  **Now untested in CI:** the published GHCR images,
+  `docker-compose.release.yml` itself, and real-VM behaviour. The
+  published-image smoke check in `releasing.md` is upgraded to required on
+  every release to partly cover this.
+
+### Fixed
+
+- **MCP: extensionless and unregistered-extension uploads are labelled
+  `text/plain`, not `text/markdown` (#208).** Omitting `content_type` on
+  `upload_document` with a filename the registry doesn't recognize stored
+  `text/markdown` — so `Dockerfile`, `Makefile`, `README`, `.gitignore` and
+  `archive.tar.gz` were all recorded as markdown, which none of them are.
+  `content_type` is an indexed Postgres column and a Weaviate chunk property
+  callers filter on, so a caller narrowing to `text/markdown` to find their
+  documentation got Dockerfiles and tarball names back, with nothing
+  signalling the label was a guess. Both fallback branches now return
+  `text/plain`, the honest generic for "a text file whose format we did not
+  recognize". Note this is a labelling fix only: contrary to the issue's
+  framing, extraction and chunking are unchanged, because the `txt` and
+  `markdown` registry specs both declare `extractor="text_passthrough"` and
+  `chunking_hint="prose"` — affected documents chunk byte-for-byte
+  identically. Documents already stored under the old fallback keep their
+  stale `text/markdown` label; no backfill ships here.
+
+- **Compose-dependent test targets no longer exit 0 having run nothing
+  (#209).** `make test-integration` — documented as the release e2e gate —
+  reported success with everything skipped when no stack was up, as did the
+  `pytest -m benchmark` / `-m retrieval_eval` commands in `docs/testing.md`.
+  A command-line `-m` *replaces* each service's `addopts` default of
+  `-m 'not compose'` rather than intersecting with it, so those markers
+  selected precisely the compose tests the default excluded; each then
+  skipped at fixture setup, and pytest exits 0 for an all-skipped run. A
+  gate that cannot fail is worse than no gate — the same silent-success
+  failure that let v0.6.0 ship believing it had e2e coverage it never had.
+  Two layers now: `scripts/dev/require-stack.sh` pre-flights the stack
+  (wired as a `require-stack` prerequisite on every compose target) and
+  fails with an actionable "run `make dev` first"; `scripts/dev/run-compose-suite.sh`
+  then asserts from pytest's own JUnit report that a non-zero number of
+  tests actually *executed*, catching every other way a suite can run
+  nothing while exiting 0. New `test-benchmark` and `test-retrieval-eval`
+  targets pass the correct `"compose and <marker>"` expressions.
+
+- **Dead-letter jobs now reach `status=resolved` after a successful retry
+  (#249).** Nothing in the codebase ever wrote `"resolved"`:
+  `update_dead_letter_status` had exactly two call sites — reset to
+  `"pending"` when the retry re-trigger itself fails, and `"abandoned"` on
+  the abandon route. A job whose retry fully succeeded (new workflow ran,
+  document reached `processed`, searchable again) therefore sat at
+  `"retrying"` forever, indistinguishable from a retry still in flight or one
+  that silently failed downstream — so `GET /dead-letter` could never answer
+  "what is actually still broken". `DocumentIngestionWorkflow`'s success path
+  now best-effort resolves the document's outstanding `retrying` rows via the
+  new `resolve_dead_letter_jobs` activity and
+  `DatabaseService.resolve_dead_letter_jobs_for_document`. Keyed on
+  `document_id` rather than a dead-letter job id, so no id has to be threaded
+  through the re-published message; scoped to `status='retrying'` only, so
+  `pending` (never retried) and `abandoned` (explicitly given up on) rows are
+  untouched. No migration: `status` is an unconstrained `VARCHAR(20)`.
+
+- **Ingestion: an out-of-memory failure while extracting DOCX/XLSX/PPTX is
+  retried instead of permanently dead-lettered (#215).** `_extract_docx_text`
+  wrapped both the `Document()` construction and the paragraph-iteration
+  comprehension in one broad `except Exception` that re-raised as
+  `ApplicationError(non_retryable=True)`, so a `MemoryError` from a document
+  with a very large number of paragraphs was classified as a permanent,
+  property-of-the-bytes failure — dead-lettering a load-dependent failure a
+  retry on a less-contended worker could plausibly resolve. The `try` is now
+  scoped to only the construction call, with an `except MemoryError: raise`
+  carve-out ahead of the broad handler and the iteration left unwrapped,
+  exactly mirroring `_extract_pdf_text` (whose own docstring already cited
+  this as the pattern to follow, from #195). The pattern sweep found the same
+  missing carve-out at `_extract_xlsx_text`'s `load_workbook()` and
+  `_extract_pptx_text`'s `Presentation()` construction sites; both are fixed
+  here too.
+
+- **CI: the CHANGELOG gate no longer deadlocks the automated eval-baseline
+  ratchet.** `conventions.yml`'s CHANGELOG gate failed any PR touching
+  `services/**` without a `CHANGELOG.md` entry, which included the PR that
+  `integration.yml`'s `eval-baseline-ratchet` job opens on every green `main`
+  run — its diff is only the two machine-generated corpus files
+  (`retrieval_baseline.json`, `retrieval_history.jsonl`) plus the README
+  table rendered from them. That PR is opened with auto-merge enabled and
+  never merged, because a required check it can never satisfy sat red on it
+  (observed on PR #269). The committed retrieval-eval baseline therefore
+  froze at its last merged value and the enforced quality floor silently
+  stopped rising — the same inert-gate failure the ratchet job was built to
+  prevent, reintroduced one gate upstream. The gate now excludes those two
+  generated paths specifically; service source changed alongside them still
+  requires an entry, and a human test-only change to a service is
+  deliberately still in scope. Pinned by four new cases in
+  `tests/test_conventions_workflow_guards.py`, which now extract each gate's
+  `run:` block and execute it against synthetic file lists rather than
+  regex-matching the workflow YAML — text pins proved a `grep` was spelled a
+  certain way, not that it classified a real diff correctly.
+
+- **Ingestion bulk-upload path: store_in_weaviate budget, retry load, Temporal visibility (#228, #229, #230).**
+  `store_in_weaviate` StartToClose now scales with chunk count and embed
+  concurrency waves (`weaviate_store_budget.py`: one-wave minimum covers
+  per-batch retry worst-case ≈130s, cap 15m) instead of a flat 60s that
+  could not cover multi-batch embedding under TEI queue load. Activity
+  retry initial/max intervals lengthened (5–60s) to reduce lockstep retry
+  herds. The embedder dispatches batches with bounded concurrency
+  (`EMBEDDING_MAX_CONCURRENCY`, default **2** — the product of this and
+  `TEMPORAL_MAX_CONCURRENT_ACTIVITIES` is the TEI in-flight cap) and
+  per-batch retry with exponential backoff + jitter so a single queue
+  spike does not burn a whole Temporal attempt. Terminal document
+  failures raise `ApplicationError(type=DocumentIngestionFailed)` after
+  status/DLQ/completion side-effects and staging cleanup so Temporal
+  close status is `Failed` (was always `Completed` with a success=False
+  payload — 70 losses invisible to workflow monitoring).
+  `/ingest?wait=true` and the sync trigger map that type back to
+  structured `success=False` (wait body carries error string only;
+  `chunks_created`/`processing_time_ms` are zero on that path).
+  **Residual:** Temporal activity retries still re-embed the whole
+  document — no durable partial-progress checkpoint yet (#229).
+
+## [0.6.0] — 2026-08-13
+
+### Added
+
 - **Streamable HTTP transport for the MCP server (#220).** The same
   `_TOOLS` registry stdio serves is now mounted at `POST /mcp` inside
   `inh-public-api-svc` — same process, same port, same middleware stack as
@@ -28,7 +715,7 @@ All notable changes to Inherent are documented here. The format follows
   `X-API-Key` / `Authorization: Bearer` header and `api_key` is stripped
   from every advertised tool schema (computed from the registry schema, not
   hand-duplicated) so an agent is never prompted to source a secret it
-  might echo into context or logs. The surface is 10 tools, not stdio's 13:
+  might echo into context or logs. The surface is 10 tools, not stdio's 14:
   `verify_claim` (a lexical token-overlap counter that cannot detect
   negation — it scores "Neither party may cancel this Agreement" as
   `strong, 0.833` against source text saying the opposite), `search_memory`
@@ -271,6 +958,256 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Changed
 
+- **CI: coverage floors ratcheted to actual, closing a gate that could pass
+  with half the test suite deleted.** `ci.yml`'s per-service
+  `--cov-fail-under` (matrix `cov_fail_under`) was 40% for
+  `inh-ingestion-svc`, 45% for `inh-public-api-svc` and 95% for
+  `inh-contracts` — tens of points below measured coverage, so a PR that
+  deleted roughly half of either service's test suite would still pass the
+  required merge gate. Sourced from CI run 31661196233 (`main@bc6d56b`,
+  2026-08-13), actual total coverage is 83.35% (ingestion), 85.36%
+  (public-api) and 99.53% (contracts); floors are now `floor(actual) - 1` —
+  82, 84 and 98 respectively — leaving a 1-point buffer for run-to-run
+  jitter (e.g. conditional imports) without reopening the gap. The four
+  per-core-module floors under each service (`auth.py`, `search.py`,
+  `verify.py`, `quality_gate.py` for public-api; `quality.py`,
+  `extract.py`, `store.py`, `chunk.py` for ingestion) are raised the same
+  way, from as low as 35% to 71–99%; none of the eight modules' actual
+  coverage was found below its old configured floor. The policy — track
+  `floor(actual) - 1`, raise whenever coverage improves, never lower — is
+  now stated in the comment block above the per-module step, replacing the
+  previous open-ended "ratchet up over time" language.
+
+- **CI now type-checks and security-scans all three services, not just one.**
+  `mypy` and `bandit` ran for `inh-public-api-svc` only; the ingestion service
+  — the largest of the three, and the one that parses untrusted uploaded files
+  — and the shared `inh-contracts` package had no type or security signal at
+  all. Both are now in the `service-checks` matrix, running `uv run mypy src`
+  and `uv run bandit -c pyproject.toml -r src` — the bandit invocation and its
+  `[tool.bandit]` config are byte-identical across all three services, so the
+  severity floor cannot differ between them and an identical finding cannot
+  fail one service while passing another. `inh-contracts` needed no
+  suppressions at all. Ingestion had 20 mypy errors and 8 bandit findings: 5
+  mypy errors were real and are fixed here (a `Redis | None` deref in
+  `_delivery_count`, an SSRF-guard `getaddrinfo` result typed `str | int`, two
+  attribute accesses on a `slide: object` in the PPTX notes path, and an
+  `int | None` index in the subtitle-cue parser); the other 15 are all
+  `[no-any-return]` from stubless clients and are baselined via a **per-module**
+  `warn_return_any = false` override rather than a service-wide one, so every
+  other check still applies to those modules. The 8 bandit findings each carry
+  an inline `# nosec` with a justification — the `0.0.0.0` container bind, an
+  f-string whose only interpolation is an in-code literal, and two best-effort
+  `except: pass` fallbacks are permanent; the `xml.etree` import and the three
+  parses of customer-uploaded EPUB/ODT XML should move to `defusedxml`. Both
+  baselines are tracked in #247.
+
+- **CI: required merge gates — hardened CI, Conventions gate, E2E smoke
+  lane.** `ci.yml` now declares `permissions: contents: read` at the workflow
+  level (it previously inherited whatever the repository default grants),
+  cancels superseded in-flight runs per pull request via a `concurrency`
+  group — while leaving push-to-`main` runs uncancelled, since that history is
+  the merge-gate record — and sets `timeout-minutes` on every job (30 for
+  `service-checks` and `Required tests before merge`, 10 for `root tests/`).
+  Previously a hung Postgres service container or a wedged `uvx` resolve could
+  hold a job — soon to be a required status check — pending for the runner's
+  6-hour default. A new `conventions.yml` workflow adds a `Conventions`
+  required check: it fails a PR that touches `services/**` without a
+  `CHANGELOG.md` entry, or that changes API routers / the MCP tool registry /
+  shared contracts without touching `docs/` — unless the PR carries the
+  `no-changelog` or `no-docs-needed` label respectively (both labels are
+  re-evaluated live, via the workflow's `labeled`/`unlabeled` triggers, so
+  applying one un-blocks an already-failing PR without a new push). A new
+  `e2e-smoke.yml` workflow adds an `E2E smoke` required check — the first
+  end-to-end signal this repo has ever had before merge. Until now the only
+  proof that the real stack boots and a document survives ingest → search
+  lived in `integration.yml`, which runs the full compose suite plus
+  benchmarks and is deliberately restricted to pushes to `main`, nightly cron
+  and manual dispatch: a PR could break the
+  Compose wiring and stay green until after it merged. The smoke lane boots
+  the identical stack (same images, same `RATE_LIMIT_ENABLED=false` and
+  `INTEGRATION_TIMEOUT=600` env, same `make bootstrap`, same failure-path log
+  and document-state dumps) but runs only tests tagged with the new `smoke`
+  marker via `-m "smoke and compose"`, and with `--no-cov` since coverage is
+  the fast lane's job. Today that is four tests —
+  `test_ingestion_to_search_roundtrip`, the two MCP ones below,
+  `test_cross_workspace_search_is_empty`, `test_pdf_becomes_searchable` and
+  `test_search_event_id_is_usable_on_the_next_request` — which take ~25s
+  against a booted stack; the other roundtrip variants stay in the
+  full lane. That gate is now backed by the first live E2E coverage the MCP
+  server has ever had (`test_compose_mcp.py`): every previous MCP test drove
+  the handlers in-process with `get_database` / `get_search_service` mocked,
+  so nothing proved a real MCP client could reach a running stack at all.
+  The new suite points the `mcp` SDK's `streamablehttp_client` at `POST
+  /mcp` for a genuine initialize → `tools/list` → `tools/call` round trip
+  (pinning the 10 advertised tools and that no HTTP schema leaks `api_key`,
+  retrieving a REST-seeded document, and running upload → poll →
+  `delete_document` → `not_found` entirely through tools), and connects the
+  SDK's in-memory client/server session to the real stdio server object with
+  settings pointed at the compose-published backend ports — in-memory
+  streams replace the pipe, not the backends, so its 14 tools and its search
+  execute against the same live Postgres/Mongo/Weaviate/TEI. Both tool lists
+  are hardcoded rather than derived from `_TOOLS`, so registry drift breaks
+  a live test instead of silently republishing the surface. Writing it
+  surfaced #241 — no MCP search ever mints an `event_id`, leaving
+  `report_feedback` unusable over MCP — which had been auto-closed in error
+  by the #240 fix commit and is now reopened and pinned as a strict xfail.
+  The same lane also carries the first LIVE proof of the tenancy boundary
+  (`test_compose_tenancy.py`). Cross-tenant leakage is this product's worst
+  failure mode — issue #1 was a real one — yet every test of it was offline,
+  driving the auth helpers with a mocked database: they prove the decision
+  logic, never that a real request through the real middleware against real
+  Postgres/Mongo/Weaviate is denied. `scripts/dev/bootstrap.sh` now seeds two
+  principals rather than one (its PG-insert + Mongo-upsert refactored into a
+  reusable `seed_principal` function, still idempotent): `ink_dev_local_key_002`
+  / `user_local_002` / `ws_local_002` joins the existing 001 identity with the
+  same read/write/search permissions, so no denial below can pass merely
+  because the second key is under-privileged. Both principals are fully
+  provisioned on purpose — pointing one key at an invented workspace id is
+  refused at the key-binding check and proves nothing about whether one real
+  tenant can reach another's content. **The second principal is gated**: it is
+  seeded only when `API_KEY` is the local dev default or `SEED_PRINCIPAL_B=1`
+  is passed. README and `docs/deploy/production.md` §8 both document running
+  this script against real deployments with `API_KEY` overridden, and
+  `hetzner-e2e.yml` pipes it onto a VM with a public IP, so an unconditional
+  second seed would have planted a publicly-known active read/write/search key
+  there; `make bootstrap`, `e2e-smoke.yml` and `integration.yml` all bootstrap
+  with the defaults and keep getting it (the tenancy tests fail, not skip,
+  without it). `KEY_ID`/`KEY_ID_B` now default to empty and mint a uuid rather
+  than a literal — `key_id` is `UNIQUE` while the upsert arbitrates on
+  `key_hash`, so a pinned id made re-running with a rotated key value fail on
+  the unique constraint. A uuid sentinel, fresh per module run so
+  a dirty stack cannot false-pass, is uploaded by A and then hunted by B over
+  REST and MCP: search, `GET /v1/documents/{id}`, `GET /v1/chunks/{id}`,
+  `/chunks/{id}/context`, `DELETE`, and the MCP `search_documents` tool. The
+  asserted statuses are the DOCUMENTED ones — 403 for a scoped key naming
+  another workspace in `X-Workspace-Id` (it refuses the caller's own binding),
+  404 for every cross-workspace document read or delete (a 403 there would be
+  an existence oracle, the #138 follow-up's bug) — and the delete test
+  re-reads the document and its chunks as A afterwards, since a handler that
+  deleted before checking the workspace would also answer 404. B uploads a
+  decoy document of its own first, so its workspace has a real Weaviate
+  collection and tenant: without it every "B finds nothing" answer comes from
+  the missing-collection short-circuit in `search.py` rather than from scoped
+  retrieval, and the smoke-lane test would stay green on a build with tenant
+  scoping removed outright. Every surface and verb carries a negative control —
+  the owner must FIND the sentinel over that same transport, READ the same
+  route, and successfully DELETE the probe on teardown — so a retrieval outage
+  or a broken route reads as failure rather than as perfect isolation. All four
+  tests pass against the live stack, and all four fail loudly when B is pointed
+  at A's credentials. Two more live suites join the same lane. The first
+  (`test_compose_lifecycle.py`) covers what happens to a document *after* the
+  happy-path roundtrip: an owner's `DELETE` must evict the document from the
+  vector store as well as from Postgres — every prior delete assertion was
+  either offline or a cross-tenant refusal, so a delete that dropped the row
+  and left the vectors would have looked perfect from `GET /v1/documents/{id}`
+  while every search kept serving the erased content; `POST
+  /v1/documents/{id}/refresh` (#42), which had no live coverage at all, is
+  pinned to its documented contract (an uploaded document needs no source URI,
+  the response is a `DocumentUploadResponse` with the same id and
+  `status="pending"`, and the document returns to `processed` with its content
+  intact, which is the only way to prove the stored S3 object, the MQ publish
+  and the pending-row reset all still work together); and PDF/DOCX ingest
+  through their real third-party extractors rather than the constructed UTF-8
+  every other live test uploads, asserting the fixture's sentinel comes back in
+  the retrieved *content* — a document whose extractor returned an empty string
+  is still findable by filename signal, so a document-id-only assertion would
+  call that a pass. Three additive binary fixtures back it
+  (`docs/examples/sample-documents/e2e-lifecycle.pdf`, `e2e-lifecycle.docx`,
+  `e2e-tabular.xlsx`, each under 40 KB); the pre-existing
+  `sample.pdf`/`.docx`/`.xlsx` were deliberately left alone, since
+  `test_extraction_by_type.py` pins their exact sheet names, merged-cell
+  markers and header rows and they feed the extraction/chunking eval corpus.
+  The 500-row `e2e-tabular.xlsx` is the live regression guard for #129's
+  format-aware chunking: `docs/architecture/overview.md` §6.2 describes a
+  spreadsheet collapsing into one giant chunk (pipe-delimited rows contain no
+  `.`/`!`/`?`-plus-whitespace, so `_chunk_by_sentences` finds no split point
+  and the size guard never fires), which TEI then silently truncates at the
+  embedding ceiling — measured on this fixture, that path still yields a
+  28,344-character chunk, while the shipped `tabular` → `_chunk_by_rows` path
+  it now takes yields 51 chunks with a 786-character maximum. The test asserts
+  the bound rather than xfailing the defect, because #129 merged after §6.2 was
+  written and the defect no longer reproduces (§6.2's "planned, not shipped"
+  note is stale). The second suite (`test_compose_event_durability.py`) is the
+  live pin for #240: it searches, and posts `POST /v1/evals/feedback` on the
+  returned `event_id` with no sleep, no retry and no polling in between —
+  deliberately, since a retry is exactly the workaround the bug forced on
+  callers — then checks `GET /v1/evals/scorecard`'s counters actually moved,
+  because a 200 from feedback proves the row was found but not that an operator
+  can see it. That race lived in FastAPI's response lifecycle rather than in any
+  function under test, so no offline test could ever have observed it. A third
+  new suite (`inh-ingestion-svc`'s `test_compose_dead_letter_recovery.py`)
+  joins the full compose lane (not smoke — it stops and restarts the
+  `weaviate` container, ~53s wall-clock, too slow and disruptive for the
+  PR-blocking lane): with `weaviate` stopped, an upload's parallel
+  Postgres/Weaviate storage step retries the Weaviate side 5x
+  (2s/4s/8s/16s backoff, ~30s floor) before the workflow marks the document
+  failed and records a `dead_letter_jobs` row; the test polls the ingestion
+  service's own `GET /dead-letter` (a separate authenticated REST surface
+  from the public API, port 18002 by default) until that job appears,
+  restarts `weaviate` and waits for it healthy, `POST`s the job's
+  `/retry` endpoint, and confirms the document reaches `processed` and is
+  searchable again — the first live proof this recovery path actually
+  works end to end, not just that the pieces are individually mocked-unit-
+  tested (`tests/failure_injection/` was entirely mocked before this). A
+  canary upload before the fault injection is a positive control: it
+  proves the pipeline is healthy going in, so a failure lower down is the
+  dead-letter/retry path's fault, not a pre-broken stack. Cleanup runs
+  `docker compose start weaviate` unconditionally in a `finally`, since
+  later full-lane tests need the shared stack left healthy regardless of
+  outcome. Reading the retry path surfaced a real gap worth tracking
+  separately: nothing ever transitions a dead-letter job to
+  `status="resolved"` after a successful retry, so the dead-letter listing
+  can't distinguish "retried and now fine" from "still mid-retry" no matter
+  how long ago the retry succeeded (#249).
+  The retrieval-baseline hard gate is deliberately excluded: its baseline is
+  ratcheted only by runs on `main`, so enforcing it per-PR would block merges
+  on metric drift unrelated to the PR. Unlike the other lanes this one sets
+  `cancel-in-progress: true`, since only the newest commit on a PR gates
+  merge.
+  With the real live suites above landed, `inh-public-api-svc`'s
+  `tests/e2e/` — fully mocked via `AsyncMock`/`MagicMock` overrides of
+  `get_database`, `get_search_service` and auth, never touching a real
+  dependency — no longer earned that name; it is renamed to
+  `tests/app_flows/` and its `conftest.py` docstring now says plainly that
+  it is in-process app-flow testing, NOT end-to-end, and that live E2E
+  lives in `tests/integration/test_compose_*.py`.
+  The GitHub ruleset backing all of this (`main-protect`, id 16976743) was
+  itself inert until now: its branch-name condition was a single malformed
+  string (`"refs/heads/main, release*"`) that matched no ref, so every rule
+  on it — including `pull_request` and the two review rules above — was
+  silently not applied to `main`. It is repaired to the array form
+  (`refs/heads/main`, `refs/heads/release*`) and live, with 0 required
+  approvals (a sole-maintainer repo can't self-approve, so the human gate is
+  green checks plus a human clicking merge), required review-thread
+  resolution, and squash/rebase-only merges. `AGENTS.md`'s "raise PRs
+  against `dev`" rule, stale since `main` became the integration branch, is
+  replaced with the corrected policy plus a merge-gate table (PR-blocking /
+  post-merge / release-only); `docs/testing.md` gains the `smoke` marker,
+  the smoke lane's scope and time budget, and the `tests/app_flows` rename
+  above. Registering the three PR-blocking checks
+  (`Required tests before merge` / `E2E smoke` / `Conventions`) as the
+  ruleset's `required_status_checks` is deliberately deferred to a follow-up
+  change, so it can confirm the live check-run names on an actual PR first —
+  registering the wrong name would leave `main` requiring a check that can
+  never report, which blocks every PR permanently.
+  A verification pass against a long-lived local stack surfaced two more
+  gaps in this lane, fixed on the same branch. `test_compose_mcp.py`'s
+  `_structured_payload` test helper parsed the appended `` ```json `` block
+  with a naive `str.find("```")` for the closing fence; once the shared dev
+  workspace accumulated enough documents, one contained a literal
+  triple-backtick inside its indexed content, which that naive search
+  matched before the block's real closing fence and truncated the JSON
+  mid-string (`test_compose_tenancy.py`, which imports the same helper,
+  failed identically). It now decodes with `json.JSONDecoder.raw_decode`,
+  which parses exactly one JSON value from the given offset and so cannot
+  mistake an embedded backtick for a fence. Second, "exactly 6 smoke
+  tests" — the invariant that keeps `e2e-smoke.yml` inside its 40-minute
+  budget — was enforced only by comments; a new repo-root guard test
+  (`tests/test_smoke_lane_size.py`) counts `@pytest.mark.smoke` occurrences
+  across `services/*/tests/` and pins the count, so growing the lane now
+  requires a conscious update to the pinned constant rather than a silent
+  addition.
+
 - **⚠️ `GET /v1/chunks/{document_id}/context` is now bounded and pageable
   (#219).** The endpoint concatenated every chunk with no limit: one
   169-chunk contract returned 298 KB / 117,086 chars (~29,300 tokens) in a
@@ -437,7 +1374,107 @@ All notable changes to Inherent are documented here. The format follows
   [ADR 0004](https://github.com/inherent-prime/inherent/blob/main/docs/adr/0004-per-document-diversification.md)
   and its amendment.
 
+- **Package versions bumped for the release unit that changed.** Bumps
+  `inh-ingestion-svc` 0.5.0 → 0.6.0 (breaking `workspace_id` requirements
+  across eight routes, plus the file-type registry) and `inh-public-api-svc`
+  0.2.0 → 0.3.0 (MCP Streamable HTTP transport, breaking MCP auth binding).
+  `inh-contracts` stays at 2.2.0 — already bumped during this cycle by the
+  changes that touched it. Both `uv.lock` files were regenerated to match, so
+  the images (which build from the lock since #226) carry the same versions.
+  These remain package versions: the published **image** tag is the
+  repository-level release tag, decoupled by design.
+
+### Removed
+
+- **Unused runtime dependencies dropped** to shrink the install surface of
+  both service images: `aiobreaker` and `psycopg[binary]` from
+  `inh-public-api-svc` (DB access is async-only via `asyncpg`; no circuit
+  breaker or sync driver is imported), and `packaging` from
+  `inh-ingestion-svc` (not imported anywhere). No behavior change.
+- **Dead `PLAN_RATE_LIMITS` pricing-tier constant removed** from
+  `inh-public-api-svc/src/config/constants.py` (and its `config/__init__`
+  re-export). It hardcoded commercial plan pricing (`starter`/`pro`/`team`/
+  `enterprise`, `$149`–`$2K+`/month) that this OSS repo has no billing system
+  for and that was read nowhere — per-key limits come from `ApiKey.rate_limit`
+  (default `DEFAULT_RATE_LIMIT`/`RATE_LIMIT_DEFAULT`). No behavior change
+  (#151).
+
 ### Fixed
+
+- **CI's `inh-ingestion-svc` Postgres schema now matches dev/prod
+  (schema-fidelity gap).** `ci.yml`'s ingestion job provisioned its
+  `postgres:15` service container solely via `DatabaseService.ensure_schema()`
+  (SQLAlchemy `metadata.create_all()`), never `scripts/migrations/*.sql` —
+  the same path `docker-compose.yml`'s `postgres-init` service and the
+  in-image `SERVICE_MODE=migrate` runner use for dev/staging/prod. The two
+  schema sources had already silently diverged: migration 012 adds
+  `workspace_metadata.user_id -> tenants.user_id` (`fk_workspace_tenant`),
+  a foreign key the SQLAlchemy `Table` never declared, so CI's schema
+  structurally lacked it and any test violating it passed in CI while
+  failing against a real migrated database. `tests/test_database.py`'s
+  `test_upsert_workspace_metadata`, `test_update_workspace_stats`, and
+  `test_delete_workspace_data` now create the owning `tenants` row first
+  (`db_service.upsert_tenant(user_id)`), mirroring what
+  `TenantManager.ensure_tenant_exists` always does in production. `ci.yml`
+  now applies every `scripts/migrations/*.sql` file, in filename order,
+  against the service container before tests run, failing loudly
+  (`set -e` + `ON_ERROR_STOP=1`) on the first error. The SQLAlchemy
+  `workspace_metadata.user_id` column also gained the missing
+  `ForeignKey("tenants.user_id", ondelete="CASCADE")` so `ensure_schema()`
+  (test-only — no production or Compose path calls it) agrees with the
+  migration. A new root-suite guard (`tests/test_ci_schema_fidelity.py`)
+  pins that `ci.yml` keeps applying the migrations.
+
+- **Eval-gate tolerance derived from corpus resolution (#236).** The
+  compose retrieval-eval hard gate compared each per-mode metric to the
+  committed baseline against a single fixed `EVAL_GATE_TOLERANCE` (`0.02`),
+  which is finer than what a 13-query golden corpus can actually resolve:
+  the smallest possible move a single query's rank change can produce in
+  pooled `mrr` is `0.5/13 ≈ 0.0385`, already above `0.02`. Any single-query
+  rank slip therefore hard-failed the gate regardless of how every other
+  metric moved — this hit `main` on ~5 of the last 7 nightly runs and once
+  blocked it for three days on a net-positive change (#237). `tests/evals/eval_gate.py`
+  gains `min_detectable_delta(metric, n)` (the smallest single-query step
+  for a metric family — `0.5/n` for `mrr`, `1/n` for `recall@k`,
+  `(1 - 1/log2(3))/n` for `ndcg@k`) and `effective_tolerance(metric, n,
+  floor)` (`max(floor, min_detectable_delta(...))`). `EVAL_GATE_TOLERANCE`
+  keeps its name and default but now means the *floor* under the derived
+  per-metric tolerance, not the tolerance itself; `n` is the number of gated
+  golden queries (`category != "abstention"`, currently 13), computed from
+  the same in-memory pool `test_compose_retrieval_regression.py` already
+  uses for its pooled averages. The `check` CLI subcommand gains
+  `--num-queries`/`--qrels` to opt into the same derivation; omitting both
+  preserves the exact pre-fix flat-tolerance behavior.
+  `corpus/retrieval_baseline.json`'s values are unchanged — only its
+  `_comment` was updated to describe the new tolerance semantics. See
+  `docs/testing.md`'s "Tolerance is derived from corpus resolution" section
+  and [ADR 0003](https://github.com/inherent-prime/inherent/blob/main/docs/adr/0003-traffic-mined-retrieval-evals.md)'s
+  2026-08-12 amendment for the full formula and CLI/CI precedence.
+
+- **`POST /v1/search` returned an `event_id` before the capture row existed
+  (#242, #240).** The id was minted, attached to the response, and the INSERT
+  scheduled via `BackgroundTasks` — which Starlette runs *after* the response
+  is sent. A caller that posted `/v1/evals/feedback` on the next round trip
+  raced the write and got `404 Unknown event_id`. The insert usually won, so
+  this surfaced as an intermittent CI failure, but it was a live contract bug:
+  `report_feedback` is an MCP tool, ADR 0003 makes `event_id` the public join
+  key for external eval stacks, and the documented flywheel is search →
+  feedback back to back. Search now awaits the insert before returning, and
+  omits `event_id` entirely when capture fails rather than advertising an id
+  that resolves to nothing. Capture still cannot fail or raise into a search;
+  the retention purge stays write-behind. The `404` message no longer blames
+  the retention window as the sole cause — it sent this investigation down the
+  wrong path first.
+
+- **Any evals failure was reported as a ranking regression (#242, #240).** The
+  CI gate step selected `-m 'retrieval_eval and compose'`, which matched both
+  the ranking-regression test and the flywheel test, so an unrelated failure
+  surfaced as `##[error] retrieval-eval hard gate failed -- a per-mode metric
+  regressed beyond tolerance` and filed a ranking-regression issue. A narrower
+  `eval_gate` marker now carries the hard gate alone; the flywheel test moved
+  to the general compose step, where its failure is reported as itself. Test
+  coverage is unchanged — the two steps still partition the same 9 compose
+  tests, 1 + 8 instead of 2 + 7.
 
 - **Retrieval-eval baseline re-seeded to the shipped diversification default,
   unblocking `main` (#237, #146).** The compose retrieval-eval hard gate had
@@ -455,7 +1492,14 @@ All notable changes to Inherent are documented here. The format follows
   and the ranking code is untouched. The gate's own resolution limit — a 0.02
   tolerance is finer than the 0.0385 minimum single-query MRR step on a
   13-query corpus, so the automated `max(current, baseline)` ratchet can never
-  express this trade — is tracked in #236.
+  express this trade — is tracked in #236. **Fixed later in this same
+  `[Unreleased]` section** — `EVAL_GATE_TOLERANCE` is now a floor under a
+  per-metric tolerance derived from corpus resolution
+  (`max(floor, min_detectable_delta(metric, n))`), so a single query's rank
+  slip no longer requires a manual re-seed like this one; see the "Eval-gate
+  tolerance derived from corpus resolution" entry below and
+  [ADR 0003](https://github.com/inherent-prime/inherent/blob/main/docs/adr/0003-traffic-mined-retrieval-evals.md)'s
+  2026-08-12 amendment.
 
 - **Service images ignored `uv.lock` and shipped a different dependency set
   than CI tested (#226, #225).** Both service Dockerfiles installed with
@@ -1044,24 +2088,6 @@ All notable changes to Inherent are documented here. The format follows
   a request omitting it now gets **422** instead of editing the chunk. Every
   existing caller of this inh-ingestion-svc-internal endpoint must add
   `?workspace_id=<ws>`. (#134)
-
-### Removed
-
-- **Unused runtime dependencies dropped** to shrink the install surface of
-  both service images: `aiobreaker` and `psycopg[binary]` from
-  `inh-public-api-svc` (DB access is async-only via `asyncpg`; no circuit
-  breaker or sync driver is imported), and `packaging` from
-  `inh-ingestion-svc` (not imported anywhere). No behavior change.
-- **Dead `PLAN_RATE_LIMITS` pricing-tier constant removed** from
-  `inh-public-api-svc/src/config/constants.py` (and its `config/__init__`
-  re-export). It hardcoded commercial plan pricing (`starter`/`pro`/`team`/
-  `enterprise`, `$149`–`$2K+`/month) that this OSS repo has no billing system
-  for and that was read nowhere — per-key limits come from `ApiKey.rate_limit`
-  (default `DEFAULT_RATE_LIMIT`/`RATE_LIMIT_DEFAULT`). No behavior change
-  (#151).
-
-### Security
-
 - **⚠️ BREAKING (auth) — MCP now enforces workspace-scoped API key binding,
   and REST/MCP document lookups no longer leak cross-workspace existence
   (#138).** REST's `_resolve_workspace` binds a workspace-scoped key to

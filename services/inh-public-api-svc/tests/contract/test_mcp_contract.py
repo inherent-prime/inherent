@@ -1,9 +1,7 @@
 """MCP tool contract regression tests (M6 #30).
 
-Locks down the MCP agent surface so agents do not silently break. For each tool
-(search_documents, search_memory, get_citations, verify_claim, explain_lineage,
-refresh_stale_source, get_document_context, list_documents, get_document,
-list_chunks) we assert:
+Locks down the MCP agent surface so agents do not silently break. For every
+registered tool, including ``whoami``, we assert:
 
 - **inputSchema** advertises the documented required fields with the documented
   JSON types (and ``api_key`` is always required).
@@ -37,6 +35,7 @@ pytestmark = [pytest.mark.contract]
 # schema drifts from it, these tests fail. (Required permissions live in
 # ``_PERMISSION`` below, mirroring the server's _TOOL_PERMISSIONS map.)
 TOOL_SPEC: dict[str, dict] = {
+    "whoami": {"required": ["api_key"]},
     "search_documents": {"required": ["api_key", "query"]},
     "search_memory": {"required": ["api_key", "query"]},
     "get_citations": {"required": ["api_key", "query"]},
@@ -50,11 +49,16 @@ TOOL_SPEC: dict[str, dict] = {
     "delete_document": {"required": ["api_key", "document_id"]},
     "get_document": {"required": ["api_key", "document_id"]},
     "list_chunks": {"required": ["api_key", "document_id"]},
+    "create_chunk": {"required": ["api_key", "document_id", "content"]},
+    "edit_chunk": {"required": ["api_key", "document_id", "chunk_index", "content"]},
+    "delete_chunk": {"required": ["api_key", "document_id", "chunk_index"]},
     "upload_document": {"required": ["api_key", "filename", "content"]},
+    "list_workspaces": {"required": ["api_key"]},
 }
 
 # Permission each tool requires (mirrors src/mcp_server/server._TOOL_PERMISSIONS).
 _PERMISSION: dict[str, str] = {
+    "whoami": "read",
     "search_documents": "search",
     "search_memory": "search",
     "get_citations": "search",
@@ -68,7 +72,11 @@ _PERMISSION: dict[str, str] = {
     "delete_document": "write",
     "get_document": "read",
     "list_chunks": "read",
+    "create_chunk": "write",
+    "edit_chunk": "write",
+    "delete_chunk": "write",
     "upload_document": "write",
+    "list_workspaces": "read",
 }
 
 # A key that LACKS the tool's required permission (so the denied path triggers).
@@ -81,6 +89,7 @@ _DENY_KEY_PERMS: dict[str, list[str]] = {
 
 # Minimal arguments to actually drive each tool past schema/permission checks.
 _TOOL_ARGS: dict[str, dict] = {
+    "whoami": {},
     "search_documents": {"query": "q"},
     "search_memory": {"query": "q"},
     "get_citations": {"query": "q"},
@@ -94,7 +103,11 @@ _TOOL_ARGS: dict[str, dict] = {
     "delete_document": {"document_id": "doc-1"},
     "get_document": {"document_id": "doc-1"},
     "list_chunks": {"document_id": "doc-1"},
+    "create_chunk": {"document_id": "doc-1", "content": "new chunk text"},
+    "edit_chunk": {"document_id": "doc-1", "chunk_index": 0, "content": "edited"},
+    "delete_chunk": {"document_id": "doc-1", "chunk_index": 0},
     "upload_document": {"filename": "notes.md", "content": "# hello world"},
+    "list_workspaces": {},
 }
 
 ALL_TOOLS = list(_PERMISSION)
@@ -271,6 +284,20 @@ class TestToolOutputType:
         db.delete_document = AsyncMock(
             return_value={"document_id": "doc-1", "chunk_count": 3, "size_bytes": 2048}
         )
+        from src.models.document import DocumentChunk
+
+        sample_chunk = DocumentChunk(
+            id="1",
+            document_id="doc-1",
+            content="chunk text",
+            chunk_index=0,
+            token_count=2,
+            metadata={"content_hash": "abc"},
+        )
+        db.append_document_chunk = AsyncMock(return_value=sample_chunk)
+        db.update_document_chunk = AsyncMock(return_value=sample_chunk)
+        db.get_document_chunk_by_index = AsyncMock(return_value=sample_chunk)
+        db.delete_document_chunk = AsyncMock(return_value=sample_chunk)
 
         from src.models.search import SearchResponse
 
@@ -285,6 +312,8 @@ class TestToolOutputType:
             )
         )
         search.delete_document_vectors = AsyncMock(return_value=3)
+        search.upsert_chunk_vector = AsyncMock(return_value=None)
+        search.delete_chunk_vector = AsyncMock(return_value=None)
         mq = AsyncMock()
         mq.publish = AsyncMock(return_value=None)
         storage = MagicMock()
@@ -311,6 +340,11 @@ class TestToolOutputType:
             patch(
                 "src.services.deletion.get_storage_service",
                 new=MagicMock(return_value=storage),
+            ),
+            # chunk CRUD (#133) reaches Weaviate through chunk_writes.
+            patch(
+                "src.services.chunk_writes.get_search_service",
+                new=AsyncMock(return_value=search),
             ),
             # upload_document reaches storage/MQ through the shared
             # document_intake service (same one REST uses, #87 Task 3).
@@ -846,8 +880,8 @@ class TestUploadDocumentTool:
             ("data.csv", "text/csv"),
             ("page.html", "text/html"),
             ("notes.md", "text/markdown"),
-            ("notes", "text/markdown"),  # no extension -> the historical default
-            ("notes.log", "text/markdown"),  # unrecognized extension -> default
+            ("notes", "text/plain"),  # no extension -> honest generic (#208)
+            ("notes.log", "text/plain"),  # unrecognized extension -> honest generic (#208)
             # #197: the "code" spec pools 22 MIME aliases across 21 distinct
             # languages under ONE registry entry -- `mime_types[0]` used to
             # answer "text/x-python" for every one of these regardless of
@@ -858,6 +892,20 @@ class TestUploadDocumentTool:
             ("q.sql", "application/sql"),
             ("s.sh", "application/x-sh"),
             ("x.rs", "text/x-rustsrc"),
+            # #208: extensionless / unregistered-extension filenames a real
+            # agent actually sends -- these used to be mislabelled
+            # text/markdown (confidently wrong, not honestly unknown). All
+            # fall through the SAME "no extension" or "unrecognized
+            # extension" branches as "notes"/"notes.log" above.
+            ("Dockerfile", "text/plain"),  # no extension at all
+            ("Makefile", "text/plain"),  # no extension at all
+            ("README", "text/plain"),  # no extension at all
+            (".gitignore", "text/plain"),  # dotfile: "." in filename is True,
+            # so this takes the EXTENSION branch (derived extension
+            # ".gitignore") rather than the no-dot branch -- both must land
+            # on text/plain, see test_dotfile_resolves_via_extension_branch_not_no_dot_branch
+            # below for a pin on which branch actually fires.
+            ("archive.tar.gz", "text/plain"),  # unrecognized extension ".gz"
         ],
     )
     async def test_omitted_content_type_derives_from_filename_extension(
@@ -869,7 +917,10 @@ class TestUploadDocumentTool:
         upload_document(filename="notes.txt", ...) and omitting the optional
         content_type (exactly as the schema invites) must NOT self-reject.
         The default is now derived from the filename's extension, falling
-        back to text/markdown only when the extension is absent/unknown.
+        back to text/plain only when the extension is absent/unknown (#208:
+        changed from the old text/markdown fallback, which mislabelled
+        Dockerfile/Makefile/README/.gitignore/archive.tar.gz as markdown --
+        confidently wrong rather than honestly unknown).
 
         Extended for #197 (review of #121/#122/#127): the "code" spec's
         added multi-MIME shape broke the "one MIME type per spec" assumption
@@ -929,6 +980,47 @@ class TestUploadDocumentTool:
         stored_content_type = db.create_or_reset_pending_document.call_args.kwargs["content_type"]
         assert stored_content_type == "text/x-go"
         assert stored_content_type != "text/x-python"
+
+    async def test_dotfile_resolves_via_extension_branch_not_no_dot_branch(self):
+        """#208 trap: ``.gitignore`` contains a "." (at index 0), so
+        `_default_upload_content_type` takes the EXTENSION branch (deriving
+        extension ``".gitignore"``, which `get_spec_for_extension` does not
+        recognize) rather than the "no dot at all" branch that fires for
+        ``Dockerfile``/``Makefile``/``README``. Both branches must still
+        agree on ``text/plain`` -- this test pins the specific branch a
+        dotfile takes (via `get_spec_for_extension` returning None for
+        ``.gitignore``, not via any special-casing of dotfiles), asserted
+        against the value actually PERSISTED to the DB, not just the JSON
+        response body (same rigor as
+        `test_go_file_with_omitted_content_type_is_not_labelled_python`)."""
+        from inh_contracts.file_types import get_spec_for_extension
+
+        # Pin the premise the rest of this test relies on: ".gitignore" is
+        # genuinely unregistered, so the extension branch's registry lookup
+        # is what falls through to text/plain -- not a special dotfile case.
+        assert get_spec_for_extension(".gitignore") is None
+
+        db = AsyncMock()
+        db.validate_api_key = AsyncMock(return_value=self._key())
+        db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
+        db.get_document_id_by_content_hash = AsyncMock(return_value=None)
+        db.get_document_id_by_filename = AsyncMock(return_value=None)
+        db.create_or_reset_pending_document = AsyncMock(return_value=None)
+
+        storage = self._storage()
+        mq = self._mq()
+        p1, p2 = self._intake_patches(storage, mq)
+
+        with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)), p1, p2:
+            content = await _call_tool(
+                "upload_document",
+                {"api_key": "x", "filename": ".gitignore", "content": "node_modules/\n*.pyc\n"},
+            )
+
+        assert not content[0].text.startswith("Error"), content[0].text
+        stored_content_type = db.create_or_reset_pending_document.call_args.kwargs["content_type"]
+        assert stored_content_type == "text/plain"
+        assert stored_content_type != "text/markdown"
 
     async def test_explicit_content_type_is_never_overridden_by_extension(self):
         """Coordinator adversarial-review regression pin (#193 blocker): an

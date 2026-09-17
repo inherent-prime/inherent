@@ -5,12 +5,21 @@ Replays every active eval case through SearchService in each retrieval mode
 ranking metrics. Runs execute as a FastAPI background task with bounded
 concurrency so replay can never starve live serving. Produces the trial
 artifact: "recall@5 0.91 hybrid vs 0.78 keyword — on YOUR corpus".
+
+Optional replay scoping (#250): both ``start_run`` (which decides case_count
+and the 409) and ``execute_run`` (which does the actual replay) accept the
+same ``case_ids``/``since`` filters and must be called with the same values --
+they query ``get_active_eval_cases`` independently, so scoping only one of
+the two call sites reintroduces the order-fragility the issue is about.
+Omitting both keeps the unscoped default (every active case for the
+workspace), unchanged from before #250.
 """
 
 from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import datetime
 
 from src.config.settings import settings
 from src.models.evals import CaseModeResult, EvalRunReport, ModeMetrics, RunSummary
@@ -23,9 +32,22 @@ logger = get_logger(__name__)
 MODES = ("keyword", "semantic", "hybrid")
 
 
-async def start_run(db, *, workspace_id: str) -> str | None:
-    """Create the run row; None when there is nothing to replay (caller 409s)."""
-    cases = await db.get_active_eval_cases(workspace_id=workspace_id)
+async def start_run(
+    db,
+    *,
+    workspace_id: str,
+    case_ids: list[str] | None = None,
+    since: datetime | None = None,
+) -> str | None:
+    """Create the run row; None when there is nothing to replay (caller 409s).
+
+    ``case_ids``/``since`` optionally scope the replay set (#250); the caller
+    must pass the identical values to ``execute_run`` so both independent
+    ``get_active_eval_cases`` fetches agree.
+    """
+    cases = await db.get_active_eval_cases(
+        workspace_id=workspace_id, case_ids=case_ids, since=since
+    )
     if not cases:
         return None
     run_id = "run_" + uuid.uuid4().hex
@@ -59,15 +81,31 @@ async def _score_case_mode(semaphore, search_service, *, workspace_id, user_id, 
     }
 
 
-async def execute_run(db, search_service, *, run_id: str, workspace_id: str, user_id: str) -> None:
-    """Background body: replay all cases x modes, store rows + per-mode means.
+async def execute_run(
+    db,
+    search_service,
+    *,
+    run_id: str,
+    workspace_id: str,
+    user_id: str,
+    case_ids: list[str] | None = None,
+    since: datetime | None = None,
+) -> None:
+    """Background body: replay cases x modes, store rows + per-mode means.
 
     All-or-nothing by design (spec): any replay failure marks the run failed
     with the error; partial results are never reported.
+
+    ``case_ids``/``since`` optionally scope the replay set (#250) -- must be
+    the SAME values passed to the ``start_run`` call that created this run,
+    otherwise the run's reported ``case_count`` and its actual replayed rows
+    disagree.
     """
     k = settings.eval_run_k
     try:
-        cases = await db.get_active_eval_cases(workspace_id=workspace_id)
+        cases = await db.get_active_eval_cases(
+            workspace_id=workspace_id, case_ids=case_ids, since=since
+        )
         semaphore = asyncio.Semaphore(settings.eval_run_concurrency)
         rows = await asyncio.gather(
             *[

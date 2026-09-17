@@ -59,7 +59,25 @@ green `integration.yml` run as the final release gate.
 | inh-ingestion  | Compose: benchmarks                            | `uv run pytest -m compose` |
 
 Locally you can reproduce it with `make dev` (stack up) followed by
-`make test-integration`.
+`make test-integration` (public-api) and `make test-benchmark` /
+`make test-retrieval-eval` for the benchmark and retrieval-eval rows above.
+
+**Do not treat exit 0 from these commands as proof they ran (#209).** All
+three targets now fail fast with a non-zero exit and an actionable message
+if the stack isn't up (`scripts/dev/require-stack.sh`, wired as a Makefile
+prerequisite), and separately fail if the suite executed zero tests even
+though the stack looked healthy (`scripts/dev/run-compose-suite.sh`, which
+checks pytest's own JUnit report rather than trusting `$?` — an all-skipped
+pytest run exits 0). Before this fix, `make test-integration` printed "N
+skipped" and exited 0 with no stack up at all — indistinguishable from a
+real pass to anyone who only checks the exit code, exactly the failure mode
+that made the removed Hetzner e2e lane's skip-reports-success bug possible
+(see [docs/testing.md § End-to-end / Compose](../testing.md#end-to-end-compose)
+and the CHANGELOG's Hetzner-e2e "Removed" entry). If you invoke `pytest -m
+compose` (or `-m benchmark` / `-m retrieval_eval`) directly instead of
+through these Make targets, that protection does not apply — see
+[docs/testing.md § Default behavior](../testing.md#default-behavior) for the
+`-m` footgun those raw commands hit.
 
 The retrieval-eval suite is a **hard gate**, not reporting-only (#139): it
 fails on any per-mode metric regression vs. the committed

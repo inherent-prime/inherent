@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header
+from inh_contracts.embedding.identity import EmbeddingIdentityMismatchError
 
 from src.config import settings
 from src.models.search import (
@@ -21,7 +22,11 @@ from src.services.audit_publisher import (
 )
 from src.services.auth import ResolvedAuth, resolve_workspace_search
 from src.services.database import get_database
-from src.services.eval_capture import capture_enabled, new_event_id, record_query_event
+from src.services.eval_capture import (
+    capture_enabled,
+    capture_search_event,
+    purge_expired_events,
+)
 from src.services.quality_gate import evaluate as evaluate_quality
 from src.services.search import SearchService, get_search_service
 from src.utils import get_logger
@@ -174,6 +179,13 @@ async def _search_workspaces_concurrently(
       results; the remaining workspaces still return. The request only fails if
       every workspace fails in a way that is surfaced here — single failures
       degrade to partial results rather than a 5xx.
+    - EXCEPT a model-identity mismatch (``EmbeddingIdentityMismatchError``,
+      #311 item 4): that is a server-side misconfiguration, not a
+      per-workspace hiccup — degrading it to "this workspace returned
+      nothing" would silently turn a hard-error guard into a 200 with
+      plausible-looking partial results, exactly the failure item 4 exists
+      to prevent (PR #314 review finding 1). It propagates out of this
+      function instead, failing the whole request loudly.
 
     Returns the merged (unsorted, unlimited) results and the parallel wall-clock
     time in milliseconds (measured around the gather, NOT a sum of per-workspace
@@ -195,6 +207,22 @@ async def _search_workspaces_concurrently(
                     query_vector=query_vector,
                 )
                 return resp.results
+            except EmbeddingIdentityMismatchError:
+                # #311 item 4 / PR #314 review finding 1: a model-identity
+                # mismatch means THIS workspace's results would be compared
+                # against a vector space built by a DIFFERENT embedding
+                # model — plausible-looking noise, not a genuine "nothing
+                # found". That is a server-side misconfiguration, not a
+                # transient per-workspace failure, so it must NOT be
+                # swallowed by the partial-result isolation below (which
+                # exists for real per-workspace hiccups — a Weaviate blip,
+                # a missing collection, etc.). Re-raise so asyncio.gather
+                # propagates it out of _search_workspaces_concurrently and
+                # the whole request fails loudly (a 500, logged at error
+                # level by the global error handler — not a bad request,
+                # and never a 200 with degraded results) instead of a
+                # confident-looking partial answer.
+                raise
             except Exception as exc:  # noqa: BLE001 — partial-result isolation
                 logger.warning(
                     "multi_workspace_search_partial_failure",
@@ -354,22 +382,36 @@ async def search_documents(
             workspace_id=workspace_id,
         )
 
-        # Evals v1: mint the capture event id and schedule the write-behind.
-        # Fire-and-forget like audit; the response carries event_id so agents
-        # can report feedback (POST /v1/evals/feedback) on exactly this search.
-        # No awaits here: the task resolves the database itself, so capture can
-        # never fail or slow the serving path (not even on a cold DB init).
+        # Evals v1: capture this search so agents can label it later via
+        # POST /v1/evals/feedback.
+        #
+        # The INSERT is awaited here, NOT deferred (#240). Unlike audit
+        # publishing above — which this originally copied — capture hands the
+        # caller a handle: the response carries event_id. BackgroundTasks run
+        # after the response is sent, so deferring the write meant returning an
+        # id that did not exist yet, and a caller posting feedback on the next
+        # round trip raced the write and got a 404.
+        #
+        # advertise the id only if the row is durable: no id means "not
+        # captured", which a caller can act on, whereas a dangling id is
+        # indistinguishable from a good one until it 404s. capture_search_event
+        # never raises, so capture still cannot fail a search.
+        #
+        # capture_search_event (#241) is the SAME helper MCP's search_documents
+        # / search_memory call for their own single-workspace search — the
+        # mint-record-stamp sequence lives in exactly one place now, so a field
+        # added to capture in the future cannot land on REST without MCP.
         if capture_enabled(workspace_id):
-            event_id = new_event_id()
-            response.event_id = event_id
-            background_tasks.add_task(
-                record_query_event,
-                event_id=event_id,
+            await capture_search_event(
+                transport="rest",
                 workspace_id=workspace_id,
                 user_id=auth.key_info.user_id,
                 request=request,
                 response=response,
             )
+            # Retention purge is the slow half and nobody holds a handle to it,
+            # so it stays write-behind.
+            background_tasks.add_task(purge_expired_events, workspace_id)
         return response
 
     # Multi-workspace: search across all user workspaces, merge results

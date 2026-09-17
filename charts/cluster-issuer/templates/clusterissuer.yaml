@@ -1,0 +1,16 @@
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ .Values.clusterIssuer.name }}
+spec:
+  acme:
+    email: {{ required "clusterIssuer.email is required (Let's Encrypt account contact address) -- see values.yaml top-of-file REQUIRED value note" .Values.clusterIssuer.email | quote }}
+    server: {{ .Values.clusterIssuer.server | quote }}
+    privateKeySecretRef:
+      # ClusterIssuer-scoped, not per-namespace -- cert-manager creates/owns
+      # this Secret itself in its own namespace to hold the ACME account key.
+      name: {{ .Values.clusterIssuer.name }}-acme-account-key
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: {{ .Values.clusterIssuer.ingressClass }}

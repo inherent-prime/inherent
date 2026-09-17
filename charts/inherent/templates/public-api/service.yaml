@@ -1,0 +1,20 @@
+{{- if .Values.publicApi.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: inh-public-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inherent.labels" . | nindent 4 }}
+    {{- include "inherent.selectorLabels" (dict "component" "public-api") | nindent 4 }}
+spec:
+  # ClusterIP only — the ingress (created by modules/apps, not this chart)
+  # is the sole path in. See build spec: "Only ingress → public-api :8080".
+  type: ClusterIP
+  selector:
+    {{- include "inherent.selectorLabels" (dict "component" "public-api") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.publicApi.containerPort }}
+      targetPort: http
+{{- end }}

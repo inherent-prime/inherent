@@ -19,6 +19,7 @@ from temporalio.worker import Worker
 
 from src.config.settings import Settings
 from src.temporal.activities import (
+    chunk_conversation,
     chunk_text,
     cleanup_staging,
     create_pending_document,
@@ -28,6 +29,8 @@ from src.temporal.activities import (
     publish_completion,
     record_chunk_edit_weaviate_failure,
     record_dead_letter,
+    redact_turns,
+    resolve_dead_letter_jobs,
     set_document_status,
     store_in_postgresql,
     store_in_weaviate,
@@ -42,6 +45,7 @@ from src.temporal.activities.audit_activities import (
 )
 from src.temporal.workflows import (
     ChunkEditWorkflow,
+    ConversationMemoryWorkflow,
     DocumentIngestionWorkflow,
 )
 from src.temporal.workflows.audit_log import WriteAuditLogWorkflow
@@ -64,13 +68,18 @@ _ALL_ACTIVITIES: list[Callable[..., Any]] = [
     update_chunk_weaviate,
     record_chunk_edit_weaviate_failure,
     record_dead_letter,
+    resolve_dead_letter_jobs,
     publish_completion,
+    # Conversation ingestion (#306, #307)
+    redact_turns,
+    chunk_conversation,
 ]
 
 # All workflows registered with the ingestion worker
 _ALL_WORKFLOWS = [
     DocumentIngestionWorkflow,
     ChunkEditWorkflow,
+    ConversationMemoryWorkflow,
 ]
 
 # Audit namespace activities and workflows

@@ -267,7 +267,7 @@ class DatabaseService:
             result = await session.execute(
                 text(
                     """
-                    SELECT key_id, user_id, workspace_id, permissions, rate_limit,
+                    SELECT key_id, name, user_id, workspace_id, permissions, rate_limit,
                            expires_at, status
                     FROM api_keys
                     WHERE key_hash = :key_hash AND status = 'active'
@@ -293,6 +293,7 @@ class DatabaseService:
 
             return APIKeyInfo(
                 key_id=row.key_id,
+                name=row.name,
                 user_id=row.user_id,
                 workspace_id=row.workspace_id,
                 permissions=row.permissions if isinstance(row.permissions, list) else [],
@@ -300,6 +301,60 @@ class DatabaseService:
                 expires_at=row.expires_at,
                 status=row.status,
             )
+
+    async def list_admin_workspaces(self, *, offset: int, limit: int) -> list[dict[str, Any]]:
+        """List Mongo control-plane workspaces with cheap PostgreSQL document counts."""
+        from src.services.mongo_client import get_mongo_client
+
+        collection = get_mongo_client()[settings.mongodb_db_name]["workspaces"]
+        cursor = collection.find({}, {"_id": 1, "name": 1, "user_id": 1}).sort("_id", 1)
+        documents = await cursor.skip(offset).to_list(length=limit)
+        workspace_ids = [str(document["_id"]) for document in documents]
+        counts: dict[str, int] = {}
+        if workspace_ids:
+            async with self.session() as session:
+                result = await session.execute(
+                    text(
+                        """
+                        SELECT workspace_id, COUNT(*) AS document_count
+                        FROM processed_documents
+                        WHERE workspace_id = ANY(CAST(:workspace_ids AS text[]))
+                        GROUP BY workspace_id
+                        """
+                    ),
+                    {"workspace_ids": workspace_ids},
+                )
+                counts = {
+                    str(row.workspace_id): int(row.document_count) for row in result.fetchall()
+                }
+        return [
+            {
+                "workspace_id": str(document["_id"]),
+                "name": document.get("name"),
+                # A doc written by an older seeder may lack user_id; an admin
+                # listing must degrade, not 500, on one malformed row.
+                "user_id": str(document.get("user_id") or ""),
+                "document_count": counts.get(str(document["_id"]), 0),
+            }
+            for document in documents
+        ]
+
+    async def list_admin_keys(self, *, offset: int, limit: int) -> list[dict[str, Any]]:
+        """List only non-secret API-key columns for the local admin surface."""
+        async with self.session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT key_id, name AS key_name, key_prefix, workspace_id, user_id,
+                           permissions, status, created_at, last_used_at, expires_at
+                    FROM api_keys
+                    ORDER BY created_at DESC, key_id
+                    OFFSET :offset LIMIT :limit
+                    """
+                ),
+                {"offset": offset, "limit": limit},
+            )
+            return [dict(row._mapping) for row in result.fetchall()]
 
     # Document writes (upload lifecycle)
     async def get_document_id_by_filename(
@@ -363,6 +418,78 @@ class DatabaseService:
             )
             row = result.fetchone()
             return str(row.document_id) if row else None
+
+    # --- Conversations (#306) ------------------------------------------------
+
+    async def get_document_id_by_external_id(
+        self, workspace_id: str, external_id: str
+    ) -> str | None:
+        """Resolve a conversation's `processed_documents.document_id` from its
+        caller-supplied `external_id` (#306, migration 020).
+
+        Scoped to `document_type = 'conversation'` AND `workspace_id` so a
+        conversation in a workspace the caller can't see -- or an ordinary
+        file document whose (unrelated) `external_id` column happens to be
+        NULL, never matching here anyway -- reads as not-found rather than
+        leaking cross-workspace existence. Mirrors
+        `get_document_id_by_content_hash`'s shape.
+        """
+        async with self.session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT document_id
+                    FROM processed_documents
+                    WHERE workspace_id = :workspace_id
+                      AND external_id = :external_id
+                      AND document_type = 'conversation'
+                    """
+                ),
+                {"workspace_id": workspace_id, "external_id": external_id},
+            )
+            row = result.fetchone()
+            return str(row.document_id) if row else None
+
+    async def get_conversation(self, workspace_id: str, external_id: str) -> dict | None:
+        """Return a conversation's stats for `GET /v1/conversations/{external_id}`.
+
+        `turn_count`/`last_flushed_at` come from `processed_documents.metadata`
+        (ConversationMemoryWorkflow stamps both on every flush, see
+        StoreDocumentInput.metadata's docstring in inh-ingestion-svc) -- no
+        dedicated columns needed for either. Returns None when no
+        conversation with this `(workspace_id, external_id)` exists (never
+        distinguishes "wrong workspace" from "no such conversation").
+        """
+        async with self.session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT document_id, workspace_id, external_id, status,
+                           chunk_count, metadata, created_at, updated_at
+                    FROM processed_documents
+                    WHERE workspace_id = :workspace_id
+                      AND external_id = :external_id
+                      AND document_type = 'conversation'
+                    """
+                ),
+                {"workspace_id": workspace_id, "external_id": external_id},
+            )
+            row = result.fetchone()
+            if not row:
+                return None
+
+            metadata = row.metadata or {}
+            return {
+                "document_id": str(row.document_id),
+                "workspace_id": str(row.workspace_id),
+                "external_id": str(row.external_id),
+                "status": row.status,
+                "chunk_count": row.chunk_count or 0,
+                "turn_count": metadata.get("turn_count", 0),
+                "last_flushed_at": metadata.get("last_flushed_at"),
+                "created_at": row.created_at,
+                "updated_at": row.updated_at,
+            }
 
     async def create_or_reset_pending_document(
         self,
@@ -767,6 +894,352 @@ class DatabaseService:
                 metadata=_merge_chunk_provenance(row),
             )
 
+    async def get_document_chunk_by_index(
+        self, document_id: str, workspace_id: str, chunk_index: int
+    ) -> DocumentChunk | None:
+        """Get a single chunk by stable ``chunk_index`` (#133), workspace-scoped.
+
+        Same tenancy shape as ``get_document_chunk`` but keys on ``chunk_index``
+        (Option A identity) instead of the BIGSERIAL ``id``. Returns None when
+        absent or in another workspace.
+        """
+        async with self.session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT dc.id, dc.document_id, dc.content, dc.chunk_index, dc.token_count,
+                           dc.metadata, dc.content_hash, dc.source_uri, dc.ingested_at
+                    FROM document_chunks dc
+                    JOIN processed_documents pd ON pd.document_id = dc.document_id
+                    WHERE dc.document_id = :document_id
+                      AND dc.chunk_index = :chunk_index
+                      AND pd.workspace_id = :workspace_id
+                """
+                ),
+                {
+                    "document_id": document_id,
+                    "chunk_index": chunk_index,
+                    "workspace_id": workspace_id,
+                },
+            )
+            row = result.fetchone()
+            if not row:
+                return None
+            return DocumentChunk(
+                id=str(row.id),
+                document_id=str(row.document_id),
+                content=row.content,
+                chunk_index=row.chunk_index,
+                token_count=row.token_count or 0,
+                metadata=_merge_chunk_provenance(row),
+            )
+
+    async def append_document_chunk(
+        self,
+        document_id: str,
+        workspace_id: str,
+        content: str,
+        *,
+        metadata: dict | None = None,
+        source_uri: str | None = None,
+    ) -> DocumentChunk | None:
+        """Append one chunk at ``max(chunk_index)+1`` (#133 Option A).
+
+        Workspace-scoped: foreign ``document_id`` → None (not-found). Locks the
+        parent ``processed_documents`` row (``FOR UPDATE``) so concurrent
+        appends cannot collide on ``uq_document_chunks_doc_idx``. Computes
+        ``content_hash`` / ``token_count`` via ``chunk_math`` (ingestion parity).
+        Bumps ``processed_documents.chunk_count`` and ``workspace_metadata.chunk_count``.
+        Gaps from prior deletes are left alone — next index is still max+1.
+        """
+        from src.services.chunk_math import compute_chunk_content_hash, estimate_tokens
+
+        content_hash = compute_chunk_content_hash(content)
+        token_count = estimate_tokens(content)
+        now = datetime.now(timezone.utc)
+
+        async with self.session() as session:
+            parent_result = await session.execute(
+                text(
+                    """
+                    SELECT id, tenant_id, storage_path, storage_url
+                    FROM processed_documents
+                    WHERE document_id = :document_id AND workspace_id = :workspace_id
+                    FOR UPDATE
+                """
+                ),
+                {"document_id": document_id, "workspace_id": workspace_id},
+            )
+            parent = parent_result.fetchone()
+            if not parent:
+                return None
+
+            max_result = await session.execute(
+                text(
+                    """
+                    SELECT COALESCE(MAX(chunk_index), -1) AS max_idx
+                    FROM document_chunks
+                    WHERE processed_document_id = :processed_document_id
+                """
+                ),
+                {"processed_document_id": parent.id},
+            )
+            max_row = max_result.fetchone()
+            next_index = int(max_row.max_idx) + 1
+
+            # Prefer explicit source_uri; else mirror ingestion (path then URL).
+            resolved_source = source_uri
+            if resolved_source is None:
+                resolved_source = parent.storage_path or parent.storage_url
+
+            insert_result = await session.execute(
+                text(
+                    """
+                    INSERT INTO document_chunks (
+                        processed_document_id, document_id, workspace_id, tenant_id,
+                        chunk_index, content, token_count, metadata,
+                        content_hash, source_uri, ingested_at, created_at
+                    ) VALUES (
+                        :processed_document_id, :document_id, :workspace_id, :tenant_id,
+                        :chunk_index, :content, :token_count, CAST(:metadata AS JSONB),
+                        :content_hash, :source_uri, :ingested_at, :created_at
+                    )
+                    RETURNING id, document_id, content, chunk_index, token_count, metadata,
+                              content_hash, source_uri, ingested_at
+                """
+                ),
+                {
+                    "processed_document_id": parent.id,
+                    "document_id": document_id,
+                    "workspace_id": workspace_id,
+                    "tenant_id": parent.tenant_id,
+                    "chunk_index": next_index,
+                    "content": content,
+                    "token_count": token_count,
+                    "metadata": json.dumps(metadata) if metadata is not None else None,
+                    "content_hash": content_hash,
+                    "source_uri": resolved_source,
+                    "ingested_at": now,
+                    "created_at": now,
+                },
+            )
+            row = insert_result.fetchone()
+            if not row:
+                # Should not happen after a successful INSERT … RETURNING; abort
+                # without committing so counters stay consistent.
+                await session.rollback()
+                return None
+
+            await session.execute(
+                text(
+                    """
+                    UPDATE processed_documents
+                    SET chunk_count = chunk_count + 1
+                    WHERE id = :processed_document_id
+                """
+                ),
+                {"processed_document_id": parent.id},
+            )
+            await session.execute(
+                text(
+                    """
+                    UPDATE workspace_metadata
+                    SET chunk_count = chunk_count + 1,
+                        updated_at = NOW()
+                    WHERE workspace_id = :workspace_id
+                """
+                ),
+                {"workspace_id": workspace_id},
+            )
+            await session.commit()
+
+            logger.info(
+                "Chunk appended",
+                document_id=document_id,
+                workspace_id=workspace_id,
+                chunk_index=next_index,
+            )
+            return DocumentChunk(
+                id=str(row.id),
+                document_id=str(row.document_id),
+                content=row.content,
+                chunk_index=row.chunk_index,
+                token_count=row.token_count or 0,
+                metadata=_merge_chunk_provenance(row),
+            )
+
+    async def update_document_chunk(
+        self,
+        document_id: str,
+        workspace_id: str,
+        chunk_index: int,
+        content: str,
+        *,
+        only_if_content_hash: str | None = None,
+    ) -> DocumentChunk | None:
+        """Update one chunk's content by ``chunk_index`` (#133).
+
+        Recomputes ``token_count`` / ``content_hash`` and bumps ``ingested_at``
+        (ingestion ChunkEdit parity). Workspace-scoped via join; returns None
+        when the chunk is absent, in another workspace, or (when
+        ``only_if_content_hash`` is set) no longer holds that hash — a
+        concurrent edit won, so restore compensation must not clobber it.
+        """
+        from src.services.chunk_math import compute_chunk_content_hash, estimate_tokens
+
+        content_hash = compute_chunk_content_hash(content)
+        token_count = estimate_tokens(content)
+        now = datetime.now(timezone.utc)
+
+        async with self.session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    UPDATE document_chunks dc
+                    SET content = :content,
+                        token_count = :token_count,
+                        content_hash = :content_hash,
+                        ingested_at = :ingested_at
+                    FROM processed_documents pd
+                    WHERE dc.document_id = pd.document_id
+                      AND dc.document_id = :document_id
+                      AND dc.chunk_index = :chunk_index
+                      AND pd.workspace_id = :workspace_id
+                      AND (
+                          CAST(:only_if_content_hash AS TEXT) IS NULL
+                          OR dc.content_hash = :only_if_content_hash
+                      )
+                    RETURNING dc.id, dc.document_id, dc.content, dc.chunk_index,
+                              dc.token_count, dc.metadata, dc.content_hash,
+                              dc.source_uri, dc.ingested_at
+                """
+                ),
+                {
+                    "content": content,
+                    "token_count": token_count,
+                    "content_hash": content_hash,
+                    "ingested_at": now,
+                    "document_id": document_id,
+                    "chunk_index": chunk_index,
+                    "workspace_id": workspace_id,
+                    "only_if_content_hash": only_if_content_hash,
+                },
+            )
+            row = result.fetchone()
+            if not row:
+                return None
+            await session.commit()
+
+            logger.info(
+                "Chunk updated in database",
+                document_id=document_id,
+                workspace_id=workspace_id,
+                chunk_index=chunk_index,
+            )
+            return DocumentChunk(
+                id=str(row.id),
+                document_id=str(row.document_id),
+                content=row.content,
+                chunk_index=row.chunk_index,
+                token_count=row.token_count or 0,
+                metadata=_merge_chunk_provenance(row),
+            )
+
+    async def delete_document_chunk(
+        self, document_id: str, workspace_id: str, chunk_index: int
+    ) -> DocumentChunk | None:
+        """Hard-delete one chunk by ``chunk_index`` (#133 Option A).
+
+        Leaves gaps (no sibling re-index). Workspace-scoped via join /
+        ``USING processed_documents``. Returns the deleted chunk for callers /
+        compensation, or None when absent. After DELETE, requires
+        ``rowcount == 1`` before decrementing document/workspace
+        ``chunk_count`` (clamped at zero) — a concurrent lost race rolls
+        back and returns None so counters cannot drift.
+        """
+        async with self.session() as session:
+            select_result = await session.execute(
+                text(
+                    """
+                    SELECT dc.id, dc.document_id, dc.content, dc.chunk_index, dc.token_count,
+                           dc.metadata, dc.content_hash, dc.source_uri, dc.ingested_at
+                    FROM document_chunks dc
+                    JOIN processed_documents pd ON pd.document_id = dc.document_id
+                    WHERE dc.document_id = :document_id
+                      AND dc.chunk_index = :chunk_index
+                      AND pd.workspace_id = :workspace_id
+                """
+                ),
+                {
+                    "document_id": document_id,
+                    "chunk_index": chunk_index,
+                    "workspace_id": workspace_id,
+                },
+            )
+            row = select_result.fetchone()
+            if not row:
+                return None
+
+            deleted = DocumentChunk(
+                id=str(row.id),
+                document_id=str(row.document_id),
+                content=row.content,
+                chunk_index=row.chunk_index,
+                token_count=row.token_count or 0,
+                metadata=_merge_chunk_provenance(row),
+            )
+
+            delete_result = await session.execute(
+                text(
+                    """
+                    DELETE FROM document_chunks dc
+                    USING processed_documents pd
+                    WHERE dc.document_id = :document_id
+                      AND dc.chunk_index = :chunk_index
+                      AND pd.document_id = dc.document_id
+                      AND pd.workspace_id = :workspace_id
+                """
+                ),
+                {
+                    "document_id": document_id,
+                    "chunk_index": chunk_index,
+                    "workspace_id": workspace_id,
+                },
+            )
+            if delete_result.rowcount != 1:
+                await session.rollback()
+                return None
+            await session.execute(
+                text(
+                    """
+                    UPDATE processed_documents
+                    SET chunk_count = GREATEST(chunk_count - 1, 0)
+                    WHERE document_id = :document_id AND workspace_id = :workspace_id
+                """
+                ),
+                {"document_id": document_id, "workspace_id": workspace_id},
+            )
+            await session.execute(
+                text(
+                    """
+                    UPDATE workspace_metadata
+                    SET chunk_count = GREATEST(chunk_count - 1, 0),
+                        updated_at = NOW()
+                    WHERE workspace_id = :workspace_id
+                """
+                ),
+                {"workspace_id": workspace_id},
+            )
+            await session.commit()
+
+            logger.info(
+                "Chunk deleted",
+                document_id=document_id,
+                workspace_id=workspace_id,
+                chunk_index=chunk_index,
+            )
+            return deleted
+
     # User workspace queries
     async def get_user_workspace_ids(self, user_id: str) -> list[str]:
         """Get all workspace IDs the user has access to.
@@ -918,6 +1391,34 @@ class DatabaseService:
             record_workspace_ownership_lookup_degraded(source="mongo_ownership_check")
             raise
         return doc is not None
+
+    async def get_document_count_for_workspaces(self, workspace_ids: list[str]) -> int:
+        """Total live document count across ``workspace_ids`` (#309).
+
+        Backs the ``max_documents`` entitlement check
+        (``src/mcp_server/quotas.py``): a plain ``COUNT(*)`` against
+        ``processed_documents`` -- the same authoritative table
+        ``get_documents_multi_workspace`` below counts against, NOT the
+        denormalized ``workspace_metadata.document_count`` column
+        ``list_workspaces`` displays (that counter is maintained
+        best-effort for a fast listing summary and is not the row a quota
+        decision should be pinned to). Returns 0 for an empty
+        ``workspace_ids`` list without a query, same short-circuit
+        ``get_documents_multi_workspace`` uses.
+        """
+        if not workspace_ids:
+            return 0
+        async with self.session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT COUNT(*) FROM processed_documents
+                    WHERE workspace_id = ANY(:workspace_ids)
+                """
+                ),
+                {"workspace_ids": workspace_ids},
+            )
+            return result.scalar() or 0
 
     # Multi-workspace document queries
     async def get_documents_multi_workspace(
@@ -1170,19 +1671,28 @@ class DatabaseService:
         top_score: float | None,
         quality_verdict: str | None,
         latency_ms: float,
+        transport: str = "rest",
     ) -> None:
-        """Record one captured search event (called from the capture background task)."""
+        """Record one captured search event (called from the capture background task).
+
+        ``transport`` (#241) records which surface produced the event --
+        ``"rest"`` or ``"mcp"`` -- so analytics can tell them apart. Defaults
+        to ``"rest"`` (migration 018's column default) purely so a caller that
+        predates #241 still compiles; every call site in this codebase passes
+        it explicitly (see ``src/services/eval_capture.py``).
+        """
         async with self.session() as session:
             await session.execute(
                 text(
                     """
                     INSERT INTO eval_query_events (
                         event_id, workspace_id, user_id, query_text, search_mode,
-                        result_doc_ids, result_chunk_ids, top_score, quality_verdict, latency_ms
+                        result_doc_ids, result_chunk_ids, top_score, quality_verdict,
+                        latency_ms, transport
                     ) VALUES (
                         :event_id, :workspace_id, :user_id, :query_text, :search_mode,
                         CAST(:result_doc_ids AS jsonb), CAST(:result_chunk_ids AS jsonb),
-                        :top_score, :quality_verdict, :latency_ms
+                        :top_score, :quality_verdict, :latency_ms, :transport
                     ) ON CONFLICT (event_id) DO NOTHING
                     """
                 ),
@@ -1197,6 +1707,7 @@ class DatabaseService:
                     "top_score": top_score,
                     "quality_verdict": quality_verdict,
                     "latency_ms": latency_ms,
+                    "transport": transport,
                 },
             )
             await session.commit()
@@ -1217,15 +1728,44 @@ class DatabaseService:
             await session.commit()
             return result.rowcount or 0
 
-    async def delete_eval_events(self, *, workspace_id: str) -> int:
-        """Delete all captured events for a workspace (DELETE /v1/evals/events); returns rows deleted."""
+    async def delete_eval_events(
+        self, *, workspace_id: str, include_cases: bool = False
+    ) -> dict[str, int]:
+        """Delete captured events for a workspace (DELETE /v1/evals/events); #250.
+
+        Default (``include_cases=False``) deletes only ``eval_query_events`` --
+        the documented contract that raw events are ephemeral while labeled
+        ``eval_cases`` are durable (ADR 0003; asserted end-to-end by
+        tests/evals/test_evals_flywheel.py:183-193). ``include_cases=True`` is
+        an explicit, opt-in reset that additionally purges the workspace's
+        promoted cases -- both deletes commit in the same transaction.
+
+        No FK/cascade ordering concerns here: migrations/015_evals.sql gives
+        neither ``eval_runs`` nor ``eval_run_results`` a foreign key to
+        ``eval_cases`` (run results denormalize ``case_id`` as a plain
+        column), so deleting cases never touches run history and the two
+        deletes can run in either order.
+
+        Returns ``{"events_deleted": n, "cases_deleted": n}`` (the latter
+        always 0 when ``include_cases`` is False).
+        """
         async with self.session() as session:
-            result = await session.execute(
+            events_result = await session.execute(
                 text("DELETE FROM eval_query_events WHERE workspace_id = :workspace_id"),
                 {"workspace_id": workspace_id},
             )
+            cases_deleted = 0
+            if include_cases:
+                cases_result = await session.execute(
+                    text("DELETE FROM eval_cases WHERE workspace_id = :workspace_id"),
+                    {"workspace_id": workspace_id},
+                )
+                cases_deleted = cases_result.rowcount or 0
             await session.commit()
-            return result.rowcount or 0
+            return {
+                "events_deleted": events_result.rowcount or 0,
+                "cases_deleted": cases_deleted,
+            }
 
     async def get_eval_event(self, *, event_id: str, workspace_ids: list[str]) -> dict | None:
         """Fetch one captured event, scoped to the caller's workspaces.
@@ -1377,22 +1917,93 @@ class DatabaseService:
             await session.commit()
             return result.rowcount > 0
 
-    async def get_active_eval_cases(self, *, workspace_id: str) -> list[dict]:
-        """Fetch the active cases used as the replay set for eval runs."""
+    async def get_active_eval_cases(
+        self,
+        *,
+        workspace_id: str,
+        case_ids: list[str] | None = None,
+        since: datetime | None = None,
+    ) -> list[dict]:
+        """Fetch the active cases used as the replay set for eval runs.
+
+        Optional scoping (#250): ``case_ids`` restricts to specific promoted
+        cases; ``since`` restricts to cases created at/after that instant.
+        Both are ANDed onto the base workspace+active filter (and with each
+        other, when both given). Omitting both is the default,
+        backward-compatible path -- every active case for the workspace, in
+        the accumulate-over-time order ADR 0003 specifies -- so every caller
+        that predates this scoping keeps its exact prior behavior.
+
+        Called from both ``start_run`` (the 409/case_count decision) and
+        ``execute_run`` (the actual replay); callers MUST pass the same
+        ``case_ids``/``since`` to both so the two independent fetches agree
+        on the replay set (the bug #250 closes was scoping only one).
+        """
+        conditions = ["workspace_id = :workspace_id", "active"]
+        params: dict[str, Any] = {"workspace_id": workspace_id}
+        if case_ids:
+            conditions.append("case_id = ANY(:case_ids)")
+            params["case_ids"] = list(case_ids)
+        if since is not None:
+            conditions.append("created_at >= :since")
+            params["since"] = since
+        where_clause = " AND ".join(conditions)
+        # SAFETY (#250): `where_clause` is assembled ONLY from the static string
+        # literals appended to `conditions` above -- a closed set fixed at author
+        # time and selected by branch, never derived from caller input. Every
+        # caller-supplied value (workspace_id, case_ids, since) travels as a
+        # BOUND parameter in `params`; none of them reaches the SQL text. Keep it
+        # that way: appending a caller-derived string to `conditions` would turn
+        # this into a real injection site.
+        #
+        # Built by concatenation rather than the f-string this originally used,
+        # which tripped bandit B608 (hardcoded_sql_expressions) and failed CI.
+        # Note the security posture is IDENTICAL either way -- concatenation is
+        # not inherently safer, it simply sits below B608's heuristic. The real
+        # guarantee is the literal-only invariant stated above, which is why it
+        # is documented here rather than left to a `# nosec` marker.
+        #
+        # The fully-static alternative -- `(:case_ids IS NULL OR case_id =
+        # ANY(:case_ids))` -- was rejected: a NULL array bind needs explicit
+        # `::text[]` casts under asyncpg, and these unit tests run against a
+        # mocked session, so a cast mistake would surface only in the compose
+        # lane. Conditional predicate assembly is what the rest of this module
+        # already does.
+        select_clause = (
+            "SELECT case_id, query_text, expected_doc_ids, relevance_grade FROM eval_cases WHERE "
+        )
+        query = text(select_clause + where_clause + " ORDER BY created_at")
+        async with self.session() as session:
+            result = await session.execute(
+                query,
+                params,
+            )
+            rows = result.fetchall()
+            return [dict(row._mapping) for row in rows]
+
+    async def get_eval_case_ids(self, *, workspace_id: str, case_ids: list[str]) -> set[str]:
+        """Return the subset of ``case_ids`` that exist in this workspace (#250).
+
+        Membership check only -- active AND inactive cases both count as
+        "belongs to this workspace", so a caller naming a disabled case gets
+        the normal "excluded from replay" outcome (same as the unscoped
+        default) rather than a spurious "unknown id" rejection. Used to
+        validate a run's optional ``case_ids`` scope before replay: any id
+        NOT in the returned set is either genuinely unknown or belongs to a
+        different workspace, and the caller must reject the whole request
+        rather than silently drop or leak it.
+        """
         async with self.session() as session:
             result = await session.execute(
                 text(
                     """
-                    SELECT case_id, query_text, expected_doc_ids, relevance_grade
-                    FROM eval_cases
-                    WHERE workspace_id = :workspace_id AND active
-                    ORDER BY created_at
+                    SELECT case_id FROM eval_cases
+                    WHERE workspace_id = :workspace_id AND case_id = ANY(:case_ids)
                     """
                 ),
-                {"workspace_id": workspace_id},
+                {"workspace_id": workspace_id, "case_ids": list(case_ids)},
             )
-            rows = result.fetchall()
-            return [dict(row._mapping) for row in rows]
+            return {row.case_id for row in result.fetchall()}
 
     async def eval_scorecard_counts(self, *, workspace_id: str, window_days: int) -> dict:
         """Assemble the raw counts behind the operator scorecard for the trailing window."""

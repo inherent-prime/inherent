@@ -1,8 +1,7 @@
 # Repo-root pre-commit config — canonical for the whole monorepo (M7 #20).
 #
-# Covers shared file hygiene plus per-service Ruff + Black (and mypy/Bandit for
-# the public API). Each Python hook is scoped to its service directory so a
-# change in one service does not trigger another service's toolchain.
+# Covers shared file hygiene plus package-scoped quality checks. Each Python
+# hook is scoped to its package so a change does not trigger unrelated tooling.
 #
 # Install once:
 #   uv --project services/inh-public-api-svc run pre-commit install
@@ -103,6 +102,38 @@ repos:
         types: [python]
         pass_filenames: false
         files: ^services/inh-contracts/(src|tests)/
+
+  # ---- inh-cli ----
+  - repo: local
+    hooks:
+      - id: ruff-cli
+        name: ruff (inh-cli)
+        entry: bash -c 'cd services/inh-cli && uv run ruff check src/ tests/'
+        language: system
+        types: [python]
+        pass_filenames: false
+        files: ^services/inh-cli/(src|tests)/
+      - id: black-cli
+        name: black (inh-cli)
+        entry: bash -c 'cd services/inh-cli && uv run black --check src/ tests/'
+        language: system
+        types: [python]
+        pass_filenames: false
+        files: ^services/inh-cli/(src|tests)/
+      - id: mypy-cli
+        name: mypy (inh-cli)
+        entry: bash -c 'cd services/inh-cli && uv run mypy src/'
+        language: system
+        types: [python]
+        pass_filenames: false
+        files: ^services/inh-cli/src/
+      - id: bandit-cli
+        name: bandit (inh-cli)
+        entry: bash -c 'cd services/inh-cli && uv run bandit -c pyproject.toml -r src/'
+        language: system
+        types: [python]
+        pass_filenames: false
+        files: ^services/inh-cli/src/
 
 # pre-commit.ci configuration (no-op locally; honored if the GitHub app is enabled)
 ci:

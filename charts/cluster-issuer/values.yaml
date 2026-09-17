@@ -1,0 +1,49 @@
+# charts/cluster-issuer — issue #323 finding #15.
+#
+# PURPOSE: why this is a separate mini-chart instead of a ClusterIssuer
+# template folded into charts/inherent, or a plain `kubernetes_manifest`
+# terraform resource:
+#
+# cert-manager's ClusterIssuer is a CRD-backed resource (cert-manager.io/v1).
+# Terraform's `kubernetes_manifest` resource type calls the Kubernetes API's
+# OpenAPI schema discovery *during terraform plan* to validate the manifest
+# it's about to apply — but the cert-manager CustomResourceDefinitions don't
+# exist yet on a fresh cluster until the cert-manager Helm release itself
+# has been applied. That makes a plain `kubernetes_manifest` for a
+# ClusterIssuer fail at plan time on a first-ever `terraform apply` (the CRD
+# it needs to validate against isn't registered yet) — a hard ordering
+# problem `kubernetes_manifest` cannot express within a single plan/apply,
+# short of a second full `terraform apply` pass.
+#
+# A `helm_release` of THIS chart doesn't have that problem: helm submits the
+# manifest to the API server at apply time (not plan time) with no
+# client-side CRD-schema validation step, so as long as the terraform
+# `helm_release` for this chart depends_on the cert-manager `helm_release`
+# (FIX-A wires that dependency in infra/azure/modules/apps), ordering is
+# just "cert-manager's CRDs exist before this release runs" — which
+# depends_on already guarantees, in one terraform apply.
+#
+# REQUIRED value (no safe default, uses the `required` template function —
+# `helm template`/`install` FAILS rather than silently registering an
+# issuer with no real contact address; Let's Encrypt requires a valid email
+# for expiry/revocation notices):
+#   email
+
+clusterIssuer:
+  # Object name; ingress annotations (cert-manager.io/cluster-issuer: ...)
+  # must reference this exact name.
+  name: letsencrypt
+  # REQUIRED — Let's Encrypt account email (expiry/revocation notices). No
+  # default on purpose; see top-of-file REQUIRED note.
+  email: ""
+  # Production ACME directory by default. Point at
+  # https://acme-staging-v02.api.letsencrypt.org/directory in non-prod
+  # environments to avoid Let's Encrypt's production rate limits while
+  # testing (staging certs aren't browser-trusted, which is the trade-off).
+  server: https://acme-v02.api.letsencrypt.org/directory
+  # IngressClass the HTTP-01 solver's temporary validation Ingress is routed
+  # through — must match whatever ingress controller actually fronts the
+  # cluster (nginx is the only supported ingress_profile today; see
+  # .memory/azure-fix-round1.md — appgw_waf is validation-rejected pending
+  # AGIC wiring, follow-up #320).
+  ingressClass: nginx

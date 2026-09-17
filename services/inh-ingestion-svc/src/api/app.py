@@ -29,6 +29,7 @@ from src.api.ownership import (
     resolve_owned_document,
 )
 from src.config.settings import Settings
+from src.services.database import DatabaseService
 from src.services.metrics import get_metrics
 from src.temporal.models import (
     ChunkEditInput,
@@ -231,7 +232,7 @@ def create_app(settings: Settings) -> FastAPI:
     app = FastAPI(
         title="Inherent Ingestion Service",
         description="Standalone HTTP API for triggering document ingestion via Temporal.",
-        version="0.5.0",
+        version="0.6.0",
         lifespan=lifespan,
     )
 
@@ -249,7 +250,7 @@ def create_app(settings: Settings) -> FastAPI:
         return HealthResponse(
             status="healthy" if manager.is_running else "degraded",
             temporal_worker=manager.is_running,
-            version="0.5.0",
+            version="0.6.0",
         )
 
     # ------------------------------------------------------------------
@@ -405,10 +406,32 @@ def create_app(settings: Settings) -> FastAPI:
                             status="superseded_by_newer_request",
                         ).model_dump(),
                     )
-                # Any other WorkflowFailureError (cancellation, timeout) is
-                # unexpected here -- the workflow normally reports its own
-                # failures via WorkflowResult(success=False, ...) rather than
-                # raising. Surface it rather than crashing without a body.
+                # #230: DocumentIngestionWorkflow raises ApplicationError
+                # type=DocumentIngestionFailed after marking the doc failed,
+                # dead-lettering, and publishing document.failed — so Temporal
+                # close status is Failed (monitorable) while wait=true callers
+                # still get a structured success=False body (not a 500).
+                from temporalio.exceptions import ApplicationError
+
+                from src.temporal.document_failure import DOCUMENT_INGESTION_FAILED_TYPE
+
+                if (
+                    isinstance(e.cause, ApplicationError)
+                    and e.cause.type == DOCUMENT_INGESTION_FAILED_TYPE
+                ):
+                    err_msg = e.cause.message or str(e.cause)
+                    return JSONResponse(
+                        status_code=200,
+                        content=IngestResultResponse(
+                            workflow_id=workflow_id,
+                            document_id=body.document_id,
+                            success=False,
+                            chunks_created=0,
+                            processing_time_ms=0,
+                            error=err_msg,
+                        ).model_dump(),
+                    )
+                # Cancellation / timeout / other unexpected close statuses.
                 logger.error(
                     "Unexpected workflow failure while waiting for result",
                     workflow_id=workflow_id,
@@ -566,20 +589,22 @@ def create_app(settings: Settings) -> FastAPI:
         # exists to close.
         document = await resolve_owned_document(db_svc, document_id, workspace_id)
 
-        # Reject an out-of-range chunk_index before doing any more work
-        # (#134 follow-up item 8): get_document_status already returned
-        # chunk_count for free, so this costs zero extra queries, and it
-        # saves a wasted embed_text round-trip (and, pre-the-#137-fix, a
-        # confusingly "successful" no-op) for a chunk that was never going
-        # to exist. NOTE: chunk_count is nullable (Column default=0, but the
-        # column itself allows NULL) and is legitimately 0 for a document
-        # that's still `pending`/`processing` -- every chunk_index 404s in
-        # that case, which is CORRECT (there is nothing to edit yet), not a
-        # symptom of the ownership guard above misfiring. This check only
-        # runs once ownership is already proven, so it is a distinct 404
-        # from the one above, not a workspace-scoping bug.
-        chunk_count = document.get("chunk_count") or 0
-        if chunk_index < 0 or chunk_index >= chunk_count:
+        # Reject a missing chunk_index before doing any more work (#134
+        # follow-up item 8): saves a wasted embed_text round-trip (and,
+        # pre-the-#137-fix, a confusingly "successful" no-op) for a chunk
+        # that was never going to exist. This check only runs once ownership
+        # is already proven, so it is a distinct 404 from the one above, not
+        # a workspace-scoping bug.
+        #
+        # NOTE (#133 follow-up): this used to compare chunk_index against
+        # chunk_count as a zero-query proxy for existence. Chunks created via
+        # the public-api chunk CRUD endpoints can leave gaps (hard-delete, no
+        # sibling re-index) or push chunk_count below max(chunk_index), so
+        # that proxy is no longer reliable in either direction -- it could
+        # both 404 a real chunk and let a stale gap index through. This does
+        # a real existence check instead.
+        if chunk_index < 0 or not await db_svc.chunk_index_exists(document_id, chunk_index):
+            chunk_count = document.get("chunk_count") or 0
             raise HTTPException(
                 status_code=404,
                 detail=(
@@ -906,7 +931,13 @@ def create_app(settings: Settings) -> FastAPI:
         db_svc = shared_services.get_db_service()
         job = await resolve_owned_dead_letter_job(db_svc, job_id, workspace_id)
 
-        if job.get("status") not in ("pending", "retrying"):
+        # "Retriable" and "not yet resolved" are the SAME set, so both read it
+        # from one constant (#287). They have to agree: the workflow's success
+        # path resolves a document's outstanding rows precisely so that this
+        # guard then rejects a replay of the stale payload. If the two lists
+        # were maintained separately, widening one without the other would
+        # quietly reopen that hole.
+        if job.get("status") not in DatabaseService.DEAD_LETTER_UNRESOLVED_STATUSES:
             raise HTTPException(
                 status_code=409,
                 detail=f"Job {job_id} has status '{job.get('status')}', cannot retry",

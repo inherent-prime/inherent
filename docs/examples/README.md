@@ -52,9 +52,10 @@ Not sure which endpoint to call? Start here.
 | Search your knowledge base | [Search](#5-search) — semantic (default), hybrid, or keyword |
 | Inspect indexed content | [Fetch chunks](#6-fetch-chunks) — list chunks or get the full reconstructed text |
 | Fix or refine a chunk | [Edit a chunk](#9-edit-a-chunk) — replaces content and re-embeds in Weaviate |
-| Debug why a document wasn't indexed | [Ingestion status](#8-get-ingestion-status) → [Lineage](#10-document-lineage) → [Dead-letter jobs](#12-dead-letter-jobs) |
-| Retry a failed ingestion | [Dead-letter jobs → Retry](#12-dead-letter-jobs) |
+| Debug why a document wasn't indexed | [Ingestion status](#8-get-ingestion-status) → [Lineage](#10-document-lineage) → [Dead-letter jobs](#13-dead-letter-jobs) |
+| Retry a failed ingestion | [Dead-letter jobs → Retry](#13-dead-letter-jobs) |
 | Remove a document | [Delete a document](#11-delete-a-document) — clears PostgreSQL and Weaviate |
+| Ingest a chat/agent transcript | [Conversations](#12-conversations) — append-only, turn-aware, never re-uploads the whole history |
 
 ---
 
@@ -87,7 +88,7 @@ curl -s "$API_BASE/health/ready" | jq .
 {
   "status": "healthy",
   "timestamp": "2024-01-15T10:00:00.000000+00:00",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "service": "inh-public-api-svc",
   "checks": {
     "database": { "status": "healthy", "latency_ms": 4.2 },
@@ -139,7 +140,11 @@ Max size: 50 MB. Binary formats are magic-byte sniffed against the declared
 is rejected with `400 Bad Request`. Legacy `application/msword` (.doc) and
 Outlook `application/vnd.ms-outlook` (.msg) are explicitly rejected with a
 `400` naming the supported replacement (.docx / .eml) rather than accepted
-and garbled. A generic or absent `Content-Type` (`application/octet-stream`)
+and garbled. Legacy `application/vnd.ms-excel` (.xls) and
+`application/vnd.ms-powerpoint` (.ppt) are likewise unsupported and also
+`400`; their rejection message adds a sentence naming the modern replacement
+(.xlsx / .pptx) on top of the full allowed-types list above. A generic or
+absent `Content-Type` (`application/octet-stream`)
 falls back to the filename's extension when that extension is registered
 (e.g. uploading `main.py` with no declared type) — see
 [supported file types](../reference/file-types.md) for the full extension
@@ -900,10 +905,106 @@ exists but belongs to a different workspace — no cross-tenant existence leak, 
 
 ---
 
-## 12. Dead-letter Jobs
+## 12. Conversations
+
+Conversations are append-only and grow — use these instead of `/v1/documents` for chat/agent
+transcripts. `external_id` is a caller-chosen identifier (e.g. a session id); the first turn ever
+posted for it creates the conversation, every later turn appends to it.
+
+### Append turns
+
+```bash
+curl -s -X POST "$API_BASE/v1/conversations/session-42/turns" \
+  -H "X-API-Key: $API_KEY" \
+  -H "X-Workspace-Id: $WORKSPACE_ID" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "turns": [
+      {"turn_id": "t1", "role": "user", "text": "What'"'"'s our refund policy?", "ts": "2026-08-31T10:00:00Z", "client": "agent-cli"},
+      {"turn_id": "t2", "role": "assistant", "text": "Refunds are processed within 5 business days.", "ts": "2026-08-31T10:00:03Z"}
+    ]
+  }' | jq .
+```
+
+**Expected response (202):**
+
+```json
+{
+  "external_id": "session-42",
+  "workspace_id": "ws_local_001",
+  "accepted": 2,
+  "message": "Turns accepted for processing."
+}
+```
+
+Processing happens asynchronously — turns buffer server-side and flush in size-or-idle batches, so
+`GET` immediately after `POST` may not yet reflect the latest turns. A duplicate `turn_id` (a retry
+of this same request) is a no-op — safe to resend.
+
+### Get conversation stats
+
+```bash
+curl -s "$API_BASE/v1/conversations/session-42" \
+  -H "X-API-Key: $API_KEY" \
+  -H "X-Workspace-Id: $WORKSPACE_ID" \
+  | jq .
+```
+
+**Expected response:**
+
+```json
+{
+  "external_id": "session-42",
+  "workspace_id": "ws_local_001",
+  "turn_count": 2,
+  "chunk_count": 2,
+  "last_flushed_at": "2026-08-31T10:01:33Z",
+  "status": "processed",
+  "created_at": "2026-08-31T10:00:00Z",
+  "updated_at": "2026-08-31T10:01:33Z"
+}
+```
+
+Returns **404** if `external_id` isn't found in `workspace_id`.
+
+### Delete a conversation
+
+```bash
+curl -s -X DELETE "$API_BASE/v1/conversations/session-42" \
+  -H "X-API-Key: $API_KEY" \
+  -H "X-Workspace-Id: $WORKSPACE_ID"
+```
+
+Returns **204** on success, **404** if already gone. Removes the conversation's chunks and vectors
+the same way `DELETE /v1/documents/{id}` does.
+
+---
+
+## 13. Dead-letter Jobs
 
 Failed ingestion messages land in a dead-letter table for inspection and recovery. These
 endpoints live on the ingestion service (write/admin plane) and use `$INGEST_KEY`.
+
+**Status lifecycle:** `pending` (recorded, never retried) → `retrying` (a retry was triggered,
+`POST .../retry`) → `resolved` (a workflow run for this document completed successfully and the
+document is processed again) or `pending` again (the retry attempt itself failed to even start —
+see below) or `abandoned` (an operator gave up on it via `POST .../abandon`). `resolved` is set
+automatically — there is no endpoint for it. It is written best-effort by the document-ingestion
+workflow's success path, keyed on the job's `document_id`: a successful ingestion resolves every
+one of that document's rows in either unresolved status — `retrying` (#249) **and** `pending`
+(#287). Only `abandoned` rows are left alone, since those record an explicit decision to stop.
+
+`pending` rows resolve too because you do not have to press Retry to fix a document. Re-uploading
+corrected content under the same filename reuses the original `document_id` (filename dedup, #60),
+so the repaired run lands on the same id as the failed one and clears its dead-letter row. Before
+#287 that row stayed `pending` forever — and since `GET /dead-letter` **defaults to
+`status=pending`**, the default listing kept reporting a healthy, searchable document as broken.
+Worse, Retry on that stale row was still accepted and re-ingested the *original failed payload*
+over the corrected document; now it is `resolved`, so retry returns `409`.
+
+Until the best-effort write lands, a row stays unresolved even if the document has already
+finished processing — poll `GET /dead-letter/{job_id}` if you need to confirm resolution rather
+than inferring it from the document's own status.
 
 ### List dead-letter jobs
 
@@ -977,8 +1078,13 @@ curl -s -X POST "$INGEST_BASE/dead-letter/1/retry?workspace_id=$WORKSPACE_ID" \
 }
 ```
 
-Returns **409** if the job is not in a retriable status, **404** if missing or not owned by
-`workspace_id`, **500** if the re-trigger fails.
+Returns **409** if the job is not in a retriable status — which now includes a row that
+auto-resolved because the document was repaired another way (#287), so a stale payload cannot be
+replayed over a healthy document. Returns **404** if missing or not owned by `workspace_id`,
+**500** if the re-trigger fails (and resets the job's status back to `pending` so
+it can be retried again). On success the job's status becomes `retrying`; it transitions on its
+own to `resolved` once the re-triggered workflow run completes successfully — see the status
+lifecycle note above.
 
 ### Abandon a job
 
@@ -1004,7 +1110,7 @@ Returns **404** if missing or not owned by `workspace_id`.
 
 ---
 
-## 13. Common Error Reference
+## 14. Common Error Reference
 
 | HTTP Status | Service | Cause | Fix |
 |---|---|---|---|
@@ -1143,6 +1249,24 @@ depend on it.
 | `sample.xml` | `application/xml` | `docs/examples/sample-documents/sample.xml` |
 | `sample.srt` | `application/x-subrip` | `docs/examples/sample-documents/sample.srt` |
 | `sample.vtt` | `text/vtt` | `docs/examples/sample-documents/sample.vtt` |
+
+### E2E fixtures
+
+These three are not general-purpose samples: they exist for the live compose
+E2E lane (`services/inh-public-api-svc/tests/integration/test_compose_lifecycle.py`)
+and each carries a unique sentinel string the tests search for. Don't edit them
+without updating the sentinels in that test file.
+
+| File | MIME Type | Sentinel | Purpose |
+|---|---|---|---|
+| `e2e-lifecycle.pdf` | `application/pdf` | `ZZE2EPDFQUOKKA` | Real PDF through the third-party extractor |
+| `e2e-lifecycle.docx` | `application/vnd.openxmlformats-officedocument.wordprocessingml.document` | `ZZE2EDOCXNARWHAL` | Real DOCX through python-docx |
+| `e2e-tabular.xlsx` | `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` | `ZZE2EXLSXPANGOLIN` | 500 pipe-serialized rows — the shape that collapses into one giant chunk without #129's `tabular` chunking (`docs/architecture/overview.md` §6.2) |
+
+The pre-existing `sample.pdf` / `sample.docx` / `sample.xlsx` above are
+deliberately left untouched by that lane: `services/inh-ingestion-svc/tests/test_extraction_by_type.py`
+pins their exact sheet names, merged-cell markers and header row, and they feed
+the extraction/chunking quality eval corpus.
 
 ### Generate sample PDF (requires `enscript` + `ps2pdf`)
 

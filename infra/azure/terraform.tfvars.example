@@ -1,0 +1,82 @@
+# Copy to terraform.tfvars and edit, or use one of envs/prod.tfvars.example /
+# envs/dev.tfvars.example directly with `-var-file=envs/prod.tfvars.example`.
+# Every field below is optional — shown at its default. See docs/deploy/azure.md
+# "Tuning & tweaking" for the full knob reference (defaults, effect, scale ceilings).
+
+location    = "eastus2"
+location_dr = "centralus" # only used when enable_dr = true
+
+resource_prefix = "inherent"
+environment     = "prod"
+tags = {
+  team = "platform"
+}
+
+# Profile knobs
+embedding_profile = "tei" # self-hosted, no external dependency. "azure_openai" needs #311/PR #314 first.
+# embedding_profile    = "azure_openai"
+storage_profile = "minio" # only supported value today, see issue #329
+ingress_profile = "nginx" # only supported value today — "appgw_waf" is rejected by validation, see epic #320
+
+# HA / DR — see envs/prod.tfvars.example and envs/dev.tfvars.example for the two
+# supported presets.
+enable_ha      = true
+enable_dr      = true
+pg_geo_replica = false
+
+# Enterprise BYO-VNet — leave existing_vnet_id empty to have modules/network create one.
+existing_vnet_id    = ""
+existing_subnet_ids = {} # keyed "aks"/"data"/"pe"/"appgw" when existing_vnet_id is set
+vnet_cidr           = "10.20.0.0/16"
+pod_cidr            = "10.244.0.0/16" # AKS Azure CNI Overlay pod address space
+
+private_cluster_enabled  = false
+authorized_ip_ranges     = [] # restrict this in production, e.g. ["203.0.113.0/24"]
+enable_private_endpoints = true
+
+# CHANGE ME if Terraform runs OUTSIDE the VNet (a laptop, most CI runners) with
+# enable_private_endpoints = true: Key Vault / storage account data-plane writes 403
+# without the deployer's own egress IP listed here. Empty is correct only when Terraform
+# runs from inside the VNet (jumpbox, peered self-hosted CI runner, VPN/ExpressRoute).
+deployer_ip_ranges = [] # e.g. ["203.0.113.4/32"]
+
+# Sizing
+aks_sku_tier       = "Standard" # AKS control-plane tier — 99.95% SLA
+log_retention_days = 30         # Log Analytics workspace retention
+aks_system_vm_size = "Standard_D2s_v5"
+aks_user_vm_size   = "Standard_D4s_v5"
+aks_user_min_count = 3
+aks_user_max_count = 6
+api_replicas_min   = 2
+api_replicas_max   = 6
+worker_replicas    = 2
+pg_sku             = "GP_Standard_D2ds_v5"
+pg_storage_mb      = 65536
+cosmos_mongo_sku   = "M30"
+redis_sku          = "Standard"
+redis_family       = "C"
+redis_capacity     = 1
+weaviate_disk_gb   = 64
+minio_disk_gb      = 128
+
+# App
+inherent_version = "0.6.0" # pin a real release — never "latest" in prod
+dns_zone_name     = "" # e.g. "example.com" (Azure DNS zone), or leave empty and set api_hostname
+dns_record        = "" # e.g. "api" -> api.example.com
+# dns_zone_resource_group = "" # REQUIRED companion var when dns_zone_name is set — the RG the zone lives in
+
+# CHANGE ME — one real hostname is required (either api_hostname, or dns_zone_name + dns_record).
+api_hostname = "api.example.com" # CHANGE ME — e.g. "api.example.com" when DNS is managed outside Azure DNS
+
+# CHANGE ME — required when ingress_profile = "nginx" (cert-manager's Let's Encrypt ACME
+# registration needs a real contact address); also the alert_email_address fallback below.
+letsencrypt_email = "ops@example.com" # CHANGE ME
+
+# CHANGE ME — monitoring action group's alert receiver. Falls back to letsencrypt_email above
+# when left empty, but an explicit address here is recommended (separate ops inbox vs ACME contact).
+alert_email_address = "ops@example.com" # CHANGE ME
+
+openai_embedding_model = "text-embedding-3-small"
+openai_embedding_dim   = 1536
+openai_sku             = "S0"
+openai_capacity        = 50

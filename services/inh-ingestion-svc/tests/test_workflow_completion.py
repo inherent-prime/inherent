@@ -183,6 +183,7 @@ class FakeWorkflowModule:
         self.outputs = outputs
         self.raising = raising or {}
         self.calls: list[tuple[str, object]] = []
+        self.activity_kwargs: list[tuple[str, dict]] = []
         self.logger = MagicMock()
 
     def now(self):
@@ -197,6 +198,7 @@ class FakeWorkflowModule:
     def execute_activity(self, activity_fn, arg, **kwargs):
         name = getattr(activity_fn, "__name__", str(activity_fn))
         self.calls.append((name, arg))
+        self.activity_kwargs.append((name, kwargs))
 
         async def _run():
             if name in self.raising:
@@ -208,6 +210,9 @@ class FakeWorkflowModule:
     def calls_for(self, name: str) -> list[object]:
         return [arg for n, arg in self.calls if n == name]
 
+    def kwargs_for(self, name: str) -> list[dict]:
+        return [kw for n, kw in self.activity_kwargs if n == name]
+
 
 HAPPY_OUTPUTS = {
     "ensure_tenant_ready": EnsureTenantOutput(tenant_id=1, workspace_ready=True),
@@ -215,8 +220,63 @@ HAPPY_OUTPUTS = {
     "chunk_text": ChunkTextOutput(chunk_count=3),
     "store_in_postgresql": StoreDocumentOutput(success=True, chunks_stored=3),
     "store_in_weaviate": StoreDocumentOutput(success=True, chunks_stored=3),
+    "resolve_dead_letter_jobs": 0,
     "publish_completion": True,
 }
+
+
+class TestWeaviateStoreBudgetWiring:
+    """#228: store_in_weaviate StartToClose must scale with chunk_count."""
+
+    @pytest.mark.asyncio
+    async def test_store_in_weaviate_timeout_scales_with_chunk_count(self):
+        from datetime import timedelta
+
+        from src.temporal.weaviate_store_budget import weaviate_store_timeout
+        from src.temporal.workflows import document_ingestion
+
+        outputs = dict(HAPPY_OUTPUTS)
+        # 44 chunks → 2 serial batches under the budget formula (2*100+30=230).
+        outputs["chunk_text"] = ChunkTextOutput(chunk_count=44)
+        outputs["store_in_postgresql"] = StoreDocumentOutput(success=True, chunks_stored=44)
+        outputs["store_in_weaviate"] = StoreDocumentOutput(success=True, chunks_stored=44)
+        fake = FakeWorkflowModule(outputs)
+        wf = document_ingestion.DocumentIngestionWorkflow()
+        with patch.object(document_ingestion, "workflow", fake):
+            result = await wf.run(make_workflow_input())
+
+        assert result.success is True
+        wv_kwargs = fake.kwargs_for("store_in_weaviate")
+        assert len(wv_kwargs) == 1
+        assert wv_kwargs[0]["start_to_close_timeout"] == weaviate_store_timeout(44)
+        # Serial worst-case (retries×timeout + sleep budget + overhead per batch).
+        assert wv_kwargs[0]["start_to_close_timeout"] == timedelta(seconds=230)
+        # #229: longer initial retry interval than the old 2s lockstep default.
+        assert wv_kwargs[0]["retry_policy"].initial_interval == timedelta(seconds=5)
+
+    @pytest.mark.asyncio
+    async def test_store_in_weaviate_call_site_wires_heartbeat_timeout(self):
+        """#298: the workflow must pair a heartbeat_timeout with the
+        per-batch heartbeating store_chunks_with_tenant now does, and it
+        must be sized well under the StartToClose budget so a wedged worker
+        is caught long before the document's own (possibly hours-long)
+        budget would otherwise elapse."""
+        from src.temporal.weaviate_store_budget import weaviate_store_heartbeat_timeout
+        from src.temporal.workflows import document_ingestion
+
+        outputs = dict(HAPPY_OUTPUTS)
+        outputs["chunk_text"] = ChunkTextOutput(chunk_count=60_215)  # #298 repro scale
+        outputs["store_in_postgresql"] = StoreDocumentOutput(success=True, chunks_stored=60_215)
+        outputs["store_in_weaviate"] = StoreDocumentOutput(success=True, chunks_stored=60_215)
+        fake = FakeWorkflowModule(outputs)
+        wf = document_ingestion.DocumentIngestionWorkflow()
+        with patch.object(document_ingestion, "workflow", fake):
+            result = await wf.run(make_workflow_input())
+
+        assert result.success is True
+        wv_kwargs = fake.kwargs_for("store_in_weaviate")[0]
+        assert wv_kwargs["heartbeat_timeout"] == weaviate_store_heartbeat_timeout()
+        assert wv_kwargs["heartbeat_timeout"] < wv_kwargs["start_to_close_timeout"]
 
 
 class TestWorkflowPublishesCompletion:
@@ -242,7 +302,11 @@ class TestWorkflowPublishesCompletion:
         assert completion.original_filename == "original.txt"
 
     @pytest.mark.asyncio
-    async def test_postgresql_failure_publishes_failed_event(self):
+    async def test_postgresql_failure_publishes_failed_event_and_raises(self):
+        """#230: document failure must raise after side-effects so Temporal
+        close status is Failed, not Completed with success=False."""
+        from temporalio.exceptions import ApplicationError
+
         from src.temporal.workflows import document_ingestion
 
         outputs = dict(HAPPY_OUTPUTS)
@@ -252,16 +316,25 @@ class TestWorkflowPublishesCompletion:
         fake = FakeWorkflowModule(outputs)
         wf = document_ingestion.DocumentIngestionWorkflow()
         with patch.object(document_ingestion, "workflow", fake):
-            result = await wf.run(make_workflow_input())
+            with pytest.raises(ApplicationError) as ei:
+                await wf.run(make_workflow_input())
 
-        assert result.success is False
+        from src.temporal.document_failure import DOCUMENT_INGESTION_FAILED_TYPE
+
+        assert ei.value.type == DOCUMENT_INGESTION_FAILED_TYPE
+        assert "pg down" in (ei.value.message or "")
         publishes = fake.calls_for("publish_completion")
         assert len(publishes) == 1
         assert publishes[0].success is False
         assert "pg down" in (publishes[0].error or "")
+        # Cleanup still runs (finally) before the raise.
+        assert fake.calls_for("cleanup_staging")
 
     @pytest.mark.asyncio
-    async def test_weaviate_failure_publishes_failed_event(self):
+    async def test_weaviate_failure_publishes_failed_event_and_raises(self):
+        from temporalio.exceptions import ApplicationError
+
+        from src.temporal.document_failure import DOCUMENT_INGESTION_FAILED_TYPE
         from src.temporal.workflows import document_ingestion
 
         outputs = dict(HAPPY_OUTPUTS)
@@ -271,15 +344,46 @@ class TestWorkflowPublishesCompletion:
         fake = FakeWorkflowModule(outputs)
         wf = document_ingestion.DocumentIngestionWorkflow()
         with patch.object(document_ingestion, "workflow", fake):
-            result = await wf.run(make_workflow_input())
+            with pytest.raises(ApplicationError) as ei:
+                await wf.run(make_workflow_input())
 
-        assert result.success is False
+        assert ei.value.type == DOCUMENT_INGESTION_FAILED_TYPE
+        assert "weaviate down" in (ei.value.message or "")
+        publishes = fake.calls_for("publish_completion")
+        assert len(publishes) == 1
+        assert publishes[0].success is False
+        assert fake.calls_for("cleanup_staging")
+
+    @pytest.mark.asyncio
+    async def test_store_in_weaviate_activity_raise_cleanup_then_document_failure(self):
+        """store_in_weaviate re-raises on TEI/Weaviate errors so gather fails
+        into the outer except — same terminal raise as success=False (#230)."""
+        from temporalio.exceptions import ApplicationError
+
+        from src.temporal.document_failure import DOCUMENT_INGESTION_FAILED_TYPE
+        from src.temporal.workflows import document_ingestion
+
+        fake = FakeWorkflowModule(
+            dict(HAPPY_OUTPUTS),
+            raising={"store_in_weaviate": RuntimeError("activity StartToClose timeout")},
+        )
+        wf = document_ingestion.DocumentIngestionWorkflow()
+        with patch.object(document_ingestion, "workflow", fake):
+            with pytest.raises(ApplicationError) as ei:
+                await wf.run(make_workflow_input())
+
+        assert ei.value.type == DOCUMENT_INGESTION_FAILED_TYPE
+        assert "StartToClose timeout" in (ei.value.message or "")
+        assert fake.calls_for("cleanup_staging")
         publishes = fake.calls_for("publish_completion")
         assert len(publishes) == 1
         assert publishes[0].success is False
 
     @pytest.mark.asyncio
-    async def test_unexpected_activity_error_publishes_failed_event(self):
+    async def test_unexpected_activity_error_publishes_failed_event_and_raises(self):
+        from temporalio.exceptions import ApplicationError
+
+        from src.temporal.document_failure import DOCUMENT_INGESTION_FAILED_TYPE
         from src.temporal.workflows import document_ingestion
 
         fake = FakeWorkflowModule(
@@ -287,9 +391,11 @@ class TestWorkflowPublishesCompletion:
         )
         wf = document_ingestion.DocumentIngestionWorkflow()
         with patch.object(document_ingestion, "workflow", fake):
-            result = await wf.run(make_workflow_input())
+            with pytest.raises(ApplicationError) as ei:
+                await wf.run(make_workflow_input())
 
-        assert result.success is False
+        assert ei.value.type == DOCUMENT_INGESTION_FAILED_TYPE
+        assert "boom" in (ei.value.message or "")
         publishes = fake.calls_for("publish_completion")
         assert len(publishes) == 1
         assert publishes[0].success is False
@@ -315,10 +421,11 @@ class TestWorkflowPublishesCompletion:
         classifier's own keyword matching works, not that the real error
         ever reaches it) with `.cause` set to the ApplicationError
         `_extract_pdf_text` actually raises, and asserts the cause -- not
-        the wrapper's generic text -- reaches every one of the four sites
+        the wrapper's generic text -- reaches every one of the sites
         `run()`'s except block writes to, AND that dead-letter recording
         classifies it as "extraction_failed" through the real
-        `_record_dead_letter_best_effort` -> `_classify_error` path."""
+        `_record_dead_letter_best_effort` -> `_classify_error` path.
+        #230: the terminal raise also carries the cause message."""
         from temporalio.exceptions import ActivityError, ApplicationError, RetryState
 
         from src.temporal.workflows import document_ingestion
@@ -351,13 +458,16 @@ class TestWorkflowPublishesCompletion:
         fake = FakeWorkflowModule(dict(HAPPY_OUTPUTS), raising={"extract_text": activity_error})
         wf = document_ingestion.DocumentIngestionWorkflow()
         with patch.object(document_ingestion, "workflow", fake):
-            result = await wf.run(make_workflow_input())
+            with pytest.raises(ApplicationError) as ei:
+                await wf.run(make_workflow_input())
 
-        # The workflow result's error must be the CAUSE, not the wrapper.
-        assert result.success is False
-        assert "Activity task failed" not in (result.error or "")
-        assert "PDF extraction failed" in (result.error or "")
-        assert "PdfStreamError" in (result.error or "")
+        from src.temporal.document_failure import DOCUMENT_INGESTION_FAILED_TYPE
+
+        # Terminal ApplicationError (#230) carries the CAUSE, not the wrapper.
+        assert ei.value.type == DOCUMENT_INGESTION_FAILED_TYPE
+        assert "Activity task failed" not in (ei.value.message or "")
+        assert "PDF extraction failed" in (ei.value.message or "")
+        assert "PdfStreamError" in (ei.value.message or "")
 
         # set_document_status: same cause, not the generic wrapper text.
         # (An earlier 'processing' status write with no error_message also
@@ -384,6 +494,8 @@ class TestWorkflowPublishesCompletion:
         assert "Activity task failed" not in (publishes[0].error or "")
         assert "PDF extraction failed" in (publishes[0].error or "")
 
+        assert fake.calls_for("cleanup_staging")
+
     @pytest.mark.asyncio
     async def test_publish_failure_does_not_fail_successful_ingestion(self):
         """Completion publishing is best-effort at the workflow level: after
@@ -399,3 +511,106 @@ class TestWorkflowPublishesCompletion:
 
         assert result.success is True
         assert result.chunks_created == 3
+
+
+# ---------------------------------------------------------------------------
+# #249: successful ingestion resolves this document's 'retrying' dead-letter
+# rows. See DocumentIngestionWorkflow._resolve_dead_letter_best_effort and
+# src.temporal.activities.dead_letter.resolve_dead_letter_jobs.
+# ---------------------------------------------------------------------------
+
+
+class TestWorkflowResolvesDeadLetterOnSuccess:
+    @pytest.mark.asyncio
+    async def test_success_resolves_dead_letter_jobs_for_document(self):
+        """The one true success path (workflow.run's `else` branch, after
+        PostgreSQL AND Weaviate storage both succeed) must call
+        resolve_dead_letter_jobs exactly once, scoped to this run's
+        document_id -- the fix for #249's "retrying" rows that never
+        advance to "resolved" after a successful retry."""
+        from src.temporal.workflows import document_ingestion
+
+        fake = FakeWorkflowModule(dict(HAPPY_OUTPUTS))
+        wf = document_ingestion.DocumentIngestionWorkflow()
+        with patch.object(document_ingestion, "workflow", fake):
+            result = await wf.run(make_workflow_input(document_id="doc-249"))
+
+        assert result.success is True
+        resolve_calls = fake.calls_for("resolve_dead_letter_jobs")
+        assert len(resolve_calls) == 1
+        assert resolve_calls[0].document_id == "doc-249"
+
+    @pytest.mark.asyncio
+    async def test_postgresql_failure_does_not_resolve_dead_letter(self):
+        """A terminal FAILURE must not resolve anything -- that would mark a
+        job resolved for a run that just dead-lettered it."""
+        from temporalio.exceptions import ApplicationError
+
+        from src.temporal.workflows import document_ingestion
+
+        outputs = dict(HAPPY_OUTPUTS)
+        outputs["store_in_postgresql"] = StoreDocumentOutput(
+            success=False, chunks_stored=0, error="pg down"
+        )
+        fake = FakeWorkflowModule(outputs)
+        wf = document_ingestion.DocumentIngestionWorkflow()
+        with patch.object(document_ingestion, "workflow", fake):
+            with pytest.raises(ApplicationError):
+                await wf.run(make_workflow_input())
+
+        assert fake.calls_for("resolve_dead_letter_jobs") == []
+
+    @pytest.mark.asyncio
+    async def test_weaviate_failure_does_not_resolve_dead_letter(self):
+        from temporalio.exceptions import ApplicationError
+
+        from src.temporal.workflows import document_ingestion
+
+        outputs = dict(HAPPY_OUTPUTS)
+        outputs["store_in_weaviate"] = StoreDocumentOutput(
+            success=False, chunks_stored=0, error="weaviate down"
+        )
+        fake = FakeWorkflowModule(outputs)
+        wf = document_ingestion.DocumentIngestionWorkflow()
+        with patch.object(document_ingestion, "workflow", fake):
+            with pytest.raises(ApplicationError):
+                await wf.run(make_workflow_input())
+
+        assert fake.calls_for("resolve_dead_letter_jobs") == []
+
+    @pytest.mark.asyncio
+    async def test_unexpected_activity_error_does_not_resolve_dead_letter(self):
+        from temporalio.exceptions import ApplicationError
+
+        from src.temporal.workflows import document_ingestion
+
+        fake = FakeWorkflowModule(
+            dict(HAPPY_OUTPUTS), raising={"extract_text": RuntimeError("boom")}
+        )
+        wf = document_ingestion.DocumentIngestionWorkflow()
+        with patch.object(document_ingestion, "workflow", fake):
+            with pytest.raises(ApplicationError):
+                await wf.run(make_workflow_input())
+
+        assert fake.calls_for("resolve_dead_letter_jobs") == []
+
+    @pytest.mark.asyncio
+    async def test_resolve_dead_letter_failure_does_not_fail_successful_ingestion(self):
+        """Best-effort, mirroring _record_dead_letter_best_effort (#8) and
+        _publish_completion_best_effort (#88): a broken DB write here must
+        not fail an otherwise-complete ingestion (per #249's fix design and
+        AGENTS.md's log-and-swallow rule for observability side-channels)."""
+        from src.temporal.workflows import document_ingestion
+
+        fake = FakeWorkflowModule(
+            dict(HAPPY_OUTPUTS),
+            raising={"resolve_dead_letter_jobs": RuntimeError("db gone")},
+        )
+        wf = document_ingestion.DocumentIngestionWorkflow()
+        with patch.object(document_ingestion, "workflow", fake):
+            result = await wf.run(make_workflow_input())
+
+        assert result.success is True
+        assert result.chunks_created == 3
+        # The completion event must still fire despite the resolve failure.
+        assert len(fake.calls_for("publish_completion")) == 1

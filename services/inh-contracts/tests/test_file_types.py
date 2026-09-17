@@ -26,6 +26,7 @@ from inh_contracts.file_types import (
     get_spec_for_extension,
     get_spec_for_mime,
     get_spec_for_upload,
+    legacy_format_hint_for_mime,
     mcp_mime_types,
     mime_type_for_extension,
     render_markdown_table,
@@ -1180,6 +1181,95 @@ class TestExplicitlyUnsupported:
         assert explicitly_unsupported_message_for_extension("report.docx") is None
         assert explicitly_unsupported_message_for_extension("notes.xyz") is None
         assert explicitly_unsupported_message_for_extension("no-extension-at-all") is None
+
+
+# ---------------------------------------------------------------------------
+# Legacy-format hint table (#192) -- MESSAGE TEXT ONLY, never dispatch. A
+# separate, smaller table than EXPLICITLY_UNSUPPORTED above: that table's
+# message REPLACES the generic allow-list (doc/msg have no supported
+# transitional overlap); #192's ask is ADDITIVE -- the generic list stays,
+# plus one bespoke sentence -- so it can't reuse EXPLICITLY_UNSUPPORTED's
+# wording without changing that established doc/msg behavior. Legacy
+# `.xls`/`.ppt` still have NO `FILE_TYPE_REGISTRY` entry and still hard-fail
+# exactly like any other unregistered type -- this table only changes the
+# reason string.
+# ---------------------------------------------------------------------------
+
+
+class TestLegacyFormatHint:
+    def test_xls_hint_names_xlsx_and_the_legacy_format(self):
+        hint = legacy_format_hint_for_mime("application/vnd.ms-excel")
+        assert hint is not None
+        assert ".xls" in hint
+        assert ".xlsx" in hint
+        # The replacement MIME is derived from the real xlsx registry entry
+        # (`get_spec_by_key`/`mime_type_for_extension`), not a second
+        # hardcoded copy of the long MIME string -- assert the derived value
+        # rather than retyping it, so this test would fail if the two drift.
+        xlsx_spec = get_spec_by_key("xlsx")
+        assert xlsx_spec is not None
+        assert xlsx_spec.mime_types[0] in hint
+
+    def test_ppt_hint_names_pptx_and_the_legacy_format(self):
+        hint = legacy_format_hint_for_mime("application/vnd.ms-powerpoint")
+        assert hint is not None
+        assert ".ppt" in hint
+        assert ".pptx" in hint
+        pptx_spec = get_spec_by_key("pptx")
+        assert pptx_spec is not None
+        assert pptx_spec.mime_types[0] in hint
+
+    def test_genuinely_unknown_type_gets_no_hint(self):
+        """A type with no legacy relationship at all (never registered, no
+        modern replacement) gets nothing extra -- only the generic message
+        applies for it, not a bespoke sentence."""
+        assert legacy_format_hint_for_mime("application/x-tar") is None
+
+    def test_registered_type_gets_no_hint(self):
+        assert legacy_format_hint_for_mime("application/pdf") is None
+
+    def test_hint_strips_content_type_parameters(self):
+        hint = legacy_format_hint_for_mime("application/vnd.ms-excel; charset=binary")
+        assert hint is not None
+        assert ".xlsx" in hint
+
+    def test_hint_is_case_and_whitespace_tolerant(self):
+        hint = legacy_format_hint_for_mime("  APPLICATION/VND.MS-EXCEL  ")
+        assert hint is not None
+
+    def test_legacy_mimes_still_have_no_registry_entry(self):
+        """Dispatch is unchanged by #192 -- the hint table is message-only.
+        This mirrors the xlsx/pptx FileTypeSpec comments' claim in code."""
+        registered_mimes = set(all_mime_types())
+        assert "application/vnd.ms-excel" not in registered_mimes
+        assert "application/vnd.ms-powerpoint" not in registered_mimes
+        assert get_spec_for_mime("application/vnd.ms-excel") is None
+        assert get_spec_for_mime("application/vnd.ms-powerpoint") is None
+
+    def test_unknown_content_type_error_includes_the_hint_for_xls(self):
+        """#192 requirement 1: the error itself carries the bespoke sentence
+        -- additive to (not instead of) the existing generic allow-list."""
+        error = UnknownContentTypeError("application/vnd.ms-excel")
+        message = str(error)
+        assert "Supported types:" in message  # generic list still present
+        assert "legacy .xls format" in message
+        assert ".xlsx" in message
+
+    def test_unknown_content_type_error_includes_the_hint_for_ppt(self):
+        error = UnknownContentTypeError("application/vnd.ms-powerpoint")
+        message = str(error)
+        assert "Supported types:" in message
+        assert "legacy .ppt format" in message
+        assert ".pptx" in message
+
+    def test_unknown_content_type_error_has_no_hint_for_a_genuinely_unknown_type(self):
+        """A real unknown type (never registered, no legacy relationship)
+        keeps ONLY the generic message -- no bespoke sentence appended."""
+        error = UnknownContentTypeError("application/x-tar")
+        message = str(error)
+        assert "Supported types:" in message
+        assert "legacy" not in message
+        assert "convert to" not in message
 
 
 class TestOOXMLSiblingsFromBatch3:

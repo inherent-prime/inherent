@@ -41,7 +41,7 @@ def test_capture_enabled_honors_optout():
 
 
 @pytest.mark.asyncio
-async def test_record_query_event_writes_and_purges():
+async def test_record_query_event_derives_fields_from_the_response():
     db = AsyncMock()
     with patch("src.services.eval_capture.get_database", new=AsyncMock(return_value=db)):
         await eval_capture.record_query_event(
@@ -50,12 +50,40 @@ async def test_record_query_event_writes_and_purges():
             user_id="u-1",
             request=SearchRequest(query="q", search_mode="hybrid"),
             response=_response(2),
+            transport="rest",
         )
     kwargs = db.insert_eval_event.call_args.kwargs
     assert kwargs["result_doc_ids"] == ["d0", "d1"]
     assert kwargs["result_chunk_ids"] == ["c0", "c1"]
     assert kwargs["top_score"] == pytest.approx(0.9)
-    db.purge_expired_eval_events.assert_awaited_once()
+    assert kwargs["transport"] == "rest"
+    # The purge no longer rides along here (#240): record_query_event is awaited
+    # on the request path, so it does the INSERT and nothing else. The purge is
+    # queued separately by the search handler and stays write-behind — see
+    # test_eval_capture_durability.py.
+    db.purge_expired_eval_events.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_purge_expired_events_uses_the_configured_retention():
+    db = AsyncMock()
+    with (
+        patch("src.services.eval_capture.get_database", new=AsyncMock(return_value=db)),
+        patch.object(eval_capture, "settings") as s,
+    ):
+        s.eval_retention_days = 30
+        await eval_capture.purge_expired_events("ws-1")
+    db.purge_expired_eval_events.assert_awaited_once_with(workspace_id="ws-1", retention_days=30)
+
+
+@pytest.mark.asyncio
+async def test_purge_expired_events_never_raises():
+    """Best-effort like capture: a failed purge cannot surface anywhere."""
+    with patch(
+        "src.services.eval_capture.get_database",
+        new=AsyncMock(side_effect=RuntimeError("db down")),
+    ):
+        await eval_capture.purge_expired_events("ws-1")
 
 
 @pytest.mark.asyncio
@@ -70,6 +98,7 @@ async def test_record_query_event_never_raises():
             user_id=None,
             request=SearchRequest(query="q"),
             response=_response(0),
+            transport="rest",
         )
 
 
@@ -87,4 +116,88 @@ async def test_record_query_event_swallows_db_resolution_failure():
             user_id=None,
             request=SearchRequest(query="q"),
             response=_response(1),
+            transport="rest",
         )
+
+
+# ---------------------------------------------------------------------------
+# capture_search_event (#241): the ONE shared mint-record-stamp helper both
+# REST (src/api/v1/search.py) and MCP (src/mcp_server/server.py) call for a
+# single-workspace search, so an event_id and every field it carries can
+# never drift between the two transports.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_capture_search_event_mints_and_stamps_the_response():
+    db = AsyncMock()
+    response = _response(1)
+    with patch("src.services.eval_capture.get_database", new=AsyncMock(return_value=db)):
+        event_id = await eval_capture.capture_search_event(
+            transport="mcp",
+            workspace_id="ws-1",
+            user_id="u-1",
+            request=SearchRequest(query="q"),
+            response=response,
+        )
+
+    assert event_id is not None
+    assert response.event_id == event_id
+    kwargs = db.insert_eval_event.call_args.kwargs
+    assert kwargs["event_id"] == event_id
+    assert kwargs["transport"] == "mcp"
+
+
+@pytest.mark.asyncio
+async def test_capture_search_event_leaves_response_untouched_on_failure():
+    """A failed write must not stamp a dangling id (#240's invariant, reused
+    by the shared helper): response.event_id stays None, not a bad id."""
+    db = AsyncMock()
+    db.insert_eval_event.side_effect = RuntimeError("db down")
+    response = _response(1)
+    with patch("src.services.eval_capture.get_database", new=AsyncMock(return_value=db)):
+        event_id = await eval_capture.capture_search_event(
+            transport="mcp",
+            workspace_id="ws-1",
+            user_id="u-1",
+            request=SearchRequest(query="q"),
+            response=response,
+        )
+
+    assert event_id is None
+    assert response.event_id is None
+
+
+@pytest.mark.asyncio
+async def test_capture_search_event_rest_and_mcp_write_equivalent_events():
+    """Transport parity (#241): the SAME query through both transports must
+    produce the same captured fields, differing only in transport/event_id."""
+    db_rest, db_mcp = AsyncMock(), AsyncMock()
+    request = SearchRequest(query="q", search_mode="hybrid")
+    response_rest, response_mcp = _response(2), _response(2)
+
+    with patch("src.services.eval_capture.get_database", new=AsyncMock(return_value=db_rest)):
+        await eval_capture.capture_search_event(
+            transport="rest",
+            workspace_id="ws-1",
+            user_id="u-1",
+            request=request,
+            response=response_rest,
+        )
+    with patch("src.services.eval_capture.get_database", new=AsyncMock(return_value=db_mcp)):
+        await eval_capture.capture_search_event(
+            transport="mcp",
+            workspace_id="ws-1",
+            user_id="u-1",
+            request=request,
+            response=response_mcp,
+        )
+
+    rest_kwargs = dict(db_rest.insert_eval_event.call_args.kwargs)
+    mcp_kwargs = dict(db_mcp.insert_eval_event.call_args.kwargs)
+    # event_id is minted per-call and transport is the one field the two
+    # transports are SUPPOSED to disagree on; everything else must match.
+    for key in ("event_id", "transport"):
+        del rest_kwargs[key]
+        del mcp_kwargs[key]
+    assert rest_kwargs == mcp_kwargs

@@ -1,0 +1,81 @@
+{{- if .Values.temporal.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: temporal
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inherent.labels" . | nindent 4 }}
+    {{- include "inherent.selectorLabels" (dict "component" "temporal") | nindent 4 }}
+spec:
+  # ALWAYS 1 — see values.yaml's temporal.server.replicas comment for why
+  # this does NOT scale with enable_ha like every other component (ringpop
+  # gossip membership, TCP 6933-6939 between replicas, isn't opened by the
+  # NetworkPolicies in templates/networkpolicy.yaml; a 2nd replica would
+  # split-brain instead of joining the cluster). This runs all Temporal
+  # services (frontend/history/matching/worker) in one process per replica —
+  # adequate at 20 QPS scale; splitting into per-service Deployments is the
+  # documented next scale ceiling (see docs/deploy/azure.md) if
+  # history/matching becomes the bottleneck.
+  replicas: {{ .Values.temporal.server.replicas }}
+  selector:
+    matchLabels:
+      {{- include "inherent.selectorLabels" (dict "component" "temporal") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "inherent.labels" . | nindent 8 }}
+        {{- include "inherent.selectorLabels" (dict "component" "temporal") | nindent 8 }}
+        {{- with .Values.serviceAccount.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "inherent.serviceAccountName" . }}
+      containers:
+        - name: temporal
+          image: "{{ .Values.temporal.server.image.repository }}:{{ .Values.temporal.server.image.tag }}"
+          ports:
+            - name: grpc
+              containerPort: 7233
+          env:
+            - name: DB
+              value: "postgres12"
+            - name: DB_PORT
+              value: {{ .Values.temporal.postgres.port | quote }}
+            - name: POSTGRES_SEEDS
+              value: {{ required "temporal.postgres.host is required" .Values.temporal.postgres.host | quote }}
+            - name: POSTGRES_USER
+              value: {{ required "temporal.postgres.user is required" .Values.temporal.postgres.user | quote }}
+            - name: POSTGRES_PWD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "temporal.postgres.passwordSecretRef.name is required" .Values.temporal.postgres.passwordSecretRef.name }}
+                  key: {{ .Values.temporal.postgres.passwordSecretRef.key }}
+            - name: DBNAME
+              value: {{ .Values.temporal.postgres.dbName | quote }}
+            - name: VISIBILITY_DBNAME
+              value: {{ .Values.temporal.postgres.visibilityDbName | quote }}
+            # Azure Database for PostgreSQL Flexible Server enforces TLS
+            # server-side (require_secure_transport=ON) — without these, the
+            # server fails to connect at all ("SSL is required") and nothing
+            # boots. SQL_HOST_NAME is the PG FQDN the server certificate was
+            # issued for, used for TLS server-name verification.
+            - name: SQL_TLS_ENABLED
+              value: "true"
+            - name: SQL_HOST_VERIFICATION
+              value: "true"
+            - name: SQL_HOST_NAME
+              value: {{ required "temporal.postgres.host is required" .Values.temporal.postgres.host | quote }}
+          resources:
+            {{- toYaml .Values.temporal.server.resources | nindent 12 }}
+          readinessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 30
+            periodSeconds: 15
+{{- end }}

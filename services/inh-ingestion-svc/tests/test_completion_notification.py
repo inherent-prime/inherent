@@ -2,7 +2,11 @@
 
 Tests cover:
 - MemoryMQService.publish_completion() — success, failure, no topic, error swallowing
-- DocumentProcessor completion publishing — success, failure, no mq_service
+
+Live-path completion publishing (the Temporal ``publish_completion`` activity
+used by ``DocumentIngestionWorkflow``) is covered separately in
+``test_workflow_completion.py``; the legacy ``DocumentProcessor`` completion
+plumbing this file used to test was removed with ``processor.py`` (#185).
 """
 
 from __future__ import annotations
@@ -14,7 +18,6 @@ import pytest
 from src.config.settings import Settings
 from src.models.document import DocumentUploadMessage, ProcessingResult
 from src.services.mq.memory_mq import MemoryMQService
-from src.services.processor import DocumentProcessor
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -184,7 +187,7 @@ class TestPublishCompletion:
 
 
 # ---------------------------------------------------------------------------
-# DocumentProcessor completion publishing tests
+# Completion message storage-metadata tests
 # ---------------------------------------------------------------------------
 
 
@@ -386,115 +389,3 @@ class TestDocumentCompletionMessageModel:
         assert data["content_type"] == "text/plain"
         assert data["size_bytes"] == 512
         assert data["storage_backend"] is None
-
-
-class TestProcessorCompletionPublishing:
-    """Tests for how DocumentProcessor calls publish_completion."""
-
-    @pytest.fixture
-    def mock_settings(self) -> MagicMock:
-        return make_mock_settings()
-
-    def _make_processor(
-        self,
-        settings: MagicMock,
-        mq_service: MemoryMQService | MagicMock | None = None,
-    ) -> DocumentProcessor:
-        """Create a processor with all internal services mocked out."""
-        processor = DocumentProcessor(settings, mq_service=mq_service)
-        processor._initialized = True
-
-        # Mock storage service — returns bytes
-        mock_storage = MagicMock()
-        mock_storage.read_file_from_url = MagicMock(return_value=b"Hello world document text.")
-        mock_storage.read_file = MagicMock(return_value=b"Hello world document text.")
-        processor.storage_service = mock_storage
-
-        # Mock database service
-        mock_db = MagicMock()
-        mock_db.store_processed_document = AsyncMock(return_value=1)
-        processor.db_service = mock_db
-
-        # Mock weaviate service
-        mock_weaviate = MagicMock()
-        mock_weaviate.store_chunks_with_tenant = AsyncMock(return_value=1)
-        processor.weaviate_service = mock_weaviate
-
-        # Mock tenant manager
-        mock_tenant_manager = MagicMock()
-        mock_tenant_manager.ensure_workspace_ready = AsyncMock(return_value=1)
-        mock_tenant_manager.update_workspace_stats = AsyncMock()
-        processor.tenant_manager = mock_tenant_manager
-
-        return processor
-
-    # 5 ---------------------------------------------------------------
-    @pytest.mark.asyncio
-    async def test_processor_publishes_completion_on_success(
-        self, mock_settings: MagicMock
-    ) -> None:
-        """Processor calls publish_completion with success=True on successful processing."""
-        mock_mq = MagicMock()
-        mock_mq.publish_completion = AsyncMock()
-
-        processor = self._make_processor(mock_settings, mq_service=mock_mq)
-        message = make_upload_message()
-
-        result = await processor.process_message(message)
-
-        assert result.success is True
-
-        mock_mq.publish_completion.assert_called_once()
-        call_result, call_upload_msg = mock_mq.publish_completion.call_args[0]
-
-        assert isinstance(call_result, ProcessingResult)
-        assert call_result.success is True
-        assert call_result.document_id == message["document_id"]
-        assert call_result.chunks_created >= 1
-
-        assert isinstance(call_upload_msg, DocumentUploadMessage)
-        assert call_upload_msg.document_id == message["document_id"]
-
-    # 6 ---------------------------------------------------------------
-    @pytest.mark.asyncio
-    async def test_processor_publishes_completion_on_failure(
-        self, mock_settings: MagicMock
-    ) -> None:
-        """Processor calls publish_completion with success=False when processing raises."""
-        mock_mq = MagicMock()
-        mock_mq.publish_completion = AsyncMock()
-
-        processor = self._make_processor(mock_settings, mq_service=mock_mq)
-
-        # Make _chunk_text raise so the outer except block in process_message
-        # is triggered.  That block builds a failure ProcessingResult and
-        # calls publish_completion.
-        processor._chunk_text = MagicMock(  # type: ignore[method-assign]
-            side_effect=RuntimeError("Chunking exploded")
-        )
-
-        message = make_upload_message()
-        result = await processor.process_message(message)
-
-        assert result.success is False
-        assert "Chunking exploded" in (result.error or "")
-
-        mock_mq.publish_completion.assert_called_once()
-        call_result, call_upload_msg = mock_mq.publish_completion.call_args[0]
-
-        assert isinstance(call_result, ProcessingResult)
-        assert call_result.success is False
-        assert "Chunking exploded" in (call_result.error or "")
-
-    # 7 ---------------------------------------------------------------
-    @pytest.mark.asyncio
-    async def test_processor_works_without_mq_service(self, mock_settings: MagicMock) -> None:
-        """Processor completes without error when mq_service is None."""
-        processor = self._make_processor(mock_settings, mq_service=None)
-        message = make_upload_message()
-
-        result = await processor.process_message(message)
-
-        # Should succeed without raising
-        assert result.success is True
-        assert result.chunks_created >= 1

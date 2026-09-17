@@ -95,8 +95,15 @@ PostgreSQL and Weaviate. All protected routes authenticate with `X-API-Key: $ING
 | `GET` | `/lineage/{document_id}?workspace_id=` | yes | Ordered ingestion pipeline events for a document. 404 if `document_id` isn't owned by `workspace_id` (#177) |
 | `GET` | `/dead-letter?workspace_id=` | yes | List failed-ingestion (dead-letter) jobs for `workspace_id` (**required**, #177); filters `status`, `limit` |
 | `GET` | `/dead-letter/{job_id}?workspace_id=` | yes | Get a single dead-letter job. 404 if missing or not owned by `workspace_id` (#177) |
-| `POST` | `/dead-letter/{job_id}/retry?workspace_id=` | yes | Re-publish a job's original message. 404 if not owned by `workspace_id` (#177); 409 if not retriable |
+| `POST` | `/dead-letter/{job_id}/retry?workspace_id=` | yes | Re-publish a job's original message (status → `retrying`). 404 if not owned by `workspace_id` (#177); 409 if not retriable; 500 resets status back to `pending` if the re-trigger itself fails |
 | `POST` | `/dead-letter/{job_id}/abandon?workspace_id=` | yes | Mark a dead-letter job permanently abandoned. 404 if not owned by `workspace_id` (#177) |
+
+Dead-letter status lifecycle: `pending` -> `retrying` (via retry) -> `resolved` once the
+re-triggered workflow run completes successfully, or back to `pending` if the retry call itself
+failed, or `abandoned` via the abandon route. `resolved` has no dedicated endpoint -- it is
+written best-effort by `DocumentIngestionWorkflow`'s success path
+(`resolve_dead_letter_jobs` activity -> `DatabaseService.resolve_dead_letter_jobs_for_document`),
+keyed on `document_id`, and only ever advances rows still in `retrying` (#249).
 
 Every route above that takes a `document_id` or dead-letter `job_id` now also requires and
 verifies `workspace_id` against PostgreSQL (#134, #175, #177) -- `verify_api_key` alone only

@@ -1,4 +1,4 @@
-name: Publish images
+name: Publish images and Python packages
 
 # Build and push the two custom Inherent service images to GitHub Container
 # Registry (ghcr.io/<owner>/<service>). The eight upstream OSS images in the
@@ -26,6 +26,152 @@ permissions:
   packages: write
 
 jobs:
+  # The repository tag is release-level and intentionally decoupled from
+  # per-service pyproject.toml versions (docs/maintainers/releasing.md) — an
+  # image-only tag that doesn't bump the CLI is valid and must not block
+  # publishing inh-contracts. This job decides, once, whether *this* tag also
+  # carries a matching CLI release; build-cli/publish-cli skip the inherent
+  # leg (without failing) when it doesn't.
+  check-cli-version:
+    name: check inherent version matches tag
+    runs-on: ubuntu-latest
+    outputs:
+      matches: ${{ steps.check.outputs.matches }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compare inh-cli pyproject version to the tag
+        id: check
+        working-directory: services/inh-cli
+        # Compare with hyphens/underscores stripped: the release convention
+        # tags prereleases as vX.Y.Z-rcN (see releasing.md), but PEP 440
+        # canonicalizes a pyproject.toml prerelease version to X.Y.ZrcN (no
+        # separator) -- a literal string match would reject a valid RC tag.
+        run: |
+          version=$(grep -m1 '^version = ' pyproject.toml | cut -d '"' -f 2)
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "${version//[-_]/}" = "${tag//[-_]/}" ]; then
+            echo "matches=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "matches=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Tag $GITHUB_REF_NAME does not match inh-cli's pyproject version ($version) — this is an image-only release, so the inherent CLI wheel will not be built or published this run."
+          fi
+
+  # The CLI imports shared file-type contracts at runtime. Build both wheels so
+  # a pip-installed CLI never depends on a checkout-only path source.
+  build-cli:
+    name: build ${{ matrix.package }} wheel
+    needs: check-cli-version
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: inh-contracts
+            directory: services/inh-contracts
+          - package: inherent
+            directory: services/inh-cli
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Build and validate wheel
+        if: matrix.package != 'inherent' || needs.check-cli-version.outputs.matches == 'true'
+        working-directory: ${{ matrix.directory }}
+        # inherent's force-include pulls docker-compose.release.yml from
+        # outside the package root, which an sdist round-trip can't see, so
+        # only the CLI is built wheel-only; inh-contracts gets its normal
+        # sdist + wheel pair.
+        run: |
+          if [ "${{ matrix.package }}" = "inherent" ]; then
+            uv build --wheel
+          else
+            uv build
+          fi
+          uvx twine check dist/*
+
+      - name: Upload wheel
+        if: matrix.package != 'inherent' || needs.check-cli-version.outputs.matches == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.package }}-dist
+          path: ${{ matrix.directory }}/dist/*
+
+  # A release artifact is only useful if its installed console script and its
+  # bundled Compose file work with no checkout on sys.path. This gates
+  # publish-cli below so a packaging regression can't reach PyPI.
+  wheel-install-check:
+    name: verify inherent wheel install
+    needs: [check-cli-version, build-cli]
+    if: needs.check-cli-version.outputs.matches == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Download wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '*-dist'
+          merge-multiple: true
+          path: dist
+
+      - name: Install from wheels in a clean venv
+        run: |
+          python -m venv .wheel-venv
+          # Install the downloaded wheel files directly, not "inherent" by
+          # name -- `--find-links` still lets pip resolve the requirement
+          # from PyPI, which would validate the wrong artifact.
+          .wheel-venv/bin/pip install dist/*.whl
+          .wheel-venv/bin/inherent --version
+          .wheel-venv/bin/python -c "import importlib.resources; assert importlib.resources.files('inh_cli').joinpath('data/docker-compose.release.yml').is_file()"
+
+  # OIDC means PyPI verifies this repository and approved workflow identity;
+  # no long-lived upload credential is stored in repository secrets.
+  publish-cli:
+    name: publish ${{ matrix.package }} to PyPI
+    needs: [check-cli-version, build-cli, wheel-install-check]
+    # wheel-install-check only runs (and must pass) when this tag also carries
+    # a CLI release; on an image-only tag it's skipped, and inh-contracts
+    # still needs to publish on its own.
+    if: |
+      always() &&
+      needs.build-cli.result == 'success' &&
+      (needs.check-cli-version.outputs.matches != 'true' || needs.wheel-install-check.result == 'success')
+    runs-on: ubuntu-latest
+    environment: pypi-publish
+    permissions:
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [inh-contracts, inherent]
+    steps:
+      - name: Download wheel
+        if: matrix.package != 'inherent' || needs.check-cli-version.outputs.matches == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.package }}-dist
+          path: dist
+
+      - name: Publish wheel
+        if: matrix.package != 'inherent' || needs.check-cli-version.outputs.matches == 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          # Only a tag push with an unhyphenated version (a final release) goes
+          # to production PyPI. workflow_dispatch can run against an arbitrary
+          # branch, where ref_name has no tag-version guarantee at all -- route
+          # anything that isn't a `v*` tag push to TestPyPI.
+          repository-url: ${{ (github.ref_type == 'tag' && !contains(github.ref_name, '-')) && 'https://upload.pypi.org/legacy/' || 'https://test.pypi.org/legacy/' }}
+          skip-existing: true
+
   # Stage 1 — build both images (multi-arch) WITHOUT pushing, so reviewers are
   # only asked to approve a release that actually builds. The gha cache is
   # populated here and reused by the publish stage for a fast second build.

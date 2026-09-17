@@ -4,10 +4,19 @@ Uploads the golden-corpus fixtures to the live local stack, then runs every
 golden query and scores the ranking against the judged relevances with
 recall@k / MRR / nDCG. Two gates apply:
 
-1. Relative: no per-mode metric may regress more than ``EVAL_GATE_TOLERANCE``
-   below the committed baseline (``corpus/retrieval_baseline.json``), enforced
-   via ``tests/evals/eval_gate.py``. A green run on `main` ratchets the
-   baseline up (never down) -- see ``.github/workflows/integration.yml``.
+1. Relative: no per-mode metric may regress more than its *effective*
+   tolerance below the committed baseline (``corpus/retrieval_baseline.json``),
+   enforced via ``tests/evals/eval_gate.py``. ``EVAL_GATE_TOLERANCE`` is a
+   FLOOR, not the tolerance itself: the actual per-metric tolerance is
+   ``max(EVAL_GATE_TOLERANCE, min_detectable_delta(metric, n))``, where ``n``
+   is the number of gated golden queries (every query except
+   ``category == "abstention"``, matching the pooled-average exclusion
+   below). This closes #236: with a small golden corpus, a single query's
+   rank slipping by one position can move a pooled metric by more than a
+   fixed 0.02 tolerance, so a fixed tolerance hard-fails on noise the corpus
+   is too small to actually resolve -- see the 2026-08-12 amendment to ADR
+   0003. A green run on `main` ratchets the baseline up (never down) -- see
+   ``.github/workflows/integration.yml``.
 2. Absolute: a LOOSE backstop floor so a fresh checkout with an unset/zeroed
    baseline still guards against gross regressions.
 
@@ -24,11 +33,22 @@ from pathlib import Path
 
 import httpx
 import pytest
+from inh_contracts.file_types import get_spec_for_upload, mime_type_for_extension
 
 from src.services.ranking_metrics import mrr, ndcg_at_k, recall_at_k
-from tests.evals.eval_gate import find_regressions, format_regressions, load_metrics
+from tests.evals.eval_gate import (
+    effective_tolerance,
+    find_regressions,
+    format_regressions,
+    load_metrics,
+)
 
-pytestmark = [pytest.mark.retrieval_eval, pytest.mark.compose]
+# ``eval_gate`` is what CI's hard-gate step selects on, and this is the ONLY
+# module that carries it: a failure here means a ranking metric regressed vs
+# the committed baseline, which is what the gate's error message and the
+# auto-filed regression issue both assert. Sibling evals tests keep
+# ``retrieval_eval`` alone so their failures are reported as themselves (#240).
+pytestmark = [pytest.mark.retrieval_eval, pytest.mark.eval_gate, pytest.mark.compose]
 
 # Where per-mode metrics are written for downstream reporting (#37) and for the
 # CI ratchet step to read after this test passes. CI sets EVAL_REPORT; locally
@@ -37,18 +57,24 @@ EVAL_REPORT_PATH = os.environ.get(
     "EVAL_REPORT", str(Path(__file__).resolve().parent / "eval-report.json")
 )
 # Committed governance baseline. The gate (below) hard-fails on any per-mode
-# metric that regresses beyond EVAL_GATE_TOLERANCE; a green run on `main`
+# metric that regresses beyond its effective tolerance; a green run on `main`
 # ratchets this file up to the higher of (current, baseline) -- see
 # tests/evals/eval_gate.py and .github/workflows/integration.yml.
 BASELINE_PATH = Path(__file__).resolve().parent / "corpus" / "retrieval_baseline.json"
+# The FLOOR under the derived per-metric tolerance (#236) -- see the module
+# docstring. Named EVAL_GATE_TOLERANCE for backward compatibility: this is
+# the same env var CI/docs have always referenced, its meaning as a lower
+# bound is unchanged, it just no longer doubles as the tolerance itself.
 EVAL_GATE_TOLERANCE = float(os.environ.get("EVAL_GATE_TOLERANCE", "0.02"))
 
 
-def _write_and_summarize(summary: dict[str, dict[str, float]]) -> list:
+def _write_and_summarize(summary: dict[str, dict[str, float]], num_queries: int) -> list:
     """Persist metrics to EVAL_REPORT, print a baseline diff, return regressions.
 
     Writing the report is best-effort (never raises, so it cannot break the
     eval run itself); computing regressions is not -- the caller asserts on it.
+    ``num_queries`` is the gated golden-query count (abstention excluded, see
+    module docstring) used to derive each metric's effective tolerance (#236).
     """
     try:
         Path(EVAL_REPORT_PATH).write_text(json.dumps(summary, indent=2, sort_keys=True))
@@ -71,7 +97,19 @@ def _write_and_summarize(summary: dict[str, dict[str, float]]) -> list:
                 sign = "+" if delta >= 0 else ""
                 print(f"  {mode}.{metric}: {cur:.3f} (baseline {base:.3f}, {sign}{delta:.3f})")
 
-    regressions = find_regressions(summary, baseline, tolerance=EVAL_GATE_TOLERANCE)
+    # Per-metric tolerance derived from corpus resolution (#236): the metric
+    # names the baseline actually tracks, gated at max(EVAL_GATE_TOLERANCE,
+    # min_detectable_delta(metric, num_queries)).
+    metric_names = {metric for metrics in baseline.values() for metric in metrics}
+    tolerances = {
+        metric: effective_tolerance(metric, num_queries, floor=EVAL_GATE_TOLERANCE)
+        for metric in metric_names
+    }
+    print(
+        "[retrieval-eval] effective tolerances "
+        f"(n={num_queries}, floor={EVAL_GATE_TOLERANCE}): {tolerances}"
+    )
+    regressions = find_regressions(summary, baseline, tolerance=tolerances)
     print(format_regressions(regressions))
     return regressions
 
@@ -102,15 +140,29 @@ def client() -> httpx.Client:
 
 
 def _content_type(filename: str) -> str:
-    return {
-        ".txt": "text/plain",
-        ".md": "text/markdown",
-        ".csv": "text/csv",
-        ".html": "text/html",
-        ".json": "application/json",
-        ".pdf": "application/pdf",
-        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    }.get(os.path.splitext(filename)[1], "application/octet-stream")
+    """Resolve a fixture's upload MIME type from the shared file-type registry.
+
+    Sourced from the shared registry so the corpus stays free to reference any
+    format the product accepts, without this test drifting behind it.
+
+    Fails loudly on an unresolvable fixture rather than falling back to
+    ``application/octet-stream``: that fallback is precisely how an
+    unsupported extension used to reach the upload as a generic type and come
+    back a bare 4xx from the API, reporting a qrels authoring mistake as an
+    unrelated upload failure several steps downstream.
+    """
+    spec = get_spec_for_upload("application/octet-stream", filename)
+    assert spec is not None, (
+        f"no registered file type for fixture {filename!r} -- qrels.jsonl references a "
+        f"format inh_contracts.file_types does not accept"
+    )
+    # Not ``spec.mime_types[0]``: that is the canonical type only for a spec
+    # describing ONE format. The ``code`` spec pools 22 aliases across 21
+    # extensions, so index 0 labels a Go, SQL or Java fixture ``text/x-python``
+    # -- the exact bug ``mime_type_for_extension`` was added to close (#197).
+    # No code fixture is in the corpus today, but resolving per-extension is
+    # the whole point of sourcing the registry rather than a local table.
+    return mime_type_for_extension(spec, os.path.splitext(filename)[1])
 
 
 def _search(client: httpx.Client, query: str, mode: str, limit: int = 5) -> list[str]:
@@ -241,13 +293,17 @@ def test_ranking_regression_against_golden_corpus(client, golden_corpus):
     print(f"[retrieval-eval] by category: {json.dumps(category_summary, indent=2)}")
 
     # Persist metrics + print a baseline diff, then hard-gate on regressions
-    # (#37 -> hard gate): any per-mode metric that drops more than
-    # EVAL_GATE_TOLERANCE below the committed baseline fails the build. A green
-    # run on `main` ratchets the baseline up; it never moves down. The
-    # "_by_category" key is prefixed so eval_gate.py's loader drops it (same
-    # convention as "_comment" in retrieval_baseline.json) -- reporting only,
-    # never part of the enforced gate.
-    regressions = _write_and_summarize({**summary, "_by_category": category_summary})
+    # (#37 -> hard gate): any per-mode metric that drops more than its
+    # effective tolerance below the committed baseline fails the build (#236 --
+    # see module docstring). A green run on `main` ratchets the baseline up; it
+    # never moves down. The "_by_category" key is prefixed so eval_gate.py's
+    # loader drops it (same convention as "_comment" in
+    # retrieval_baseline.json) -- reporting only, never part of the enforced
+    # gate. `n` (the gated query count -- every category but "abstention",
+    # identical across modes) came out of the loop above; it's the same pool
+    # the pooled averages themselves were computed over, so the tolerance is
+    # derived from exactly the corpus resolution this run actually measured.
+    regressions = _write_and_summarize({**summary, "_by_category": category_summary}, n)
     assert not regressions, format_regressions(regressions)
 
     # Absolute floor as a backstop under the relative gate above -- catches a

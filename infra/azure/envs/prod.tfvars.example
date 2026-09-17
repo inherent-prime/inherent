@@ -1,0 +1,50 @@
+# Production preset: zone-redundant HA + cross-region DR, full sizing.
+# terraform apply -var-file=envs/prod.tfvars.example
+
+environment = "prod"
+
+enable_ha      = true
+enable_dr      = true
+pg_geo_replica = false # geo-redundant backup already meets RPO/RTO; opt in for faster failover
+
+# Public ingress via ingress-nginx + cert-manager (Let's Encrypt) — cheapest default that
+# still terminates TLS at the edge. Application Gateway WAF_v2 ("appgw_waf") is a tracked
+# roadmap option (#334) — variable validation rejects it until the AGIC wiring lands, so
+# "nginx" is the only deployable profile today (see docs/deploy/azure.md TCO for the cost
+# comparison once it ships).
+ingress_profile = "nginx"
+
+inherent_version = "0.6.0" # pinned release — never "latest" in prod
+
+# CHANGE ME — root main.tf's guardrail precondition fails the plan without one of these.
+api_hostname         = "api.example.com" # CHANGE ME
+letsencrypt_email    = "ops@example.com" # CHANGE ME — cert-manager ACME contact
+alert_email_address  = "ops@example.com" # CHANGE ME — monitoring action group receiver; falls back to letsencrypt_email if left empty
+
+deployer_ip_ranges = [] # CHANGE ME to the deployer's egress IP/CIDR if Terraform runs outside the VNet
+
+aks_sku_tier       = "Standard"
+log_retention_days = 30
+vnet_cidr          = "10.20.0.0/16"
+pod_cidr           = "10.244.0.0/16"
+
+aks_system_vm_size = "Standard_D2s_v5"
+aks_user_vm_size   = "Standard_D4s_v5"
+aks_user_min_count = 3
+aks_user_max_count = 6
+api_replicas_min   = 2
+api_replicas_max   = 6
+worker_replicas    = 2
+
+pg_sku           = "GP_Standard_D2ds_v5"
+pg_storage_mb    = 65536
+cosmos_mongo_sku = "M30"
+redis_sku        = "Standard"
+redis_family     = "C"
+redis_capacity   = 1
+weaviate_disk_gb = 64
+minio_disk_gb    = 128
+
+embedding_profile = "tei" # self-hosted, no external dependency
+# embedding_profile = "azure_openai" # requires #311/PR #314 to merge first — see docs/deploy/azure.md limitations
+storage_profile = "minio"

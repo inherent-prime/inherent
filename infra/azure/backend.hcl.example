@@ -1,0 +1,13 @@
+# Copy to backend.hcl (gitignored) and fill in values, or generate it with
+# scripts/deploy-azure.sh --bootstrap-state.
+#
+# Auth: use_azuread_auth = true (RBAC, "Storage Blob Data Contributor" scoped to this one
+# container) — no storage account key ever needs to leave the console. Requires
+# `az login` (or an OIDC-federated CI identity) with that role before `terraform init`.
+
+resource_group_name  = "inherent-tfstate-rg"
+storage_account_name = "inherenttfstateXXXX" # globally unique, lowercase alnum only
+container_name       = "tfstate"
+key                  = "inherent/prod/terraform.tfstate" # dev sandbox: inherent/dev/terraform.tfstate
+
+use_azuread_auth = true

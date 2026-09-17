@@ -736,6 +736,108 @@ class TestUploadLegacyFormatRejectionParity:
 
 
 # ---------------------------------------------------------------------------
+# Upload: legacy .xls/.ppt bespoke rejection sentence (#192)
+# ---------------------------------------------------------------------------
+
+
+class TestUploadLegacyXlsRejectionMessageParity:
+    """#192: unlike .doc/.msg above (EXPLICITLY_UNSUPPORTED, full message
+    replacement), legacy .xls/.ppt keep NO FILE_TYPE_REGISTRY entry and no
+    EXPLICITLY_UNSUPPORTED entry either -- they still fall through to the
+    generic "unsupported type" rejection on both surfaces, which now gains
+    one ADDITIVE bespoke sentence (`legacy_format_hint_for_mime`) naming the
+    modern replacement, on top of the full allow-list both surfaces already
+    printed. This is the surface-level pin that both REST and MCP actually
+    produce that sentence for a declared ``application/vnd.ms-excel``
+    upload -- inh-contracts' test_file_types.py::TestLegacyFormatHint covers
+    the message-building contract itself in isolation.
+    """
+
+    async def test_rest_and_mcp_both_name_xlsx_for_legacy_xls(self):
+        # --- REST: declared application/vnd.ms-excel ------------------------
+        rest_db = _mock_db()
+        rest_db.get_document_id_by_content_hash = AsyncMock(return_value=None)
+        rest_db.get_document_id_by_filename = AsyncMock(return_value=None)
+
+        rest_storage = MagicMock()
+        rest_storage.generate_key.return_value = f"{WS}/fake-uuid/report.xls"
+        rest_storage.upload_file = AsyncMock(return_value=f"{WS}/fake-uuid/report.xls")
+        rest_storage.build_storage_url.return_value = f"s3://docs/{WS}/fake-uuid/report.xls"
+        rest_storage._bucket = "docs"
+        rest_mq = AsyncMock()
+        rest_mq.publish = AsyncMock(return_value="1-0")
+
+        write_key = _write_key()
+        application = create_app()
+        application.dependency_overrides[get_api_key_info] = lambda: write_key
+        application.dependency_overrides[get_write_permission] = lambda: write_key
+        application.dependency_overrides[resolve_workspace_write] = lambda: ResolvedAuth(
+            key_info=write_key, workspace_id=WS
+        )
+        application.dependency_overrides[get_database] = lambda: rest_db
+        try:
+            with (
+                patch(
+                    "src.services.document_intake.get_storage_service",
+                    return_value=rest_storage,
+                ),
+                patch(
+                    "src.services.document_intake.get_mq_service",
+                    new_callable=AsyncMock,
+                    return_value=rest_mq,
+                ),
+            ):
+                transport = ASGITransport(app=application)
+                async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                    rest_response = await ac.post(
+                        "/v1/documents",
+                        headers={"X-API-Key": "ink_test_key"},
+                        files={
+                            "file": (
+                                "report.xls",
+                                io.BytesIO(b"\xd0\xcf\x11\xe0 fake OLE compound file bytes"),
+                                "application/vnd.ms-excel",
+                            )
+                        },
+                    )
+        finally:
+            application.dependency_overrides.clear()
+
+        assert rest_response.status_code == 400
+        rest_detail = rest_response.json()["detail"]
+        # Additive, not a replacement (#192) -- the full generic allow-list
+        # is still there, distinguishing this from the .doc/.msg case above.
+        assert "Allowed types:" in rest_detail
+        assert "legacy .xls format" in rest_detail
+        assert ".xlsx" in rest_detail
+        rest_storage.upload_file.assert_not_awaited()
+        rest_db.create_or_reset_pending_document.assert_not_awaited()
+        rest_mq.publish.assert_not_awaited()
+
+        # --- MCP: declared content_type, the scenario this fix covers ------
+        # (an OMITTED content_type for "report.xls" defaults to text/plain
+        # via `_default_upload_content_type` -- a separate, pre-existing
+        # behavior this issue does not change; declaring the binary MIME
+        # explicitly is the realistic shape of an .xls upload attempt.)
+        mcp_db = _mock_db()
+        mcp_result = await _call_mcp_tool(
+            "upload_document",
+            {
+                "api_key": "ink_k",
+                "filename": "report.xls",
+                "content": "pretend this is spreadsheet text",
+                "content_type": "application/vnd.ms-excel",
+            },
+            mcp_db,
+        )
+
+        assert "Error" in mcp_result[0].text
+        assert "legacy .xls format" in mcp_result[0].text
+        assert ".xlsx" in mcp_result[0].text
+        mcp_db.create_or_reset_pending_document.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
 # Upload: a NEWLY-ACCEPTED type's magic-byte mismatch -- both surfaces
 # (#121/#122). Same contract as TestUploadContentTypeMismatchParity above,
 # pinned separately for a type that did not exist before this workstream, so
@@ -1056,3 +1158,233 @@ class TestExpiredKeyDispatcherParity:
         result = await _call_mcp_tool("list_documents", {"api_key": "ink_k"}, db)
 
         assert "Error" not in result[0].text
+
+
+# ---------------------------------------------------------------------------
+# Chunk CRUD (#133): vector-store failure parity REST ↔ MCP
+# ---------------------------------------------------------------------------
+
+
+def _sample_chunk(chunk_index: int = 0, content: str = "text"):
+    from src.models.document import DocumentChunk
+
+    return DocumentChunk(
+        id="10",
+        document_id="doc-1",
+        content=content,
+        chunk_index=chunk_index,
+        token_count=1,
+        metadata={"content_hash": "h"},
+    )
+
+
+class TestChunkCreateVectorDownParity:
+    """REST create returns 503 after compensating PG delete (Sprint 2 unit
+    tests). MCP must surface Error and roll back the appended row."""
+
+    async def test_mcp_create_vector_down_compensates_pg_row(self):
+        db = _mock_db()
+        db.append_document_chunk = AsyncMock(return_value=_sample_chunk(4, "new"))
+        db.delete_document_chunk = AsyncMock(return_value=_sample_chunk(4, "new"))
+        failing_search = AsyncMock()
+        failing_search.upsert_chunk_vector = AsyncMock(side_effect=RuntimeError("weaviate down"))
+
+        with patch(
+            "src.services.chunk_writes.get_search_service",
+            new=AsyncMock(return_value=failing_search),
+        ):
+            result = await _call_mcp_tool(
+                "create_chunk",
+                {"api_key": "ink_k", "document_id": "doc-1", "content": "new"},
+                db,
+            )
+
+        assert "Error" in result[0].text
+        db.delete_document_chunk.assert_awaited_once_with("doc-1", WS, 4)
+
+    async def test_rest_create_vector_down_returns_503(self):
+        key = _write_key()
+        db = _mock_db()
+        db.append_document_chunk = AsyncMock(return_value=_sample_chunk(4, "new"))
+        db.delete_document_chunk = AsyncMock(return_value=_sample_chunk(4, "new"))
+        failing_search = AsyncMock()
+        failing_search.upsert_chunk_vector = AsyncMock(side_effect=RuntimeError("weaviate down"))
+        application = create_app()
+        application.dependency_overrides[resolve_workspace_write] = lambda: ResolvedAuth(
+            key_info=key, workspace_id=WS
+        )
+        application.dependency_overrides[get_database] = lambda: db
+        try:
+            with patch(
+                "src.services.chunk_writes.get_search_service",
+                new=AsyncMock(return_value=failing_search),
+            ):
+                transport = ASGITransport(app=application)
+                async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                    response = await ac.post(
+                        "/v1/chunks/doc-1",
+                        headers={"X-API-Key": "ink_test"},
+                        json={"content": "new"},
+                    )
+        finally:
+            application.dependency_overrides.clear()
+
+        assert response.status_code == 503
+        db.delete_document_chunk.assert_awaited_once_with("doc-1", WS, 4)
+
+
+class TestChunkUpdateVectorDownParity:
+    async def test_mcp_update_vector_down_restores_prior_content(self):
+        db = _mock_db()
+        prior = _sample_chunk(1, "old")
+        updated = _sample_chunk(1, "new")
+        updated.metadata = {"content_hash": "nh"}
+        db.get_document_chunk_by_index = AsyncMock(return_value=prior)
+        db.update_document_chunk = AsyncMock(side_effect=[updated, prior])
+        failing_search = AsyncMock()
+        failing_search.upsert_chunk_vector = AsyncMock(side_effect=RuntimeError("embed fail"))
+
+        with patch(
+            "src.services.chunk_writes.get_search_service",
+            new=AsyncMock(return_value=failing_search),
+        ):
+            result = await _call_mcp_tool(
+                "edit_chunk",
+                {
+                    "api_key": "ink_k",
+                    "document_id": "doc-1",
+                    "chunk_index": 1,
+                    "content": "new",
+                },
+                db,
+            )
+
+        assert "Error" in result[0].text
+        assert db.update_document_chunk.await_count == 2
+        restore_call = db.update_document_chunk.await_args_list[1]
+        assert restore_call.args[3] == "old"
+        assert restore_call.kwargs.get("only_if_content_hash") == "nh"
+
+    async def test_rest_update_vector_down_restores_prior_content(self):
+        key = _write_key()
+        db = _mock_db()
+        prior = _sample_chunk(1, "old")
+        updated = _sample_chunk(1, "new")
+        updated.metadata = {"content_hash": "nh"}
+        db.get_document_chunk_by_index = AsyncMock(return_value=prior)
+        db.update_document_chunk = AsyncMock(side_effect=[updated, prior])
+        failing_search = AsyncMock()
+        failing_search.upsert_chunk_vector = AsyncMock(side_effect=RuntimeError("embed fail"))
+        application = create_app()
+        application.dependency_overrides[resolve_workspace_write] = lambda: ResolvedAuth(
+            key_info=key, workspace_id=WS
+        )
+        application.dependency_overrides[get_database] = lambda: db
+        try:
+            with patch(
+                "src.services.chunk_writes.get_search_service",
+                new=AsyncMock(return_value=failing_search),
+            ):
+                transport = ASGITransport(app=application)
+                async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                    response = await ac.patch(
+                        "/v1/chunks/doc-1/index/1",
+                        headers={"X-API-Key": "ink_test"},
+                        json={"content": "new"},
+                    )
+        finally:
+            application.dependency_overrides.clear()
+
+        assert response.status_code == 503
+        assert db.update_document_chunk.await_count == 2
+        restore_call = db.update_document_chunk.await_args_list[1]
+        assert restore_call.args[3] == "old"
+        assert restore_call.kwargs.get("only_if_content_hash") == "nh"
+
+
+class TestChunkDeleteVectorDownParity:
+    async def test_mcp_delete_vector_down_leaves_pg_intact(self):
+        db = _mock_db()
+        db.get_document_chunk_by_index = AsyncMock(return_value=_sample_chunk(2))
+        db.delete_document_chunk = AsyncMock()
+        failing_search = AsyncMock()
+        failing_search.delete_chunk_vector = AsyncMock(side_effect=RuntimeError("weaviate down"))
+
+        with patch(
+            "src.services.chunk_writes.get_search_service",
+            new=AsyncMock(return_value=failing_search),
+        ):
+            result = await _call_mcp_tool(
+                "delete_chunk",
+                {"api_key": "ink_k", "document_id": "doc-1", "chunk_index": 2},
+                db,
+            )
+
+        assert "Error" in result[0].text
+        db.delete_document_chunk.assert_not_awaited()
+
+    async def test_rest_delete_vector_down_returns_503(self):
+        key = _write_key()
+        db = _mock_db()
+        db.get_document_chunk_by_index = AsyncMock(return_value=_sample_chunk(2))
+        db.delete_document_chunk = AsyncMock()
+        failing_search = AsyncMock()
+        failing_search.delete_chunk_vector = AsyncMock(side_effect=RuntimeError("weaviate down"))
+        application = create_app()
+        application.dependency_overrides[resolve_workspace_write] = lambda: ResolvedAuth(
+            key_info=key, workspace_id=WS
+        )
+        application.dependency_overrides[get_database] = lambda: db
+        try:
+            with patch(
+                "src.services.chunk_writes.get_search_service",
+                new=AsyncMock(return_value=failing_search),
+            ):
+                transport = ASGITransport(app=application)
+                async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                    response = await ac.delete(
+                        "/v1/chunks/doc-1/index/2",
+                        headers={"X-API-Key": "ink_test"},
+                    )
+        finally:
+            application.dependency_overrides.clear()
+
+        assert response.status_code == 503
+        db.delete_document_chunk.assert_not_awaited()
+
+
+class TestChunkEmptyContentParity:
+    """REST and MCP both reject empty content before any store write."""
+
+    async def test_mcp_create_empty_content_errors(self):
+        db = _mock_db()
+        result = await _call_mcp_tool(
+            "create_chunk",
+            {"api_key": "ink_k", "document_id": "doc-1", "content": ""},
+            db,
+        )
+        text = result[0].text.lower()
+        assert "error" in text or "non-empty" in text or "validation" in text
+        db.append_document_chunk.assert_not_awaited()
+
+    async def test_rest_create_empty_content_returns_422(self):
+        key = _write_key()
+        db = _mock_db()
+        application = create_app()
+        application.dependency_overrides[resolve_workspace_write] = lambda: ResolvedAuth(
+            key_info=key, workspace_id=WS
+        )
+        application.dependency_overrides[get_database] = lambda: db
+        try:
+            transport = ASGITransport(app=application)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                response = await ac.post(
+                    "/v1/chunks/doc-1",
+                    headers={"X-API-Key": "ink_test"},
+                    json={"content": ""},
+                )
+        finally:
+            application.dependency_overrides.clear()
+
+        assert response.status_code == 422
+        db.append_document_chunk.assert_not_awaited()

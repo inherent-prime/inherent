@@ -4,6 +4,14 @@
 parameter, no document-level ACL, and no metadata filter on search. If two
 bodies of content must not reach the same caller, put them in two workspaces.
 
+## Local admin exception
+
+`GET /v1/admin/workspaces` and `GET /v1/admin/keys` intentionally list the
+whole stack for a local single operator. `ADMIN_API_ENABLED` defaults to
+`false`; disabled routes return `404`. Never enable this flag in SaaS or any
+multi-operator deployment. The API is read-only and never returns key values
+or hashes. MCP exposes no admin tools; agents use `whoami` for their own scope.
+
 Read this before you design a clearance, tenancy, or need-to-know scheme on
 top of Inherent.
 

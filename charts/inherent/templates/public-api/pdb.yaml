@@ -1,0 +1,15 @@
+{{- if .Values.publicApi.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: inh-public-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inherent.labels" . | nindent 4 }}
+    {{- include "inherent.selectorLabels" (dict "component" "public-api") | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.publicApi.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "inherent.selectorLabels" (dict "component" "public-api") | nindent 6 }}
+{{- end }}

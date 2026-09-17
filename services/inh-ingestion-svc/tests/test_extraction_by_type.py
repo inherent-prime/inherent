@@ -483,6 +483,39 @@ class TestXlsxFailurePaths:
 
         assert get_spec_for_mime("application/vnd.ms-excel") is None
 
+    def test_legacy_xls_rejection_names_xlsx(self):
+        """#192: dispatch is unchanged by the above (still unregistered,
+        still hard-fails) -- only the rejection message gains one bespoke,
+        actionable sentence naming the modern replacement. Full contract
+        coverage lives in inh-contracts' test_file_types.py
+        (TestLegacyFormatHint); this pins that the ingestion-svc side of the
+        same contract (no registry entry) and the message improvement are
+        both still true from this package's point of view."""
+        from inh_contracts.file_types import legacy_format_hint_for_mime
+
+        hint = legacy_format_hint_for_mime("application/vnd.ms-excel")
+        assert hint is not None
+        assert ".xlsx" in hint
+
+    def test_memory_error_during_construction_propagates_not_wrapped(self, monkeypatch):
+        """#215 pattern-sweep hit: `_extract_xlsx_text`'s `except Exception`
+        around `openpyxl.load_workbook()` construction had no `except
+        MemoryError: raise` carve-out (unlike `_extract_pdf_text` /
+        `_extract_docx_text`), so a MemoryError raised while OPENING a
+        pathological workbook was incorrectly reclassified as
+        `non_retryable=True` -- same defect class as #215, just at the
+        construction site rather than the (already-correctly-unwrapped) row
+        -iteration loop below it. Must propagate completely unconverted."""
+        import openpyxl
+
+        def _raise_memory_error(*args, **kwargs):
+            raise MemoryError("simulated: out of memory opening workbook")
+
+        monkeypatch.setattr(openpyxl, "load_workbook", _raise_memory_error)
+
+        with pytest.raises(MemoryError):
+            _extract_xlsx_text(b"irrelevant, load_workbook is mocked")
+
 
 class TestPptxFailurePaths:
     def test_corrupt_truncated_zip_raises_non_retryable(self):
@@ -616,6 +649,143 @@ class TestPptxFailurePaths:
         from inh_contracts.file_types import get_spec_for_mime
 
         assert get_spec_for_mime("application/vnd.ms-powerpoint") is None
+
+    def test_legacy_ppt_rejection_names_pptx(self):
+        """#192: same treatment as the xls case above -- dispatch unchanged,
+        message gains a bespoke sentence naming pptx."""
+        from inh_contracts.file_types import legacy_format_hint_for_mime
+
+        hint = legacy_format_hint_for_mime("application/vnd.ms-powerpoint")
+        assert hint is not None
+        assert ".pptx" in hint
+
+    def test_memory_error_during_construction_propagates_not_wrapped(self, monkeypatch):
+        """#215 pattern-sweep hit: `_extract_pptx_text`'s `except Exception`
+        around `Presentation()` construction had no `except MemoryError:
+        raise` carve-out (unlike `_extract_pdf_text` / `_extract_docx_text`),
+        so a MemoryError raised while OPENING a pathological deck was
+        incorrectly reclassified as `non_retryable=True` -- same defect
+        class as #215, just at the construction site rather than the
+        (already-correctly-unwrapped) slide-iteration loop below it. Must
+        propagate completely unconverted."""
+        import pptx
+
+        def _raise_memory_error(*args, **kwargs):
+            raise MemoryError("simulated: out of memory opening presentation")
+
+        monkeypatch.setattr(pptx, "Presentation", _raise_memory_error)
+
+        with pytest.raises(MemoryError):
+            _extract_pptx_text(b"irrelevant, Presentation is mocked")
+
+
+class TestPptxSlideNotesObjectModelDrift:
+    """#255: `_pptx_slide_notes` uses getattr() (slide is typed `object` --
+    python-pptx ships no usable stubs) so a genuine python-pptx object-model
+    change (an attribute renamed/removed) must not silently read as "this
+    slide has no notes" -- it must log a warning naming what's missing.
+
+    The issue's own suggestion to use pytest's `caplog` doesn't apply here:
+    as `test_formula_only_workbook_logs_a_diagnostic_warning` above already
+    documents, `structlog`'s warnings never reach `caplog` in this codebase
+    (not routed through `structlog.stdlib`), so these tests follow that same
+    established pattern -- monkeypatching the module's `logger.warning`.
+    """
+
+    @staticmethod
+    def _capture_warnings(monkeypatch):
+        import src.temporal.activities.extract as extract_module
+
+        calls = []
+        monkeypatch.setattr(
+            extract_module.logger, "warning", lambda msg, **kw: calls.append((msg, kw))
+        )
+        return calls
+
+    def test_has_notes_slide_false_is_silent(self, monkeypatch):
+        """(a) Legitimate 'no notes' (has_notes_slide present and False)
+        must not warn."""
+        from src.temporal.activities.extract import _pptx_slide_notes
+
+        calls = self._capture_warnings(monkeypatch)
+
+        class _FakeSlideNoNotes:
+            has_notes_slide = False
+
+        assert _pptx_slide_notes(_FakeSlideNoNotes()) is None
+        assert calls == []
+
+    def test_missing_has_notes_slide_attribute_warns(self, monkeypatch):
+        """(b) `has_notes_slide` absent entirely (object model changed) must
+        log a warning naming the missing attribute, then behave as no notes."""
+        from src.temporal.activities.extract import _pptx_slide_notes
+
+        calls = self._capture_warnings(monkeypatch)
+
+        class _FakeSlideNoAttribute:
+            """Deliberately has no has_notes_slide attribute at all."""
+
+        assert _pptx_slide_notes(_FakeSlideNoAttribute()) is None
+        assert len(calls) == 1
+        message, _kwargs = calls[0]
+        assert "has_notes_slide" in message
+
+    def test_has_notes_slide_true_but_notes_slide_missing_warns(self, monkeypatch):
+        """(c) `has_notes_slide=True` but `notes_slide` missing/None is an
+        unexpected shape (object model changed) -- must warn."""
+        from src.temporal.activities.extract import _pptx_slide_notes
+
+        calls = self._capture_warnings(monkeypatch)
+
+        class _FakeSlideBrokenNotesSlide:
+            has_notes_slide = True
+            # No notes_slide attribute -- simulates a renamed/removed attribute.
+
+        assert _pptx_slide_notes(_FakeSlideBrokenNotesSlide()) is None
+        assert len(calls) == 1
+        message, _kwargs = calls[0]
+        assert "notes_slide" in message
+
+    def test_has_notes_slide_true_but_text_frame_missing_warns(self, monkeypatch):
+        """(c) `has_notes_slide=True` and `notes_slide` present, but the
+        notes object's text-frame is missing -- also an unexpected shape,
+        must warn."""
+        from src.temporal.activities.extract import _pptx_slide_notes
+
+        calls = self._capture_warnings(monkeypatch)
+
+        class _FakeNotesSlideNoTextFrame:
+            """Deliberately has no notes_text_frame attribute."""
+
+        class _FakeSlideBrokenTextFrame:
+            has_notes_slide = True
+            notes_slide = _FakeNotesSlideNoTextFrame()
+
+        assert _pptx_slide_notes(_FakeSlideBrokenTextFrame()) is None
+        assert len(calls) == 1
+        message, _kwargs = calls[0]
+        assert "notes_text_frame" in message
+
+    def test_healthy_notes_chain_returns_text_without_warning(self, monkeypatch):
+        """Sanity check: a well-formed slide with real notes still returns
+        the notes text and never warns -- the new guards must not regress
+        the happy path."""
+        from src.temporal.activities.extract import _pptx_slide_notes
+
+        calls = self._capture_warnings(monkeypatch)
+
+        class _FakeTextFrame:
+            text = "  Speaker notes here.  "
+
+        class _FakeNotesSlide:
+            notes_text_frame = _FakeTextFrame()
+
+        class _FakeSlideWithNotes:
+            has_notes_slide = True
+            notes_slide = _FakeNotesSlide()
+
+        assert _pptx_slide_notes(_FakeSlideWithNotes()) == "Speaker notes here."
+        assert calls == []
 
 
 class TestPdfFailurePaths:
@@ -1100,6 +1270,94 @@ class TestSubtitleFailurePaths:
 
         with pytest.raises(MemoryError):
             _extract_subtitle_text(b"irrelevant, _decode_text is mocked", "sample.srt")
+
+
+class TestDocxFailurePaths:
+    """#215: `_extract_docx_text`'s broad `except Exception` wrapped BOTH the
+    `Document()` construction call AND the paragraph-iteration list
+    comprehension below it in the same `try` block -- a `MemoryError` raised
+    during paragraph iteration (not just construction) got reclassified as
+    `non_retryable=True`, permanently dead-lettering a load-dependent
+    failure that a retry (possibly on a less-contended worker) could
+    plausibly resolve. Mirrors `TestPdfFailurePaths` above exactly (#195's
+    construction-only-wrap precedent, which this fix now matches)."""
+
+    def test_memory_error_during_construction_propagates_not_wrapped(self, monkeypatch):
+        """MemoryError raised by `Document()` construction itself must
+        propagate completely unconverted -- not even as a differently
+        worded ApplicationError."""
+        import docx
+
+        def _raise_memory_error(*args, **kwargs):
+            raise MemoryError("simulated: out of memory parsing OOXML package")
+
+        monkeypatch.setattr(docx, "Document", _raise_memory_error)
+
+        with pytest.raises(MemoryError):
+            _extract_docx_text(b"irrelevant, Document is mocked", "sample.docx")
+
+    def test_exception_during_paragraph_iteration_propagates_not_wrapped(self, monkeypatch):
+        """A failure discovered lazily during paragraph iteration (the `for
+        p in doc.paragraphs if p.text.strip()` comprehension) -- e.g. a
+        MemoryError from a pathological/huge document -- must NOT be swept
+        into `non_retryable=True` by a broad except around the whole try
+        block. The try/except is scoped to ONLY `Document()` construction,
+        mirroring `_extract_pdf_text`'s construction-only wrap; the
+        paragraph-iteration comprehension itself is left unwrapped below the
+        try block."""
+        import docx
+
+        class _ExplodingDocument:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            @property
+            def paragraphs(self):
+                raise MemoryError("simulated: OOM iterating paragraphs")
+
+        monkeypatch.setattr(docx, "Document", _ExplodingDocument)
+
+        with pytest.raises(MemoryError):
+            _extract_docx_text(b"irrelevant, Document is mocked", "sample.docx")
+
+    def test_non_memory_exception_during_paragraph_iteration_propagates_not_wrapped(
+        self, monkeypatch
+    ):
+        """Same as above but for a non-MemoryError exception discovered
+        during paragraph iteration -- also must NOT become a non-retryable
+        ApplicationError, since the paragraph-iteration comprehension sits
+        entirely outside the try/except now (mirrors PDF's page-iteration
+        test: a per-paragraph failure a structurally-valid `Document()`
+        construction alone cannot detect stays retryable, not converted)."""
+        import docx
+
+        class _ExplodingDocument:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            @property
+            def paragraphs(self):
+                raise RuntimeError("simulated: corrupt paragraph run on p.12")
+
+        monkeypatch.setattr(docx, "Document", _ExplodingDocument)
+
+        with pytest.raises(RuntimeError, match="simulated: corrupt paragraph run"):
+            _extract_docx_text(b"irrelevant, Document is mocked", "sample.docx")
+
+    def test_value_error_on_construction_still_raises_non_retryable(self):
+        """The existing ValueError-on-construction path (wrong OOXML content
+        type, e.g. a genuine XLSX mislabeled as DOCX) must still become a
+        non-retryable ApplicationError -- this fix narrows what the try/
+        except covers, but must not accidentally widen the UNWRAPPED surface
+        to cover construction itself. Full coverage of this path (message
+        content, heap-address-repr scrubbing) lives in
+        `test_genuine_xlsx_fed_to_docx_extractor_fails_loudly_not_silently`
+        below; this pins just the non_retryable contract next to the two
+        propagates-unwrapped tests above for an at-a-glance contrast."""
+        xlsx_bytes = _read("sample.xlsx")
+        with pytest.raises(ApplicationError, match="DOCX extraction failed") as exc_info:
+            _extract_docx_text(xlsx_bytes, "report.docx")
+        assert exc_info.value.non_retryable
 
 
 def test_genuine_xlsx_fed_to_docx_extractor_fails_loudly_not_silently():

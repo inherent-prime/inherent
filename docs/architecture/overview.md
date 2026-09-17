@@ -110,25 +110,31 @@ flowchart LR
 
 ### 2.1 Intake (public-api, synchronous, request-scoped)
 
-`intake_document` (`services/inh-public-api-svc/src/services/document_intake.py:37-365`)
+`intake_document` (`services/inh-public-api-svc/src/services/document_intake.py:38-373`)
 is the single validate/dedup/store/enqueue path shared by REST
 (`POST /v1/documents`) and the MCP `upload_document` tool — a pure move, not
 two implementations (`document_intake.py:1-9`). In order:
 
-1. **Explicit-unsupported check** (`document_intake.py:108-110`) — a format
+1. **Explicit-unsupported check** (`document_intake.py:109-111`) — a format
    with a real replacement (legacy `.doc`, Outlook `.msg`) is rejected with a
-   message naming the replacement, before the generic lookup.
+   message naming the replacement, before the generic lookup. A legacy format
+   with no dedicated replacement flow yet (`.xls`, `.ppt`) instead falls
+   through to the generic-lookup miss below, whose message gains one bespoke
+   sentence naming its replacement (`.xlsx` / `.pptx`) on top of the full
+   allow-list — see `legacy_format_hint_for_mime`
+   (`inh_contracts/file_types.py`) and
+   [Supported file types](../reference/file-types.md#validation-at-upload).
 2. **Three-signal type validation.** An upload carries three independent
    signals — declared `Content-Type`, filename extension, and actual bytes —
    and any pairwise disagreement is caught:
-   - `get_spec_for_upload` (`document_intake.py:117`) resolves the declared
+   - `get_spec_for_upload` (`document_intake.py:118`) resolves the declared
      MIME type against `FILE_TYPE_REGISTRY`; falls back to the filename
      extension only when the declared type is generic/absent.
-   - `check_extension_consistency` (`document_intake.py:132`) — a filename
+   - `check_extension_consistency` (`document_intake.py:140`) — a filename
      extension registered to a *different* type than the declared one is
      rejected (a real contradiction); text extensions never trigger this
      (`text/plain` is a truthful `Content-Type` for `.md`/`.csv`/etc).
-   - `sniff_content_type` (`document_intake.py:162`) — the bytes' magic
+   - `sniff_content_type` (`document_intake.py:170`) — the bytes' magic
      signature must agree with the declared type.
    See [Supported file types](../reference/file-types.md#validation-at-upload)
    for the full validation table; this page's contribution is *why* three
@@ -137,7 +143,7 @@ two implementations (`document_intake.py:1-9`). In order:
    extension, or bytes that don't match either).
 3. **Size validation** against the format's `max_size_bytes` override or the
    global 50 MB cap.
-4. **Dedup** (`document_intake.py:178-226`) — `(workspace_id, content_hash)`
+4. **Dedup** (`document_intake.py:186-234`) — `(workspace_id, content_hash)`
    first, then `(workspace_id, filename)`. A content-hash match on a non-
    `failed` document short-circuits entirely: no S3 write, no pending-row
    reset, no MQ publish — re-uploading identical bytes is a pure read. A
@@ -145,10 +151,10 @@ two implementations (`document_intake.py:1-9`). In order:
    through and re-indexes under the same `document_id` (#60's edited-content
    reindex).
 5. **S3 upload**, then **a durable `pending` row** written *before*
-   enqueueing (`document_intake.py:254-278`) — so `GET /v1/documents/{id}`
+   enqueueing (`document_intake.py:262-286`) — so `GET /v1/documents/{id}`
    can find the document immediately instead of 404ing until ingestion
    finishes, and so the upload is recoverable if the next step fails.
-6. **Publish `document.uploaded`** (`document_intake.py:309-311`). If this
+6. **Publish `document.uploaded`** (`document_intake.py:317-319`). If this
    fails, the file is already durably stored — the response is `201` with
    `status="failed"` (never a request failure), and the row is marked
    failed through `mark_document_failed_with_retry` (§7).
@@ -187,8 +193,8 @@ activity with its own timeout and retry policy:
 | Fetch from storage | `fetch_document` | 2 min | 3 (2–30s) | Propagates |
 | Extract text | `extract_text` | 5 min | 3 (2–30s), **unless non-retryable** | Propagates (or fails on attempt 1 for deterministic errors, §7) |
 | Chunk text | `chunk_text` | 2 min | 2 (1–10s) | Propagates |
-| Store PostgreSQL | `store_in_postgresql` | 60s | 5 (2–30s) | Propagates → workflow marks the document `failed` + dead-letters (§7) |
-| Store Weaviate (parallel with PG) | `store_in_weaviate` | 60s | 5 (2–30s) | Propagates → same failure path, even if PG already succeeded (§3) |
+| Store PostgreSQL | `store_in_postgresql` | 60s | 5 (2–30s) | Propagates → workflow marks the document `failed` + dead-letters, then raises so Temporal close status is Failed (#230) |
+| Store Weaviate (parallel with PG) | `store_in_weaviate` | scales with chunk count for **serial** batch worst-case (one-batch min ≈130s covers per-batch retries; cap 2h; `weaviate_store_budget.py` + `embedding_defaults`, #228, cap raised #298) + `heartbeat_timeout` ≈200s (#298) | 5 (5–60s, #229) | Same failure path as PG; activity embeds under bounded parallel batch concurrency (`EMBEDDING_MAX_CONCURRENCY` default 2, #231 phase 1) but the timeout always budgets serial completion so lowering concurrency cannot under-budget. **#298:** the activity now heartbeats real per-batch embedding progress (`weaviate.py`'s `store_chunks_with_tenant` / `embedder.embed_texts_with_progress`), paired with `heartbeat_timeout` on this call site — a worker that stops advancing is caught in roughly one batch's worst-case retry window instead of waiting out StartToClose, which is what made raising the StartToClose cap from 15m to 2h safe (a 60,215-chunk document needs well over 15m even with zero retries; it hit the old cap on every attempt). **Residual (#229):** activity-level Temporal retries still re-embed the whole document from scratch — heartbeating detects a stall faster, it does not make the retry resumable; no durable checkpoint yet. |
 | Update workspace stats | `update_workspace_stats` | 15s | 3 (1–5s) | Propagates |
 | Publish completion | `publish_completion` | 15s | 3 (1–10s) | Best-effort — logged, never flips a complete ingestion to failed |
 | Record dead-letter (on failure) | `record_dead_letter` | 15s | 2 (1–5s) | Best-effort — must never mask the original error |
@@ -199,16 +205,18 @@ activity with its own timeout and retry policy:
 lines 296-654.)
 
 **What "processed" guarantees.** `store_in_postgresql` and `store_in_weaviate`
-run **in parallel** (`asyncio.gather`, `document_ingestion.py:485`) — chunk
-rows and vectors are written concurrently, not sequentially. If PostgreSQL
-storage fails, the workflow fails immediately (`:490-516`) — PostgreSQL is
-the relational truth, so a failure here is unconditional. If Weaviate storage
-fails *after* PostgreSQL succeeded (`:518-554`), the workflow **still marks
-the whole document `failed`**, deliberately: "a doc with no vectors in
-Weaviate is invisible to the search API — the customer sees `status=ready`
-and gets zero results... PG-only 'ghost' docs are worse than a clear
-failure" (`:518-527`, verbatim comment). A document is never left half-
-indexed and reported healthy.
+run **in parallel** (`asyncio.gather`) — chunk rows and vectors are written
+concurrently, not sequentially. If PostgreSQL storage fails, the workflow
+marks the document `failed`, dead-letters, publishes `document.failed`, then
+**raises** so Temporal close status is `Failed` (#230) — PostgreSQL is the
+relational truth, so a failure here is unconditional. If Weaviate storage
+fails *after* PostgreSQL succeeded, the same path runs, deliberately: "a doc
+with no vectors in Weaviate is invisible to the search API — the customer
+sees `status=ready` and gets zero results... PG-only 'ghost' docs are worse
+than a clear failure". A document is never left half-indexed and reported
+healthy. Returning `WorkflowResult(success=False)` without raising used to
+leave Temporal status `Completed` for every failure (#230 incident: 70
+losses, zero Failed workflows).
 
 ```mermaid
 sequenceDiagram
@@ -291,20 +299,24 @@ stale run instead of raising `WorkflowAlreadyStartedError` and stalling
 behind it.
 
 **Terminating a Temporal workflow does not stop its already-dispatched
-activities.** Temporal only interrupts a running activity via a heartbeat
-round-trip; this codebase heartbeats nothing (`docs/developer/learnings.md`
-#110: `grep -rn heartbeat src/` returns nothing). Termination closes the
-*workflow* execution and stops delivering it new workflow tasks — but a
-`store_in_postgresql` / `store_in_weaviate` activity the terminated run
-already dispatched keeps running on the worker, unaware, and can commit
-**after** the newer run's write. Without a guard, a superseded run's late
-write silently reverts the document to stale content while the newer run
-already reported `status='processed'`.
+activities.** Termination closes the *workflow* execution and stops
+delivering it new workflow tasks server-side — it does not notify any
+already-dispatched activity at all, heartbeating or not, so this is
+unaffected by #298 below. A `store_in_postgresql` / `store_in_weaviate`
+activity the terminated run already dispatched keeps running on the worker,
+unaware, and can commit **after** the newer run's write. Without a guard, a
+superseded run's late write silently reverts the document to stale content
+while the newer run already reported `status='processed'`.
 
 The fix is an **application-level fencing token**, not a cancellation
-mechanism — cheaper to reason about correctly than wiring heartbeats through
-every activity (`docs/developer/learnings.md` #110). Two columns on
-`processed_documents`, added across two migrations:
+mechanism — cheaper to reason about correctly than relying on termination
+reaching in-flight activity work (`docs/developer/learnings.md` #110).
+(`store_in_weaviate` now heartbeats, #298 below — but only for a different
+purpose, detecting a worker that has *stopped making progress within its
+own attempt*, delivered via `heartbeat_timeout`. That is orthogonal to
+termination, which never asks a running activity to cancel in the first
+place, so the fencing token above is still what's load-bearing here.) Two
+columns on `processed_documents`, added across two migrations:
 
 - **`active_run_id`** (migration `016_active_run_fencing.sql`) — the run
   currently allowed to write. `create_pending_document`
@@ -515,6 +527,20 @@ current behavior. Treat `chunking_hint`-driven chunking as **planned, not
 shipped** — the mechanism described in §6.1–6.2 is what a document uploaded
 to `main` actually goes through today.
 
+> **Status update (2026-08-12): §6.2 and §6.3 above are stale.** #129 has since
+> merged to `main` (`7d99cea` + the review-blocker follow-up `9cc2d29`), so
+> `chunk_text` *does* read `chunking_hint` and `.xlsx` now dispatches to
+> `_chunk_by_rows` rather than `_chunk_by_sentences`. The giant-chunk mechanism
+> traced in §6.2 is still exactly right about the `sentences` splitter — a
+> 500-row spreadsheet fixture measured against it produces a 28,344-character
+> chunk — it just is no longer the path a spreadsheet takes. Live on the compose
+> stack, `docs/examples/sample-documents/e2e-tabular.xlsx` ingests to 51 chunks
+> with a 786-character maximum, pinned by
+> `services/inh-public-api-svc/tests/integration/test_compose_lifecycle.py::test_xlsx_chunks_stay_within_bounds`.
+> The same missing sub-sentence fallback survives on the *prose* path and is
+> tracked as #227. §6.1–6.3 are left as written rather than rewritten in place,
+> since they are the record of why the fix was needed.
+
 ## 7. Durability and failure
 
 The retry table in §2.3 is the mechanical policy; this section is what it
@@ -646,11 +672,14 @@ diagnostic, not the document's status of record.
   is unmerged as of this writing; whether/when it lands, and whether the
   measured 15.7%/+11% deltas it self-reports hold after eval-gate review, is
   not something the current codebase can confirm.
-- **The embedding model's actual `max_input_length`.** `embedder.py`'s
-  `truncate=True` comment names 256 tokens (all-MiniLM-L6-v2), but the
-  configured/deployed model per `docker-compose.yml` and
-  `docs/reference/configuration.md` is `BAAI/bge-small-en-v1.5` (384-dim).
-  The two models may have different real input-length ceilings; this page
-  states the *mechanism* (TEI truncates silently) as fact, and does not
-  claim a specific token count is what's enforced in the deployed stack
-  today.
+- **The embedding model's actual `max_input_length`.** The `truncate=True`
+  comment in `inh_contracts.embedding.tei_provider` (#311 moved the TEI wire
+  adapter out of each service's `embedder.py` into the shared
+  `inh-contracts` package) deliberately no longer names a specific token
+  count or model — an earlier version of this comment named 256 tokens
+  (all-MiniLM-L6-v2) while the configured/deployed model per
+  `docker-compose.yml` and `docs/reference/configuration.md` is
+  `BAAI/bge-small-en-v1.5` (384-dim), and the two models have different real
+  input-length ceilings. This page states the *mechanism* (TEI truncates
+  silently) as fact, and does not claim a specific token count is what's
+  enforced in the deployed stack today.

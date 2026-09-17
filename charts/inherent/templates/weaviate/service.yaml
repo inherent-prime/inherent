@@ -1,0 +1,24 @@
+{{- if .Values.weaviate.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: weaviate
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inherent.labels" . | nindent 4 }}
+    {{- include "inherent.selectorLabels" (dict "component" "weaviate") | nindent 4 }}
+spec:
+  # ClusterIP, never exposed externally — see build spec "Never expose: ...
+  # Weaviate ...". Name MUST stay "weaviate" — WEAVIATE_URL=http://weaviate:8080
+  # is hardcoded across public-api and ingestion env (compose parity).
+  type: ClusterIP
+  selector:
+    {{- include "inherent.selectorLabels" (dict "component" "weaviate") | nindent 4 }}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+    - name: grpc
+      port: 50051
+      targetPort: grpc
+{{- end }}

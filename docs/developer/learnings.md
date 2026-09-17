@@ -10,6 +10,64 @@ this file — read the matching entry before touching the related area. Add an
 entry when a shipped defect teaches something a rule alone can't carry: one
 entry per root cause, newest first.
 
+## #298 — A budget cap sized for "hang" and a budget cap sized for "large but healthy" are different numbers (2026-08-30)
+
+**What happened.** #239 (closing #228's scaling gap) made `store_in_weaviate`'s
+`StartToClose` scale with chunk count via `weaviate_store_timeout(chunk_count)`
+— but capped it at `STORE_MAX_TIMEOUT_SECONDS = 900` (15m) "so a pathological
+multi-thousand-chunk doc cannot pin a worker slot." A 2026-08-17
+disaster-recovery replay of 545 documents still lost 64 — all chunk-heavy
+(`CUAD_v1.json`, 60,215 chunks, worst case). They failed deterministically on
+every attempt, uploaded *after* #239 had already landed.
+
+**Why.** The cap conflated two different questions with one number: "how long
+can a hang be allowed to waste a worker slot" and "how long may a document
+that is legitimately, slowly progressing be allowed to run." 900s was sized
+for neither in isolation — sized down from a worst-case-retry-storm formula
+meant to bound the first question, it also silently became the ceiling for
+the second. A 60,215-chunk document needs well over 15 minutes of wall clock
+to embed on CPU TEI even with **zero** retries; it hit the ceiling on every
+attempt, and retries changed nothing because a flat `StartToClose` cannot
+distinguish "still advancing, just slow" from "wedged" — it only knows
+"time's up." `asyncio.to_thread(embed_texts, ...)` made this worse: the
+entire document's embed ran as one opaque blocking call, so even the
+*retry-after-cancellation* case kept the old thread embedding in the
+background after Temporal had already given up on that attempt.
+
+**Fixed by.** Two changes that only work together:
+
+1. `embed_texts_with_progress` (`embedder.py`) drives the batch loop from an
+   asyncio coroutine instead of one blocking thread call, so
+   `store_chunks_with_tenant` can heartbeat real per-batch progress —
+   `activity.heartbeat()` after each batch's TEI round trip actually
+   returns, not on a timer. `heartbeat_timeout` (`weaviate_store_budget.
+   weaviate_store_heartbeat_timeout`, ~2× one batch's own worst-case retry
+   window) then catches a worker that has genuinely stopped advancing in
+   roughly one batch's worth of time, independent of the document's size.
+2. Only because (1) exists is it safe to raise `STORE_MAX_TIMEOUT_SECONDS`
+   900 → 7200 (embedding_defaults.py). Its job changed: it no longer bounds
+   how long a hang can waste a slot (heartbeat_timeout does that now) — it
+   only bounds how long a document that IS progressing may hold one.
+   Raising it alone, without (1), would have just moved the same
+   indistinguishable-hang problem further out instead of fixing it.
+
+**Rejected alternative: chunked continuation** (process embeddings in bounded
+batches *per activity invocation*, with the workflow driving multiple
+invocations for a large document). Also fixes the symptom, but restructures
+the workflow shape and adds a real resumability story this fix does not
+attempt — heartbeating is Temporal-native, requires no workflow change, and
+was judged the smaller, more localized fix for the immediate failure. The
+residual (#229) chunked continuation would have addressed — a retried
+attempt re-embeds the WHOLE document from scratch, no durable checkpoint —
+is unchanged by heartbeating and remains open.
+
+**Lesson.** When a single budget constant is protecting against two
+different failure modes ("this is broken" vs. "this is just large"), check
+whether raising it for the second case silently weakens protection against
+the first — and whether a cheaper, more targeted signal (heartbeat_timeout,
+scoped to "no progress") can take over the first job so the shared number
+only has to serve the second.
+
 ## #237 — A quality gate whose tolerance is finer than its corpus's resolution reports noise as regression (2026-08-12)
 
 **What happened.** The compose retrieval-eval hard gate failed every push and
@@ -65,6 +123,45 @@ free to narrate both polarities of a decision it later amended.
 **Fixed by.** #237 re-seeded the baseline and pinned the docs claim; #236
 tracks the three structural fixes (derived tolerance, `reseed --reason`
 subcommand, path-filtered required check on ranking-affecting PRs).
+
+## #228 / #229 / #230 — Bulk-upload embed path: budget, retry amplification, silent Temporal Completed (2026-08-10)
+
+**What happened.** An 83-PDF bulk upload lost 70 documents. Every failure was
+`store_in_weaviate` blowing a flat 60s `StartToClose` under TEI queue
+saturation. Temporal reported **all** `DocumentIngestionWorkflow` runs as
+`Completed`. Operators looking at Temporal saw a healthy pipeline.
+
+**Why.** Three stacked defects:
+
+1. **#228** — one activity embeds the whole document; budget was constant,
+   work is O(batches).
+2. **#229** — each of 5 retries re-embeds from scratch with short lockstep
+   backoff, feeding the same TEI queue that caused the timeout (~5× discard
+   work; 24-minute congestion collapse).
+3. **#230** — the workflow marked Mongo/DLQ/MQ correctly then
+   `return WorkflowResult(success=False)`. Temporal close status stays
+   `Completed`; default workflow-failure monitoring never fires.
+
+**Learnings.**
+
+- A workflow that "handles" failure by returning a structured result is
+  `Completed` to Temporal. If ops alert on Failed/TimedOut, that path is
+  invisible. Raise after cleanup (or set a registered search attribute) when
+  the document outcome is failed.
+- Activity timeouts must scale with the work inside them, or the work must
+  be split into activities whose budgets are bounded.
+- Retries that repeat all prior work under a saturated shared dependency are
+  a load amplifier, not recovery. Prefer per-batch HTTP retry+jitter and
+  longer activity backoff before (or while) building durable checkpoints.
+- Pattern sweep: any other workflow that returns success=False without
+  raising has the same monitoring blind spot (`ChunkEditWorkflow` still
+  does — track separately if needed).
+
+**Mandatory pattern.** Terminal document failure in
+`DocumentIngestionWorkflow`: side-effects (status, DLQ, completion event)
+then `raise ApplicationError(..., type="DocumentIngestionFailed",
+non_retryable=True)` after `finally` cleanup. Map that type at wait=true
+API / sync trigger call sites to structured `success=False`, not HTTP 500.
 
 ## #225 — A green test suite says nothing about the image when the two resolve dependencies differently (2026-08-09)
 
@@ -215,19 +312,26 @@ on the MQ path) resolves the collision but was shipped with four gaps, all
 from the same wrong assumption: that terminating a Temporal WORKFLOW stops
 its work.
 
-- **It doesn't.** `grep -rn heartbeat src/` returns nothing — no activity in
-  this service heartbeats, and no `cancellation_type` is set on any
-  `execute_activity` call. Temporal only interrupts a running activity via a
-  heartbeat round-trip; termination closes the workflow execution
-  server-side and never delivers another workflow task, so an
-  already-dispatched `store_in_postgresql` / `store_in_weaviate` from the
-  terminated (superseded) run keeps running on the worker, unaware, and its
-  eventual write can land AFTER the newer run already committed — silently
-  reverting the document to stale content while reporting
-  `status='processed'`. Fixed with a fencing token
+- **It doesn't.** At the time of this incident, `grep -rn heartbeat src/`
+  returned nothing — no activity in this service heartbeated, and no
+  `cancellation_type` was set on any `execute_activity` call. Temporal only
+  interrupts a running activity via a heartbeat round-trip; termination
+  closes the workflow execution server-side and never delivers another
+  workflow task, so an already-dispatched `store_in_postgresql` /
+  `store_in_weaviate` from the terminated (superseded) run keeps running on
+  the worker, unaware, and its eventual write can land AFTER the newer run
+  already committed — silently reverting the document to stale content
+  while reporting `status='processed'`. Fixed with a fencing token
   (`processed_documents.active_run_id`, migration 016): every run claims the
   document as its first action, and the store activities only commit when
-  the claim still matches the run doing the write.
+  the claim still matches the run doing the write. (**Update, #298:**
+  `store_in_weaviate` now heartbeats real per-batch embedding progress, so
+  the grep claim above no longer holds verbatim — but the fencing token
+  above is still what's load-bearing for THIS defect. #298's heartbeat_
+  timeout catches a worker that stalls mid-attempt; it has nothing to do
+  with, and does not change, how workflow *termination* is delivered to an
+  already-dispatched activity — termination still never asks it to cancel.
+  No `cancellation_type` is set anywhere still.)
 - **The staging-cleanup justification for the above was itself false, and
   would have shipped as a citation, not a check.** The PR claimed orphaned
   staging rows were "covered by a 1-hour safety net"

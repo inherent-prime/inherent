@@ -1,0 +1,24 @@
+{{- if .Values.publicApi.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: inh-public-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inherent.labels" . | nindent 4 }}
+    {{- include "inherent.selectorLabels" (dict "component" "public-api") | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: inh-public-api
+  minReplicas: {{ .Values.publicApi.replicas.min }}
+  maxReplicas: {{ .Values.publicApi.replicas.max }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.publicApi.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}

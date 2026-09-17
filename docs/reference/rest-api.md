@@ -39,6 +39,29 @@ ACL or clearance parameter. See the
 
 ## Endpoints
 
+### Identity
+
+| Method | Path | Permission | Purpose |
+| --- | --- | --- | --- |
+| GET | `/v1/whoami` | Any active key | Return the key id/name, owner, binding, authoritative workspace set, engine version, and reached endpoint. Never returns key material or hashes |
+
+`workspace_id` is the key's binding (`null` for a user-scoped key).
+`workspace_ids` comes from the same authorization rule used by REST and MCP.
+
+### Local admin listings
+
+`ADMIN_API_ENABLED=false` (default) hides both routes with `404`. Set it to
+`true` only on a local single-operator stack. When enabled, any valid API key
+can list the whole stack; these routes intentionally do not apply tenant
+scoping and therefore must remain disabled in SaaS.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/v1/admin/workspaces` | Page workspace id/name/owner and document count |
+| GET | `/v1/admin/keys` | Page key metadata, prefix, scope, permissions, status, and timestamps; never returns a key or hash |
+
+Both accept `page` (default 1) and `page_size` (default 20, capped at 100).
+
 ### Health & observability (no auth)
 
 | Method | Path | Purpose |
@@ -69,13 +92,75 @@ Re-uploading the same filename into the same workspace reuses the existing
 `document_id` and reindexes in place, removing the superseded chunks from
 retrieval — see [Keeping content current](../keeping-content-current.md).
 
+### Conversations
+
+A conversation is append-only and grows, which `/v1/documents` cannot serve
+without either re-uploading the whole history on every turn or flooding the
+embedding pipeline with one tiny document per turn. Use these endpoints for
+chat/agent transcripts instead.
+
+| Method | Path | Permission | Purpose |
+| --- | --- | --- | --- |
+| POST | `/v1/conversations/{external_id}/turns` | `write` | Append one or more turns. Body: `{"turns": [{"turn_id", "role": "user"\|"assistant", "text", "ts", "client"}, ...]}`. `202` with `accepted` count. Publishes asynchronously — processing happens in the background, same as document upload. A duplicate `turn_id` (client retry, MQ redelivery) is a no-op |
+| GET | `/v1/conversations/{external_id}` | `read` | Turn count, chunk count, `last_flushed_at`, `status`. `404` if not found |
+| DELETE | `/v1/conversations/{external_id}` | `write` | Delete the conversation + vectors + chunks. `204`; `404` if already gone |
+
+`external_id` is a caller-chosen identifier for the conversation (e.g. a
+session or thread id from your application) — the first turn ever posted for
+a given `external_id` creates the conversation; every later turn appends to
+it. Turns buffer server-side and flush in size-or-idle batches (not one
+store operation per turn) — the embedding-pipeline protection this exists
+for — so `GET` immediately after `POST` may not yet reflect the latest
+turns; `last_flushed_at` shows when they last landed. Each chunk is stamped
+with `turn_index`/`role`/`ts`/`client` (stored in chunk metadata and as
+Weaviate object properties) for speaker attribution — not yet surfaced in
+`POST /v1/search` response fields. Turn text is redacted for common
+credential shapes (API keys, JWTs, connection strings, private keys) before
+it is chunked or stored — best-effort pattern matching, not a guarantee;
+some credential shapes with no recognizable prefix and low apparent entropy
+can pass through unredacted, so do not represent this as a complete
+guarantee to end users.
+
+Conversation chunks are **exempt from the `is_stale` freshness rule** that
+applies to documents. Each flush appends only its own new chunks and leaves
+earlier ones untouched, so a live conversation's opening turns keep their
+original `ingested_at` — ageing them out would flag a perfectly current
+conversation as stale, and there is no re-upload or refresh path to clear it.
+`is_stale` is therefore always `false` on a conversation chunk, in both
+`POST /v1/search` results and `GET /v1/documents/{id}/lineage`, whatever its
+age. See [Keeping content current](../keeping-content-current.md).
+
 ### Chunks
 
 | Method | Path | Permission | Purpose |
 | --- | --- | --- | --- |
 | GET | `/v1/chunks/{document_id}` | `read` | All chunks (`content`, `chunk_index`, `token_count`, `metadata`) — unbounded, unlike `/context` below |
+| POST | `/v1/chunks/{document_id}` | `write` | Append one chunk at `max(chunk_index)+1` (#133 Option A). Body: `{"content": "..."}` (min 1 char, max 100,000). Returns the new `DocumentChunk` (`201`) |
 | GET | `/v1/chunks/{document_id}/context` | `read` | Document metadata + a bounded window of chunks + combined `full_text`. Query: `max_chars` (1–100,000, default 20,000), `offset` (chars, default 0). Response adds `truncated`, `total_chars`, `offset`, `next_offset` — see below |
-| GET | `/v1/chunks/{document_id}/{chunk_id}` | `read` | Single chunk. Cross-tenant chunk reads as `404` |
+| GET | `/v1/chunks/{document_id}/{chunk_id}` | `read` | Single chunk by BIGSERIAL `id`. Cross-tenant chunk reads as `404` |
+| PATCH | `/v1/chunks/{document_id}/index/{chunk_index}` | `write` | Edit chunk by stable `chunk_index` — PG update + Weaviate re-embed with new vector. Body: `{"content": "..."}` (min 1 char, max 100,000). Empty content is `422` |
+| DELETE | `/v1/chunks/{document_id}/index/{chunk_index}` | `write` | Hard-delete one chunk (Weaviate first, then PG). Leaves gaps; no sibling re-index. `204` |
+
+**Ordering contract (#133 Option A):** `chunk_index` is a **stable id**, not a
+dense `0..N` sequence. Create always appends at `max+1`; Delete hard-deletes
+and leaves gaps. Mid-document insert is out of scope. Vector-store failure on
+Create/Update/Delete returns `503` after compensation (Create rolls back the
+PG row; Update restores prior content only if this request's `content_hash` is
+still on the row; Delete leaves the PG row intact).
+
+**URL identity:** `GET /v1/chunks/{document_id}/{chunk_id}` keys on the
+BIGSERIAL `id`. `PATCH` / `DELETE` use `/index/{chunk_index}` so a client
+cannot read one row and write a different row at the same URL.
+
+**Offsets:** chunks created through this write path have no source span
+(`start_char` / `end_char` are omitted, not `0`). Citation consumers must
+treat missing offsets as "not in the source file". `chunking_strategy` is
+`manual_append` (evals/quality scoring do not switch on this value).
+
+**Two edit paths until Sprint 4:** public-API PATCH (this table) and
+ingestion-svc `PATCH /chunks/{doc}/{idx}` + `ChunkEditWorkflow` both exist.
+API keys never hit ingestion; Sprint 4 retires the internal path. Do not
+call both for the same chunk concurrently.
 
 `GET /v1/chunks/{document_id}/context` bounds BOTH `full_text` and `chunks`
 to the same `[offset, offset + max_chars)` window over the document's
@@ -97,9 +182,49 @@ returning the entire document must now check `truncated` and page with
 | GET | `/v1/evals/scorecard` | `search` | Workspace retrieval health: `answer_rate`, `verdict_distribution`, `corpus_gaps`, `eval_case_count`, `low_confidence`, `last_run` |
 | GET | `/v1/evals/cases` | `search` | Page labeled cases (`limit` 1–200, `offset`) |
 | PATCH | `/v1/evals/cases/{case_id}` | `write` | Enable/disable a case (`{"active": bool}`) |
-| POST | `/v1/evals/runs` | `write` | Start a keyword-vs-semantic-vs-hybrid comparison run. `202` with `run_id`; `409` when no active cases |
+| POST | `/v1/evals/runs` | `write` | Start a keyword-vs-semantic-vs-hybrid comparison run over the workspace's active cases, optionally scoped (see below). `202` with `run_id`; `409` when no active cases (after scoping); `404` when a `case_ids` entry doesn't belong to the caller's workspace |
 | GET | `/v1/evals/runs/{run_id}` | `search` | Run report: per-mode recall@k / MRR / nDCG aggregates + per-case metrics |
-| DELETE | `/v1/evals/events` | `write` | Purge the workspace's captured search events |
+| DELETE | `/v1/evals/events` | `write` | Purge the workspace's captured search events. `?include_cases=true` also purges labeled `eval_cases` (opt-in; default leaves cases intact) |
+
+**`POST /v1/evals/runs` optional scoping (#250).** The JSON body is optional
+and every field on it is optional; omitting the body (or sending `{}`) keeps
+the original behavior — replay every active case for the workspace, the
+accumulate-over-time default from [ADR 0003](../adr/0003-traffic-mined-retrieval-evals.md).
+Two independent, AND-able filters narrow the replay set instead:
+
+- `case_ids: string[]` — replay only these cases. Every id must belong to the
+  caller's workspace (active or disabled); an id that's unknown or belongs to
+  a different workspace rejects the **whole request** with `404` — it is
+  never silently dropped (which would quietly narrow the run) or silently
+  accepted across tenants (which would leak existence). This is the same
+  cross-tenant-id convention the rest of the API uses (e.g. chunk/document
+  reads 404 on a foreign id).
+- `since: string` (ISO 8601 datetime) — replay only cases created at/after
+  that instant.
+
+```bash
+# Unscoped (default): replay everything ever promoted for the workspace.
+curl -X POST -H "X-API-Key: $KEY" -H "X-Workspace-Id: $WS" \
+  http://localhost:18000/v1/evals/runs
+
+# Scoped: replay only the cases just promoted from this trial session.
+curl -X POST -H "X-API-Key: $KEY" -H "X-Workspace-Id: $WS" \
+  -H "Content-Type: application/json" \
+  -d '{"case_ids": ["case_abc123", "case_def456"]}' \
+  http://localhost:18000/v1/evals/runs
+```
+
+**`DELETE /v1/evals/events?include_cases=true` (#250).** By default this
+endpoint only purges `eval_query_events` (raw, ephemeral search capture) —
+promoted `eval_cases` are durable by design and survive the purge, matching
+ADR 0003's "raw events ephemeral, labeled cases durable" contract. Passing
+`include_cases=true` additionally deletes the workspace's `eval_cases`
+(there is no supported way to purge cases without also purging events).
+This purges captured events and labeled cases only -- `eval_feedback`,
+`eval_runs`, and `eval_run_results` (run history) are left intact, so a
+scorecard can report `eval_case_count: 0` next to a completed prior run
+after the purge; it is not a full reset of the workspace's evals data.
+Response: `{"deleted": <events>, "cases_deleted": <cases, 0 unless include_cases=true>}`.
 
 ## Rate limiting
 

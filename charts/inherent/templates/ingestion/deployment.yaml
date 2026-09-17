@@ -1,0 +1,219 @@
+{{- if .Values.ingestion.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inh-ingestion
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inherent.labels" . | nindent 4 }}
+    {{- include "inherent.selectorLabels" (dict "component" "ingestion") | nindent 4 }}
+spec:
+  replicas: {{ .Values.ingestion.replicas }}
+  selector:
+    matchLabels:
+      {{- include "inherent.selectorLabels" (dict "component" "ingestion") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "inherent.labels" . | nindent 8 }}
+        {{- include "inherent.selectorLabels" (dict "component" "ingestion") | nindent 8 }}
+        {{- with .Values.serviceAccount.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # Prometheus scrape annotations — METRICS_PORT below.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.ingestion.metricsPort | quote }}
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: {{ include "inherent.serviceAccountName" . }}
+      {{- if .Values.temporal.enabled }}
+      initContainers:
+        # Registers the Temporal namespaces ingestion needs BEFORE this
+        # pod's own containers (and therefore its readiness probe) start.
+        # This replaced a post-install/post-upgrade hook Job
+        # (templates/temporal/namespace-register-job.yaml, deleted): that
+        # Job only runs after helm considers the release's ordinary
+        # resources (including THIS Deployment) ready, but this Deployment's
+        # readiness requires the "audit" namespace to already exist — with
+        # `helm_release wait=true` (modules/apps' default) that was a
+        # deadlock on every fresh install: ingestion never goes Ready, so
+        # the post-install hook that would create its namespace never
+        # fires. An initContainer runs unconditionally before the pod is
+        # considered ready, so there's no such ordering cycle. Pinned to the
+        # SAME admin-tools tag as templates/temporal/schema-setup-job.yaml
+        # (both read temporal.adminTools.image) so the tctl/schema tooling
+        # versions never drift apart.
+        - name: temporal-namespace-register
+          image: "{{ .Values.temporal.adminTools.image.repository }}:{{ .Values.temporal.adminTools.image.tag }}"
+          command:
+            - /bin/sh
+            - -lc
+            - |
+              set -e
+              # Wait for the frontend gRPC port before the first `tctl` call
+              # — this initContainer can start before the temporal
+              # Deployment's pod is Ready (they're independent chart
+              # resources with no helm ordering between them).
+              for i in $(seq 1 30); do
+                (echo > /dev/tcp/temporal/7233) >/dev/null 2>&1 && break
+                echo "waiting for temporal:7233..."; sleep 2
+              done
+
+              # Mirrors docker-compose.yml's temporal-init exactly (#148):
+              # describe-before-register, and refuse to blindly register on
+              # top of a non-"not found" describe failure (network flake /
+              # version mismatch must not be treated as "missing" — that
+              # could itself fail and permanently block ingestion boot).
+              register_ns() {
+                ns="$1"
+                retention="$2"
+                if DESCRIBE_OUT=$(tctl --address temporal:7233 --namespace "$ns" namespace describe 2>&1); then
+                  echo "Temporal namespace '$ns' already registered."
+                elif echo "$DESCRIBE_OUT" | grep -qi "notfound\|not found"; then
+                  echo "Registering Temporal namespace '$ns' (retention ${retention}d)..."
+                  tctl --address temporal:7233 --namespace "$ns" namespace register --retention "$retention"
+                else
+                  echo "$DESCRIBE_OUT" >&2
+                  echo "Temporal namespace describe failed for '$ns' for a reason other than 'not found' -- refusing to register blindly." >&2
+                  exit 1
+                fi
+              }
+
+              {{- range .Values.temporal.namespaces }}
+              {{- if eq . "audit" }}
+              register_ns {{ . | quote }} {{ $.Values.temporal.auditRetentionDays | quote }}
+              {{- else }}
+              register_ns {{ . | quote }} {{ $.Values.temporal.retentionDays | quote }}
+              {{- end }}
+              {{- end }}
+      {{- end }}
+      containers:
+        - name: ingestion
+          image: "{{ .Values.image.registry }}/ingestion-svc:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.ingestion.apiPort }}
+            - name: metrics
+              containerPort: {{ .Values.ingestion.metricsPort }}
+          env:
+            - name: SERVICE_MODE
+              value: "worker"
+            - name: API_PORT
+              value: {{ .Values.ingestion.apiPort | quote }}
+            - name: METRICS_PORT
+              value: {{ .Values.ingestion.metricsPort | quote }}
+            - name: API_HOST
+              value: "0.0.0.0"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "secrets.postgres.name is required (DATABASE_URL)" .Values.secrets.postgres.name }}
+                  key: {{ .Values.secrets.postgres.key }}
+            {{- if .Values.secrets.mongodb.name }}
+            - name: MONGODB_URI
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.mongodb.name }}
+                  key: {{ .Values.secrets.mongodb.key }}
+            {{- end }}
+            - name: MONGODB_DB_NAME
+              value: {{ .Values.ingestion.env.mongodbDbName | quote }}
+            - name: WEAVIATE_URL
+              value: "http://weaviate:8080"
+            - name: WEAVIATE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "secrets.weaviate.name is required (WEAVIATE_API_KEY)" .Values.secrets.weaviate.name }}
+                  key: {{ .Values.secrets.weaviate.key }}
+            - name: MQ_BACKEND
+              value: {{ .Values.ingestion.env.mqBackend | quote }}
+            {{- if .Values.secrets.redis.name }}
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.redis.name }}
+                  key: {{ .Values.secrets.redis.key }}
+            {{- end }}
+            - name: STORAGE_BACKEND
+              value: {{ .Values.ingestion.env.storageBackend | quote }}
+            - name: STORAGE_BUCKET
+              value: {{ .Values.ingestion.env.s3Bucket | quote }}
+            - name: AWS_S3_ENDPOINT
+              value: "http://minio:9000"
+            {{- if .Values.secrets.s3.name }}
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.s3.name }}
+                  key: {{ .Values.secrets.s3.accessKeyField }}
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.s3.name }}
+                  key: {{ .Values.secrets.s3.secretKeyField }}
+            {{- end }}
+            - name: TEMPORAL_ENABLED
+              value: {{ .Values.ingestion.env.temporal.enabled | quote }}
+            - name: TEMPORAL_HOST
+              value: {{ .Values.ingestion.env.temporal.host | quote }}
+            - name: TEMPORAL_NAMESPACE
+              value: {{ .Values.ingestion.env.temporal.namespace | quote }}
+            - name: TEMPORAL_TASK_QUEUE
+              value: {{ .Values.ingestion.env.temporal.taskQueue | quote }}
+            - name: TEMPORAL_AUDIT_NAMESPACE
+              value: {{ .Values.ingestion.env.temporal.auditNamespace | quote }}
+            - name: INGESTION_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "secrets.ingestion.name is required (INGESTION_API_KEY) -- see values.yaml top-of-file REQUIRED values note" .Values.secrets.ingestion.name }}
+                  key: {{ .Values.secrets.ingestion.key }}
+            {{- if eq .Values.embedding.profile "azure_openai" }}
+            # DANGER — profile=azure_openai: gated on #311/PR #314 (unmerged)
+            # — see the matching comment in
+            # templates/public-api/deployment.yaml and values.yaml's
+            # embedding.profile comment. The app ignores these vars and
+            # always speaks TEI's wire protocol until that PR merges.
+            - name: EMBEDDING_PROVIDER
+              value: "openai_compatible"
+            - name: EMBEDDING_SERVICE_URL
+              value: {{ required "embedding.serviceUrl is required when embedding.profile=azure_openai" .Values.embedding.serviceUrl | quote }}
+            {{- if .Values.secrets.embeddingApiKey.name }}
+            - name: EMBEDDING_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.embeddingApiKey.name }}
+                  key: {{ .Values.secrets.embeddingApiKey.key }}
+            {{- end }}
+            - name: EMBEDDING_MODEL_ID
+              value: {{ required "embedding.modelId is required when embedding.profile=azure_openai" .Values.embedding.modelId | quote }}
+            {{- else }}
+            - name: EMBEDDING_ENABLED
+              value: "true"
+            - name: EMBEDDING_SERVICE_URL
+              value: "http://text-embeddings-inference:80"
+            {{- end }}
+            - name: EMBEDDING_DIM
+              value: {{ .Values.embedding.dim | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.ingestion.env.logLevel | quote }}
+          resources:
+            {{- toYaml .Values.ingestion.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.ingestion.probe.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.ingestion.probe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.ingestion.probe.periodSeconds }}
+            timeoutSeconds: {{ .Values.ingestion.probe.timeoutSeconds }}
+            failureThreshold: {{ .Values.ingestion.probe.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.ingestion.probe.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.ingestion.probe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.ingestion.probe.periodSeconds }}
+            timeoutSeconds: {{ .Values.ingestion.probe.timeoutSeconds }}
+            failureThreshold: {{ .Values.ingestion.probe.failureThreshold }}
+{{- end }}

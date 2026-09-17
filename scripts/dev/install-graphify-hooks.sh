@@ -24,3 +24,4 @@ for src in "$SRC_DIR"/*; do
 done
 
 echo "Done. Graph will refresh after each pull/merge. Logs: graphify-out/.refresh.log"
+echo "If pre-commit was installed: staged service Python is black+ruff checked before commit."

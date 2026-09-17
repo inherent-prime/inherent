@@ -113,6 +113,11 @@ class TestWorkspaceOperations:
         workspace_id = "test_ws_meta"
         user_id = "test_user_ws"
 
+        # workspace_metadata.user_id carries a real FK to tenants.user_id
+        # (fk_workspace_tenant, migration 012); production always creates the
+        # tenant first via TenantManager.ensure_tenant_exists ->
+        # upsert_tenant, so mirror that precondition here.
+        await db_service.upsert_tenant(user_id)
         meta_id = await db_service.upsert_workspace_metadata(workspace_id, user_id)
         assert meta_id > 0
 
@@ -132,6 +137,10 @@ class TestWorkspaceOperations:
 
         workspace_id = f"test_ws_stats_{uuid.uuid4()}"
         user_id = "test_user_stats"
+        # workspace_metadata.user_id carries a real FK to tenants.user_id
+        # (fk_workspace_tenant, migration 012); create the owning tenant
+        # first, as production always does via TenantManager.
+        await db_service.upsert_tenant(user_id)
         await db_service.upsert_workspace_metadata(workspace_id, user_id)
 
         updated = await db_service.update_workspace_stats(
@@ -149,6 +158,10 @@ class TestWorkspaceOperations:
         """Test deleting workspace data."""
         workspace_id = "test_ws_delete"
         user_id = "test_user_delete"
+        # workspace_metadata.user_id carries a real FK to tenants.user_id
+        # (fk_workspace_tenant, migration 012); create the owning tenant
+        # first, as production always does via TenantManager.
+        await db_service.upsert_tenant(user_id)
         await db_service.upsert_workspace_metadata(workspace_id, user_id)
 
         # Create a document for this workspace
@@ -495,6 +508,21 @@ class TestProcessingStats:
         assert stats["total_documents"] >= 1
         assert stats["processed_documents"] >= 1
         assert stats["total_chunks"] >= len(sample_chunks)
+
+    @pytest.mark.asyncio
+    async def test_get_processing_stats_empty_workspace_id_raises(
+        self,
+        db_service: DatabaseService,
+    ):
+        """#212: an empty-string workspace_id must raise, not fall through
+        to the unfiltered query -- this method has no other scoping column
+        (no tenant_id is ever applied here), so "no filter" means GLOBAL
+        aggregate counts across every tenant's documents, not a safe
+        default. This is the same ``if workspace_id:`` fail-open shape
+        #177 already fixed on get_dead_letter_jobs.
+        """
+        with pytest.raises(ValueError, match="workspace_id"):
+            await db_service.get_processing_stats(workspace_id="")
 
     @pytest.mark.asyncio
     async def test_get_workspace_stats_view(

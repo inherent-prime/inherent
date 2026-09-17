@@ -169,7 +169,14 @@ class RedisMQService(BaseMQService):
 
     async def _ensure_consumer_group(self, stream: str, group: str) -> None:
         """Create consumer group if it doesn't exist (idempotent)."""
-        assert self._redis is not None
+        # Explicit guard (not `assert`): asserts are stripped under -O /
+        # PYTHONOPTIMIZE=1, which would silently turn this into an
+        # AttributeError deep inside the xgroup_create call instead of a
+        # clear error naming the violated boundary.
+        if self._redis is None:
+            raise RuntimeError(
+                "Redis MQ: _ensure_consumer_group() is only valid on a connected consumer"
+            )
 
         try:
             await self._redis.xgroup_create(stream, group, id="0", mkstream=True)
@@ -188,7 +195,11 @@ class RedisMQService(BaseMQService):
         handler: MessageHandler,
     ) -> None:
         """Main polling loop: recover pending, then consume new messages."""
-        assert self._redis is not None
+        # Explicit guard (not `assert`, which is stripped under -O /
+        # PYTHONOPTIMIZE=1): fail loudly and name the boundary instead of
+        # letting a stripped guard surface as an AttributeError below.
+        if self._redis is None:
+            raise RuntimeError("Redis MQ: _poll_loop() is only valid on a connected consumer")
 
         # Phase 1: Recover any pending messages from a previous crash
         await self._process_pending(stream, group, consumer, handler)
@@ -262,7 +273,11 @@ class RedisMQService(BaseMQService):
         idle >= ``_reclaim_min_idle_ms`` to this consumer; we re-dispatch each,
         and drop (ACK) any that have exceeded ``_max_deliveries`` as poison.
         """
-        assert self._redis is not None
+        # Explicit guard (not `assert`, which is stripped under -O /
+        # PYTHONOPTIMIZE=1): fail loudly and name the boundary instead of
+        # letting a stripped guard surface as an AttributeError below.
+        if self._redis is None:
+            raise RuntimeError("Redis MQ: _reclaim_pending() is only valid on a connected consumer")
         try:
             _cursor, claimed, _deleted = await self._redis.xautoclaim(
                 name=stream,
@@ -294,6 +309,13 @@ class RedisMQService(BaseMQService):
 
     async def _delivery_count(self, stream: str, group: str, message_id: str) -> int:
         """Return how many times ``message_id`` has been delivered (>=1)."""
+        # Explicit guard (not `assert`): asserts are stripped under -O /
+        # PYTHONOPTIMIZE=1, which would silently drop this None-check and let
+        # a disconnected call fail later as a confusing AttributeError instead
+        # of naming the violated boundary (only reached from a connected
+        # consumer).
+        if self._redis is None:
+            raise RuntimeError("Redis MQ: _delivery_count() is only valid on a connected consumer")
         try:
             pending = await self._redis.xpending_range(
                 stream, group, min=message_id, max=message_id, count=1
@@ -301,6 +323,9 @@ class RedisMQService(BaseMQService):
             if pending:
                 return int(pending[0]["times_delivered"])
         except Exception:
+            # nosec B110 -- deliberate: the delivery count is advisory (it only
+            # decides when to drop a poison message), so a Redis hiccup here
+            # must fall back to 1 rather than abort the consumer loop.
             pass
         return 1
 
@@ -312,7 +337,11 @@ class RedisMQService(BaseMQService):
         handler: MessageHandler,
     ) -> None:
         """Recover messages that were delivered but not ACKed (e.g. after crash)."""
-        assert self._redis is not None
+        # Explicit guard (not `assert`, which is stripped under -O /
+        # PYTHONOPTIMIZE=1): fail loudly and name the boundary instead of
+        # letting a stripped guard surface as an AttributeError below.
+        if self._redis is None:
+            raise RuntimeError("Redis MQ: _process_pending() is only valid on a connected consumer")
 
         try:
             results = await self._redis.xreadgroup(
@@ -356,7 +385,11 @@ class RedisMQService(BaseMQService):
         handler: MessageHandler,
     ) -> None:
         """Parse a stream entry, call the handler, ACK on success."""
-        assert self._redis is not None
+        # Explicit guard (not `assert`, which is stripped under -O /
+        # PYTHONOPTIMIZE=1): fail loudly and name the boundary instead of
+        # letting a stripped guard surface as an AttributeError below.
+        if self._redis is None:
+            raise RuntimeError("Redis MQ: _handle_message() is only valid on a connected consumer")
 
         payload = json.loads(fields.get("payload", "{}"))
 

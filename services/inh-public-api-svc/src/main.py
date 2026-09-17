@@ -73,6 +73,11 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
         docs_url="/docs" if settings.is_development else None,
         redoc_url="/redoc" if settings.is_development else None,
+        # The schema is unauthenticated, so leaving it on in production listed
+        # every route -- including the flag-gated /v1/admin/* surface, whose
+        # 404-not-403 design exists precisely so its existence is not
+        # confirmable. Gate it with the docs it serves.
+        openapi_url="/openapi.json" if settings.is_development else None,
     )
 
     # Register exception handlers for RFC 7807 responses
@@ -143,6 +148,16 @@ def create_app() -> FastAPI:
 
     # Include health check router at root level
     app.include_router(health_router.router)
+
+    # RFC 9728 protected-resource metadata (#295) -- included ONLY when
+    # OAuth is enabled, so a deployment that never opted in never serves
+    # `/.well-known/oauth-protected-resource` at all (see
+    # src/api/well_known.py's module docstring for why "never registered"
+    # rather than "registered but 404s" is the deliberate choice here).
+    if settings.oauth_enabled:
+        from src.api import well_known as well_known_router
+
+        app.include_router(well_known_router.router)
 
     # Include API router
     app.include_router(router)

@@ -29,8 +29,18 @@ import re
 import zipfile
 from collections.abc import Callable
 from email import policy
+from typing import Any
 from urllib.parse import unquote
-from xml.etree import ElementTree as ET
+
+# The three ET.fromstring() calls below parse XML pulled out of a
+# customer-uploaded archive (EPUB container.xml / content.opf, ODT
+# content.xml), so bandit flags the import as B405 and each call as B314.
+# CPython >= 3.7.1 does not resolve external entities, which rules out classic
+# XXE, but a hostile archive can still drive entity-expansion CPU burn -- so
+# each call carries a `# nosec B314` pointing here, and #247 tracks moving all
+# three to defusedxml (a runtime dependency add, out of scope for the CI
+# change that first surfaced these).
+from xml.etree import ElementTree as ET  # nosec B405 -- see above
 
 import charset_normalizer
 import structlog
@@ -450,6 +460,27 @@ def _extract_docx_text(content: bytes, filename: str = "") -> str:
     outcome, so failures raise a non-retryable ``ApplicationError``, the same
     reasoning as the XLSX/PPTX open/cap failures below (and the existing
     ``_resolve_extractor`` "no extractor"/"wiring bug" cases).
+
+    The try/except is scoped to ONLY the `Document()` construction call --
+    matching `_extract_pdf_text`'s `PdfReader()`-only wrap exactly (#215:
+    before this fix, the same `try` also wrapped the paragraph-iteration
+    list comprehension below, so a `MemoryError` raised while iterating
+    `doc.paragraphs` on a large/pathological document was swept into
+    `non_retryable=True` right alongside a genuine "wrong OOXML content
+    type" `ValueError` -- permanently dead-lettering a load-dependent
+    failure a retry could plausibly resolve, instead of the transient
+    failure it actually is). The paragraph-iteration comprehension below is
+    deliberately left UNWRAPPED, same accepted tradeoff `_extract_pdf_text`'s
+    page-iteration loop and `_extract_xlsx_text`'s row-iteration loop already
+    make for their own iteration.
+
+    Raises:
+        ApplicationError (non_retryable=True): python-docx is not installed
+            (deterministic per worker/image -- retrying the same build can
+            never install a package), or `Document()` can't open `content`
+            at all (corrupt/truncated bytes, password-protected file, or a
+            different OOXML format -- e.g. XLSX or PPTX -- reaching this
+            extractor despite its declared DOCX type).
     """
     try:
         from docx import Document
@@ -463,8 +494,13 @@ def _extract_docx_text(content: bytes, filename: str = "") -> str:
     label = f" ({filename})" if filename else ""
     try:
         doc = Document(io.BytesIO(content))
-        paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
-        return "\n\n".join(paragraphs)
+    except MemoryError:
+        # A load-dependent condition, not a property of the bytes -- must
+        # stay retryable (#215, same reasoning as `_extract_pdf_text`'s own
+        # carve-out above). python-docx's package-opening path can allocate
+        # heavily while unzipping/parsing a pathological OOXML package; this
+        # must never be reclassified as non_retryable.
+        raise
     except Exception as e:
         # python-docx's own "wrong OOXML content type" ValueError embeds a
         # raw `<_io.BytesIO object at 0x...>` repr -- a heap address -- in
@@ -491,6 +527,21 @@ def _extract_docx_text(content: bytes, filename: str = "") -> str:
             type="DocxOpenFailed",
             non_retryable=True,
         ) from e
+
+    # Scoped to ONLY `Document()` construction above (#215 review follow-up:
+    # a version of this fix that also wrapped the paragraph-iteration
+    # comprehension below would have turned a `MemoryError` from a large/
+    # pathological document into `non_retryable=True` -- permanently
+    # dead-lettering a load-dependent failure a retry, possibly on a
+    # less-contended worker, could plausibly resolve, instead of the
+    # transient failure it actually is). Mirrors `_extract_pdf_text`'s own
+    # page-iteration loop and `_extract_xlsx_text`'s row-iteration loop,
+    # neither of which is wrapped in a broad except either -- same accepted
+    # tradeoff: a corruption localized to one paragraph that python-docx only
+    # discovers lazily during iteration retries under the default policy
+    # rather than failing once.
+    paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
+    return "\n\n".join(paragraphs)
 
 
 # Cost guards for XLSX extraction (#118 issue requirement: "cap evaluated
@@ -680,6 +731,15 @@ def _extract_xlsx_text(content: bytes) -> str:
             guaranteed-repeat failure. Every message is clear and actionable
             -- never a bare zipfile/openpyxl exception surfacing to the
             caller, and never a silent partial result.
+
+            The try/except around `load_workbook()` re-raises `MemoryError`
+            BEFORE falling through to the broad `except Exception` (#215
+            pattern-sweep fix: this carve-out was missing here even though
+            `_extract_pdf_text`/`_extract_docx_text` already had it) -- a
+            load-dependent OOM opening a pathological workbook must stay
+            retryable, never reclassified as non-retryable. The row-
+            iteration loop below is separately, and correctly, left entirely
+            outside this try block already.
     """
     try:
         import openpyxl
@@ -693,6 +753,13 @@ def _extract_xlsx_text(content: bytes) -> str:
 
     try:
         workbook = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    except MemoryError:
+        # A load-dependent condition, not a property of the bytes -- must
+        # stay retryable (#215 pattern-sweep fix, same carve-out as
+        # `_extract_pdf_text`/`_extract_docx_text` above: opening a
+        # pathological workbook can allocate heavily; this must never be
+        # reclassified as non_retryable).
+        raise
     except Exception as e:
         # Covers corrupt/truncated zips (zipfile.BadZipFile), password-
         # protected files (OLE2/CFBF container -- not a zip at all), and any
@@ -829,12 +896,57 @@ def _pptx_slide_title(slide: object) -> str | None:
     return text or None
 
 
+# Sentinel distinguishing "attribute absent" from "attribute is None/False".
+# Typed `Any` (not left to infer as `object`) so it doesn't narrow the
+# getattr() calls below away from their usual `Any` return -- `notes_slide`
+# and `text_frame` are themselves python-pptx objects with no usable stubs
+# (see the module-level getattr rationale on _pptx_slide_title), so chaining
+# a further `.text`/`.notes_text_frame` off of them must stay unchecked, same
+# as every other getattr in this module.
+_PPTX_ATTR_MISSING: Any = object()
+
+
 def _pptx_slide_notes(slide: object) -> str | None:
     """Speaker notes text for `slide`, or None if it has no notes slide, or
-    the notes slide has no non-whitespace text."""
-    if not slide.has_notes_slide:
+    the notes slide has no non-whitespace text.
+
+    getattr (rather than attribute access) throughout, matching
+    _pptx_slide_title above: `slide` is typed `object` because python-pptx
+    ships no usable stubs. That has a cost -- getattr-with-default makes a
+    genuine python-pptx object-model change (an attribute renamed/removed)
+    read identically to "this slide legitimately has no notes". We log (never
+    raise) when an expected attribute is unexpectedly missing, so that
+    degradation is observable -- extraction must not fail a whole document
+    over one slide's notes, but silence would let the object-model drift go
+    unnoticed indefinitely (#255).
+    """
+    has_notes = getattr(slide, "has_notes_slide", _PPTX_ATTR_MISSING)
+    if has_notes is _PPTX_ATTR_MISSING:
+        logger.warning(
+            "PPTX slide object missing expected has_notes_slide attribute -- "
+            "python-pptx object model may have changed; treating as no notes",
+        )
         return None
-    notes_text = (slide.notes_slide.notes_text_frame.text or "").strip()
+    if not has_notes:
+        return None  # legitimate "no notes" (has_notes_slide is False) -- stay silent
+
+    notes_slide = getattr(slide, "notes_slide", _PPTX_ATTR_MISSING)
+    if notes_slide is _PPTX_ATTR_MISSING or notes_slide is None:
+        logger.warning(
+            "PPTX slide has has_notes_slide=True but notes_slide is missing -- "
+            "python-pptx object model may have changed; skipping this slide's notes",
+        )
+        return None
+
+    text_frame = getattr(notes_slide, "notes_text_frame", _PPTX_ATTR_MISSING)
+    if text_frame is _PPTX_ATTR_MISSING or text_frame is None:
+        logger.warning(
+            "PPTX slide's notes_slide is missing notes_text_frame -- "
+            "python-pptx object model may have changed; skipping this slide's notes",
+        )
+        return None
+
+    notes_text = (text_frame.text or "").strip()
     return notes_text or None
 
 
@@ -871,6 +983,14 @@ def _extract_pptx_text(content: bytes) -> str:
             character count exceeds the text cap. Same "deterministic ->
             non-retryable, clear, actionable, never silent" contract as
             XLSX above.
+
+            The try/except around `Presentation()` re-raises `MemoryError`
+            BEFORE falling through to the broad `except Exception` (#215
+            pattern-sweep fix, same carve-out XLSX above now has) -- a
+            load-dependent OOM opening a pathological deck must stay
+            retryable, never reclassified as non-retryable. The slide-
+            iteration loop below is separately, and correctly, left entirely
+            outside this try block already.
     """
     try:
         from pptx import Presentation
@@ -883,6 +1003,13 @@ def _extract_pptx_text(content: bytes) -> str:
 
     try:
         presentation = Presentation(io.BytesIO(content))
+    except MemoryError:
+        # A load-dependent condition, not a property of the bytes -- must
+        # stay retryable (#215 pattern-sweep fix, same carve-out as
+        # `_extract_pdf_text`/`_extract_docx_text` above: opening a
+        # pathological deck can allocate heavily; this must never be
+        # reclassified as non_retryable).
+        raise
     except Exception as e:
         # Covers corrupt/truncated zips, password-protected (OLE2/CFBF)
         # files, and any other "python-pptx couldn't open this" failure.
@@ -1285,7 +1412,7 @@ def _extract_epub_text(content: bytes, filename: str) -> str:
         ) from e
 
     try:
-        container_root = ET.fromstring(container_xml)
+        container_root = ET.fromstring(container_xml)  # nosec B314 -- see import note
     except ET.ParseError as e:
         raise ApplicationError(
             f"EPUB extraction failed: '{filename}' has an unparseable META-INF/container.xml: {e}",
@@ -1313,7 +1440,7 @@ def _extract_epub_text(content: bytes, filename: str) -> str:
         ) from e
 
     try:
-        opf_root = ET.fromstring(opf_xml)
+        opf_root = ET.fromstring(opf_xml)  # nosec B314 -- see import note
     except ET.ParseError as e:
         raise ApplicationError(
             f"EPUB extraction failed: '{filename}' has an unparseable content.opf: {e}",
@@ -1650,7 +1777,7 @@ def _extract_odt_text(content: bytes, filename: str) -> str:
         ) from e
 
     try:
-        root = ET.fromstring(content_xml)
+        root = ET.fromstring(content_xml)  # nosec B314 -- see import note
     except ET.ParseError as e:
         raise ApplicationError(
             f"ODT extraction failed: '{filename}' has an unparseable content.xml: {e}",
@@ -1785,7 +1912,9 @@ def _parse_subtitle_cues(text: str) -> list[tuple[str, str]]:
             if candidate is not None:
                 timestamp_line_index, match = index, candidate
                 break
-        if match is None:
+        # The two are assigned together above, so `match is None` alone is the
+        # real condition; the index test is what lets mypy narrow it to int.
+        if match is None or timestamp_line_index is None:
             continue  # header / NOTE / cue-number-only / non-cue block
 
         cue_text = " ".join(lines[timestamp_line_index + 1 :]).strip()

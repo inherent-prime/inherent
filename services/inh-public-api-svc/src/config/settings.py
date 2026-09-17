@@ -1,6 +1,8 @@
 """Application settings using Pydantic Settings for environment variable management."""
 
 from functools import lru_cache
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 from typing import Literal
 
 from inh_contracts.defaults import DEFAULT_MONGODB_URI, DEFAULT_S3_BUCKET, DEFAULT_S3_REGION
@@ -8,6 +10,15 @@ from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.config.constants import DEFAULT_DATABASE_NAME, ERROR_BASE_URL
+
+try:
+    # Single source of truth: the installed package version (pyproject.toml),
+    # mirroring inh-ingestion-svc. A hardcoded literal here silently drifted to
+    # 0.2.0 while pyproject said 0.3.0, and `whoami` now reports this value to
+    # users and agents over both REST and MCP.
+    SERVICE_VERSION = _pkg_version("inh-public-api-svc")
+except PackageNotFoundError:  # pragma: no cover - only when running uninstalled
+    SERVICE_VERSION = "0.0.0+local"
 
 
 class Settings(BaseSettings):
@@ -39,7 +50,7 @@ class Settings(BaseSettings):
     mcp_port: int = 8001
     log_level: str = "INFO"
     environment: str = "development"
-    version: str = "0.2.0"
+    version: str = SERVICE_VERSION
 
     # Database (reads + document/eval writes; not a read-only role)
     database_url: str = f"postgresql://postgres:postgres@localhost:5432/{DEFAULT_DATABASE_NAME}"
@@ -150,6 +161,15 @@ class Settings(BaseSettings):
         alias="MQ_UPLOAD_TOPIC",
         description="MQ topic for document upload events",
     )
+    # Must match ingestion-svc's MQ_CONVERSATION_TOPIC (settings.py,
+    # #306) — same reasoning as mq_topic_document_uploaded above: a
+    # separate env var name would let an operator override one side only
+    # and silently publish conversation turns to a stream nobody consumes.
+    mq_topic_conversation_turn: str = Field(
+        default="core.conversation.turn.v1",
+        alias="MQ_CONVERSATION_TOPIC",
+        description="MQ topic for conversation-turn events (#306), one message per turn",
+    )
 
     # Redis (optional - for distributed rate limiting)
     redis_url: str | None = Field(
@@ -197,6 +217,11 @@ class Settings(BaseSettings):
         description="Enable HSTS header in production",
     )
     api_key_header_name: str = "X-API-Key"
+    admin_api_enabled: bool = Field(
+        default=False,
+        alias="ADMIN_API_ENABLED",
+        description="Expose read-only whole-stack admin listings for local operators only",
+    )
 
     # RFC 7807 error `type` base URL (#222). The retired `.systems` domain used
     # to be hardcoded straight into src/config/constants.py, so a domain change
@@ -223,6 +248,22 @@ class Settings(BaseSettings):
         alias="EMBEDDING_SERVICE_URL",
     )
     embedding_dim: int = Field(384, alias="EMBEDDING_DIM")
+    # #311: which EmbeddingProvider backend embedder.py constructs. "tei"
+    # (default) is NON-NEGOTIABLE -- `make up`/docker-compose with no new env
+    # vars must behave exactly as before this setting existed. The other
+    # supported value is "openai_compatible" (any /v1/embeddings-shaped API).
+    embedding_provider: str = Field("tei", alias="EMBEDDING_PROVIDER")
+    # #311: sent as `Authorization: Bearer <key>` to the embedding provider.
+    # TEI accepts one but does not require it (zero-config local dev); an
+    # openai_compatible backend generally requires one. NEVER logged.
+    embedding_api_key: str | None = Field(None, alias="EMBEDDING_API_KEY")
+    # #311: the model this service believes it is talking to -- feeds the
+    # Weaviate collection model-identity guard (src/services/search.py), and
+    # must agree with ingestion-svc's own embedding_model_id (same env var,
+    # same default) or every query on an otherwise-healthy collection would
+    # hard-fail. Default matches EMBEDDING_MODEL_ID's existing use as the TEI
+    # sidecar's own --model-id in docker-compose.yml.
+    embedding_model_id: str = Field("BAAI/bge-small-en-v1.5", alias="EMBEDDING_MODEL_ID")
 
     # Search (#13 — multi-workspace retrieval)
     search_max_workspace_concurrency: int = Field(
@@ -389,6 +430,107 @@ class Settings(BaseSettings):
     # Audit Logging
     audit_log_enabled: bool = True
     audit_log_topic: str = "audit.log.write"
+
+    # OAuth 2.1 resource-server support (#295) — RFC 9728 protected-resource
+    # metadata + a `WWW-Authenticate: Bearer` challenge on `/mcp`, so a
+    # spec-compliant MCP client (e.g. Claude Code) can discover the
+    # authorization server and run a browser sign-in flow instead of
+    # guessing. OFF by default and DELIBERATELY so (issue #295 comment,
+    # 2026-08-18): a self-hosted stack must never advertise an authorization
+    # server it does not run — a compliant client would attempt discovery
+    # against it and fail instead of falling back to the API key that
+    # actually works. With `oauth_enabled=False` (the default), `/mcp`'s 401
+    # behavior and `/.well-known/oauth-protected-resource`'s absence are
+    # byte-identical to the pre-#295 behavior; see
+    # tests/unit/test_oauth_config_gate.py.
+    oauth_enabled: bool = Field(
+        default=False,
+        alias="OAUTH_ENABLED",
+        description=(
+            "Enable OAuth 2.1 resource-server behavior on /mcp: RFC 9728 "
+            "protected-resource metadata + WWW-Authenticate: Bearer "
+            "challenges + Bearer token validation. Off by default -- a "
+            "self-hosted deployment must opt in explicitly, since turning "
+            "this on advertises oauth_authorization_server as a trusted "
+            "issuer for this resource."
+        ),
+    )
+    oauth_authorization_server: str | None = Field(
+        default=None,
+        alias="OAUTH_AUTHORIZATION_SERVER",
+        description=(
+            "Issuer URL of the OAuth 2.1 authorization server trusted to "
+            "mint access tokens for this resource (e.g. a Clerk instance). "
+            "Required when oauth_enabled=true; published verbatim in "
+            "authorization_servers in the RFC 9728 metadata document and "
+            "checked against every token's iss claim."
+        ),
+    )
+    oauth_resource_identifier: str | None = Field(
+        default=None,
+        alias="OAUTH_RESOURCE_IDENTIFIER",
+        description=(
+            "This resource's own canonical identifier, e.g. "
+            "https://api.inherent.sh/mcp. Required when oauth_enabled=true. "
+            "Published verbatim as `resource` in the RFC 9728 metadata "
+            "document and matched against every token's aud claim (RFC "
+            "8707 Sec 2) -- a token whose aud does not contain this value "
+            "is rejected, never merely warned about."
+        ),
+    )
+    oauth_scopes_supported: list[str] = Field(
+        default=["kb:read", "kb:search"],
+        description=(
+            "Minimal scope catalogue advertised in scopes_supported and in "
+            "the WWW-Authenticate: Bearer challenge's scope parameter "
+            "(scope-minimisation guidance in RFC 9728 -- some IdPs reject "
+            "auth requests naming a full scope catalogue with "
+            "invalid_scope). Write/delete access is granted via an "
+            "insufficient_scope step-up on the specific tool that needs it, "
+            "never by advertising it upfront -- surfaced as a JSON-RPC "
+            "tools/call result (isError=True, structuredContent.error= "
+            "'insufficient_scope', HTTP 200), not a transport-level 403: "
+            "the MCP Streamable-HTTP transport always answers a parsed "
+            "tools/call with HTTP 200; only connection-level rejection "
+            "(missing/invalid/expired bearer, before the body is even "
+            "parsed) can carry a real HTTP status. See "
+            "src.services.auth.PERMISSION_SCOPE_MAP and "
+            "src.mcp_server.http_transport._call_tool_oauth's docstring."
+        ),
+    )
+    oauth_jwks_url: str | None = Field(
+        default=None,
+        alias="OAUTH_JWKS_URL",
+        description=(
+            "Override the JWKS endpoint used to verify token signatures. "
+            "Defaults to '<oauth_authorization_server>/.well-known/"
+            "jwks.json' (see effective_oauth_jwks_url) when unset."
+        ),
+    )
+    oauth_jwks_cache_seconds: int = Field(
+        default=300,
+        ge=1,
+        alias="OAUTH_JWKS_CACHE_SECONDS",
+        description="How long a fetched JWKS key set is cached before being refetched.",
+    )
+
+    @property
+    def effective_oauth_jwks_url(self) -> str | None:
+        """Return the JWKS endpoint to verify OAuth tokens against.
+
+        `oauth_jwks_url` wins when set (an operator whose AS publishes JWKS
+        somewhere non-standard); otherwise derived from
+        `oauth_authorization_server` using the convention Clerk (the AS for
+        the hosted deployment, per issue #295's 2026-08-19 comment) and most
+        OIDC providers use. Returns None when neither is configured, which
+        callers must treat as "OAuth is not usable" rather than guessing --
+        see src.services.auth.verify_oauth_token's fail-closed check.
+        """
+        if self.oauth_jwks_url:
+            return self.oauth_jwks_url
+        if self.oauth_authorization_server:
+            return f"{self.oauth_authorization_server.rstrip('/')}/.well-known/jwks.json"
+        return None
 
     @property
     def is_production(self) -> bool:

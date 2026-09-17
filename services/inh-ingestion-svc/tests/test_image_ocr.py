@@ -1,9 +1,11 @@
 """Tests for image OCR extraction with graceful fallback (#61, #120).
 
-Covers both the Temporal activity helper (``_extract_image_text`` in
-``extract.py``) and the processor method (``_extract_image_text`` in
-``processor.py``, which delegates to the activity helper). OCR is mocked
-so these run WITHOUT the real tesseract system binary installed:
+Covers the Temporal activity helper (``_extract_image_text`` in
+``extract.py``) -- the live ingestion path's OCR extraction. This file used
+to also cover the equivalent method on the legacy ``DocumentProcessor``
+(``processor.py``); that class was removed (#185) once its OCR behaviour was
+confirmed fully duplicated here. OCR is mocked so these run WITHOUT the real
+tesseract system binary installed:
 
 - OCR available  -> ``pytesseract.image_to_string`` returns text, which is
   returned verbatim (single-frame) or joined with ``## Page N`` markers
@@ -17,14 +19,9 @@ from __future__ import annotations
 
 import sys
 import types
-from datetime import UTC, datetime
-from unittest.mock import MagicMock
 
 import pytest
 
-from src.config.settings import Settings
-from src.models.document import DocumentUploadMessage
-from src.services.processor import DocumentProcessor
 from src.temporal.activities.extract import _MAX_IMAGE_OCR_PAGES, _extract_image_text
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n fake png bytes"
@@ -221,87 +218,3 @@ class TestActivityImageOCR:
         text = _extract_image_text(WEBP_BYTES, "anim.webp")
         assert text == "First frame only"
         assert "## Page" not in text
-
-
-# ---------------------------------------------------------------------------
-# Processor method: processor.py::_extract_image_text (via _extract_text)
-# ---------------------------------------------------------------------------
-
-
-class TestProcessorImageOCR:
-    @pytest.fixture
-    def processor(self):
-        settings = MagicMock(spec=Settings)
-        settings.max_chunk_size = 1000
-        settings.chunk_overlap = 200
-        settings.chunking_strategy = "tokens"
-        settings.database_url = "postgresql://mock:mock@localhost:5432/mock"
-        proc = DocumentProcessor(settings)
-        proc._initialized = True
-        return proc
-
-    def _message(
-        self, *, content_type: str = "image/png", filename: str = FILENAME
-    ) -> DocumentUploadMessage:
-        return DocumentUploadMessage(
-            event_type="document.uploaded",
-            document_id="doc-png-1",
-            workspace_id="ws-1",
-            user_id="user-1",
-            filename=filename,
-            original_filename=filename,
-            content_type=content_type,
-            size_bytes=100,
-            storage_backend="local",
-            storage_path=f"ws-1/doc-png-1/{filename}",
-            storage_bucket="bucket",
-            timestamp=datetime.now(UTC).isoformat(),
-        )
-
-    @pytest.mark.asyncio
-    async def test_ocr_available_returns_text(self, processor, monkeypatch):
-        _install_fake_ocr(monkeypatch, return_text="Inherent OCR sample")
-        text = await processor._extract_text(PNG_BYTES, self._message())
-        assert text == "Inherent OCR sample"
-
-    @pytest.mark.asyncio
-    async def test_ocr_libs_missing_returns_placeholder(self, processor, monkeypatch):
-        _block_ocr_imports(monkeypatch)
-        text = await processor._extract_text(PNG_BYTES, self._message())
-        assert text == PLACEHOLDER
-
-    @pytest.mark.asyncio
-    async def test_tesseract_binary_missing_returns_placeholder(self, processor, monkeypatch):
-        _install_fake_ocr(monkeypatch)
-        from pytesseract import TesseractNotFoundError  # the fake one
-
-        _install_fake_ocr(monkeypatch, image_to_string_exc=TesseractNotFoundError)
-        text = await processor._extract_text(PNG_BYTES, self._message())
-        assert text == PLACEHOLDER
-
-    @pytest.mark.asyncio
-    async def test_empty_ocr_output_returns_placeholder(self, processor, monkeypatch):
-        _install_fake_ocr(monkeypatch, return_text="")
-        text = await processor._extract_text(PNG_BYTES, self._message())
-        assert text == PLACEHOLDER
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        ("content", "content_type", "filename"),
-        [
-            (JPEG_BYTES, "image/jpeg", "scan.jpg"),
-            (WEBP_BYTES, "image/webp", "scan.webp"),
-            (TIFF_LE_BYTES, "image/tiff", "scan.tiff"),
-            (BMP_BYTES, "image/bmp", "scan.bmp"),
-        ],
-        ids=["jpeg", "webp", "tiff", "bmp"],
-    )
-    async def test_sibling_formats_routed_to_ocr(
-        self, processor, monkeypatch, content, content_type, filename
-    ):
-        """#120: legacy processor routes the new image MIMEs to OCR."""
-        _install_fake_ocr(monkeypatch, return_text="Processor sibling OCR")
-        text = await processor._extract_text(
-            content, self._message(content_type=content_type, filename=filename)
-        )
-        assert text == "Processor sibling OCR"

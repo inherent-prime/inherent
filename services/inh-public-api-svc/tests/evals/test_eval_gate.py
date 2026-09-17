@@ -9,16 +9,21 @@ required; runs in the default ``-m 'not compose'`` suite. The live-stack wiring
 from __future__ import annotations
 
 import json
+import math
 
 import pytest
 
 from tests.evals.eval_gate import (
+    DEFAULT_TOLERANCE,
     Regression,
+    effective_tolerance,
     find_regressions,
     format_regressions,
     load_doc_keys,
     load_metrics,
+    load_qrels_query_count,
     main,
+    min_detectable_delta,
     ratchet_baseline,
 )
 
@@ -217,3 +222,252 @@ def test_format_regressions_lists_each_one():
     assert "keyword.mrr" in message
     assert "0.40" in message
     assert "0.50" in message
+
+
+# ---------------------------------------------------------------------------
+# min_detectable_delta / effective_tolerance (#236)
+#
+# Metric-name keys match retrieval_baseline.json's actual keys ("mrr",
+# "recall@5", "ndcg@5" -- NOT "recall_at_5"/"ndcg_at_5"), not the brief's
+# placeholder names.
+# ---------------------------------------------------------------------------
+
+
+def test_min_detectable_delta_mrr():
+    # smallest single-query MRR move: rank 1 -> 2 changes 1/1 - 1/2 = 0.5, averaged over n
+    assert min_detectable_delta("mrr", 13) == pytest.approx(0.5 / 13)
+
+
+def test_min_detectable_delta_recall():
+    # one query gaining/losing one relevant doc: 1/n (conservative, single-relevant case)
+    assert min_detectable_delta("recall@5", 13) == pytest.approx(1 / 13)
+
+
+def test_min_detectable_delta_ndcg():
+    # smallest top-2 swap: (1 - 1/log2(3)) / n
+    assert min_detectable_delta("ndcg@5", 13) == pytest.approx((1 - 1 / math.log2(3)) / 13)
+
+
+def test_min_detectable_delta_rejects_unrecognized_metric():
+    with pytest.raises(ValueError):
+        min_detectable_delta("unknown@5", 13)
+
+
+def test_min_detectable_delta_rejects_non_positive_num_queries():
+    with pytest.raises(ValueError):
+        min_detectable_delta("mrr", 0)
+
+
+def test_effective_tolerance_takes_max_of_floor_and_resolution():
+    assert effective_tolerance("mrr", 13, floor=0.02) == pytest.approx(
+        0.5 / 13
+    )  # resolution dominates
+    assert effective_tolerance("mrr", 200, floor=0.02) == pytest.approx(0.02)  # floor dominates
+
+
+def test_effective_tolerance_defaults_floor_to_default_tolerance():
+    assert effective_tolerance("mrr", 200) == pytest.approx(DEFAULT_TOLERANCE)
+
+
+def test_find_regressions_with_effective_tolerance_ignores_single_rank_slip():
+    # baseline mrr .70, current .6615 (= one rank-1->2 slip at n=13): NOT a regression
+    baseline = {"keyword": {"mrr": 0.70}}
+    tolerance = {"mrr": effective_tolerance("mrr", 13, floor=0.02)}
+    current_slip = {"keyword": {"mrr": 0.70 - 0.5 / 13}}
+    assert find_regressions(current_slip, baseline, tolerance=tolerance) == []
+
+    # baseline mrr .70, current .60: IS a regression
+    current_drop = {"keyword": {"mrr": 0.60}}
+    assert find_regressions(current_drop, baseline, tolerance=tolerance) == [
+        Regression("keyword", "mrr", current=0.60, baseline=0.70)
+    ]
+
+
+def test_find_regressions_still_accepts_a_flat_float_tolerance():
+    """Backward-compat: existing callers passing a single float must keep working."""
+    baseline = {"hybrid": {"recall@5": 0.50}}
+    current = {"hybrid": {"recall@5": 0.49}}
+    assert find_regressions(current, baseline, tolerance=0.02) == []
+
+
+# ---------------------------------------------------------------------------
+# load_qrels_query_count (#236)
+# ---------------------------------------------------------------------------
+
+
+def test_load_qrels_query_count_excludes_abstention_category(tmp_path):
+    path = tmp_path / "qrels.jsonl"
+    path.write_text(
+        "\n".join(
+            json.dumps(row)
+            for row in [
+                {"query_id": "q1", "query": "a", "document_id": "d1", "relevance": 3},
+                {
+                    "query_id": "q2",
+                    "query": "b",
+                    "document_id": "d2",
+                    "relevance": 0,
+                    "category": "abstention",
+                },
+                {"query_id": "q3", "query": "c", "document_id": "d3", "relevance": 3},
+            ]
+        )
+    )
+    assert load_qrels_query_count(path) == 2
+
+
+def test_load_qrels_query_count_dedupes_multi_line_queries(tmp_path):
+    path = tmp_path / "qrels.jsonl"
+    path.write_text(
+        "\n".join(
+            json.dumps(row)
+            for row in [
+                {"query_id": "q1", "query": "a", "document_id": "d1", "relevance": 3},
+                {"query_id": "q1", "query": "a", "document_id": "d2", "relevance": 2},
+            ]
+        )
+    )
+    assert load_qrels_query_count(path) == 1
+
+
+def test_load_qrels_query_count_missing_file_returns_zero(tmp_path):
+    assert load_qrels_query_count(tmp_path / "nope.jsonl") == 0
+
+
+# ---------------------------------------------------------------------------
+# `check` CLI subcommand: derivation wiring + loud-error-on-empty-derivation
+# (code review fix round 1, finding 1) -- nothing previously exercised
+# `main(["check", ...])` directly, so the CLI's own tolerance-resolution path
+# (`_resolve_check_tolerance`) had no coverage at all.
+#
+# All scenarios share one baseline/report pair: baseline mrr .70, current
+# .62 (delta -0.08). Under the flat DEFAULT_TOLERANCE (0.02) that is a
+# regression; under a derived tolerance with n=5 gated queries
+# (min_detectable_delta("mrr", 5) == 0.5/5 == 0.1) it is not -- so a passing
+# exit code demonstrates derivation actually changed the outcome, not just
+# that the CLI didn't crash.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _check_fixture_paths(tmp_path):
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(json.dumps({"hybrid": {"mrr": 0.70}}))
+    report = tmp_path / "report.json"
+    report.write_text(json.dumps({"hybrid": {"mrr": 0.62}}))
+    return baseline, report
+
+
+def test_cli_check_without_derivation_flags_flags_the_regression(_check_fixture_paths, capsys):
+    """Control case: omitting --num-queries/--qrels keeps the pre-#236 flat behavior."""
+    baseline, report = _check_fixture_paths
+    exit_code = main(["check", "--report", str(report), "--baseline", str(baseline)])
+    assert exit_code == 1
+    assert "hybrid.mrr" in capsys.readouterr().out
+
+
+def test_cli_check_with_num_queries_derives_tolerance_and_passes(_check_fixture_paths, capsys):
+    baseline, report = _check_fixture_paths
+    exit_code = main(
+        [
+            "check",
+            "--report",
+            str(report),
+            "--baseline",
+            str(baseline),
+            "--num-queries",
+            "5",
+        ]
+    )
+    assert exit_code == 0
+    assert "no regressions" in capsys.readouterr().out.lower()
+
+
+def test_cli_check_with_valid_qrels_derives_tolerance_and_passes(
+    _check_fixture_paths, tmp_path, capsys
+):
+    baseline, report = _check_fixture_paths
+    qrels = tmp_path / "qrels.jsonl"
+    qrels.write_text(
+        "\n".join(
+            json.dumps({"query_id": f"q{i}", "query": "x", "document_id": "d", "relevance": 3})
+            for i in range(5)
+        )
+    )
+    exit_code = main(
+        ["check", "--report", str(report), "--baseline", str(baseline), "--qrels", str(qrels)]
+    )
+    assert exit_code == 0
+    assert "no regressions" in capsys.readouterr().out.lower()
+
+
+def test_cli_check_with_bad_qrels_path_errors_loudly_instead_of_silently_falling_back(
+    _check_fixture_paths, tmp_path, capsys
+):
+    """An explicit --qrels that resolves to 0 gated queries must not silently degrade
+
+    to the flat --tolerance -- that would defeat the entire point of asking for
+    derivation. It must fail loud instead (distinct exit code, explanatory message).
+    """
+    baseline, report = _check_fixture_paths
+    missing_qrels = tmp_path / "does-not-exist.jsonl"
+    exit_code = main(
+        [
+            "check",
+            "--report",
+            str(report),
+            "--baseline",
+            str(baseline),
+            "--qrels",
+            str(missing_qrels),
+        ]
+    )
+    assert exit_code == 2
+    out = capsys.readouterr().out
+    assert "--qrels" in out
+    assert str(missing_qrels) in out
+    assert "0" in out
+
+
+def test_cli_check_with_all_abstention_qrels_errors_loudly(_check_fixture_paths, tmp_path, capsys):
+    """A qrels file that parses fine but has no gated (non-abstention) query is the
+
+    same "explicit opt-in resolved to nothing" case as a missing file, and must
+    fail the same loud way rather than silently using the flat --tolerance.
+    """
+    baseline, report = _check_fixture_paths
+    qrels = tmp_path / "all-abstention.jsonl"
+    qrels.write_text(
+        json.dumps(
+            {
+                "query_id": "q1",
+                "query": "x",
+                "document_id": "d",
+                "relevance": 0,
+                "category": "abstention",
+            }
+        )
+    )
+    exit_code = main(
+        ["check", "--report", str(report), "--baseline", str(baseline), "--qrels", str(qrels)]
+    )
+    assert exit_code == 2
+    assert "--qrels" in capsys.readouterr().out
+
+
+def test_cli_check_explicit_num_queries_zero_errors_loudly(_check_fixture_paths, capsys):
+    """A literal --num-queries 0 is also an explicit (if odd) opt-in to derivation."""
+    baseline, report = _check_fixture_paths
+    exit_code = main(
+        [
+            "check",
+            "--report",
+            str(report),
+            "--baseline",
+            str(baseline),
+            "--num-queries",
+            "0",
+        ]
+    )
+    assert exit_code == 2
+    assert "--num-queries" in capsys.readouterr().out
