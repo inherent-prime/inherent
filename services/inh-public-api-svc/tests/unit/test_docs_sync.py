@@ -154,9 +154,7 @@ def test_postman_upload_description_mentions_supported_ocr_image_types():
     """Postman's upload-field description must mention all supported OCR image types."""
     text = _read_utf8(POSTMAN_COLLECTION_PATH)
     for mime in ("image/png", "image/jpeg", "image/webp", "image/tiff", "image/bmp"):
-        assert mime in text, (
-            f"{POSTMAN_COLLECTION_PATH} upload description must mention {mime}"
-        )
+        assert mime in text, f"{POSTMAN_COLLECTION_PATH} upload description must mention {mime}"
 
 
 # ---------------------------------------------------------------------------
