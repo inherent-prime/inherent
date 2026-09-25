@@ -1,6 +1,6 @@
 [project]
 name = "inh-contracts"
-version = "2.3.0"
+version = "2.3.1"
 description = "Shared contracts (Weaviate naming, versioned event schemas, embedding provider abstraction) consumed by the ingestion and public-api services"
 readme = "Readme.md"
 requires-python = ">=3.11"

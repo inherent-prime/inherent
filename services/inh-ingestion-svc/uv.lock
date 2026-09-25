@@ -744,7 +744,7 @@ wheels = [
 
 [[package]]
 name = "inh-contracts"
-version = "2.3.0"
+version = "2.3.1"
 source = { directory = "../inh-contracts" }
 dependencies = [
     { name = "httpx" },
@@ -780,7 +780,7 @@ dev = [
 
 [[package]]
 name = "inh-ingestion-svc"
-version = "0.7.0"
+version = "0.7.1"
 source = { editable = "." }
 dependencies = [
     { name = "beautifulsoup4" },

@@ -537,7 +537,7 @@ wheels = [
 
 [[package]]
 name = "inh-contracts"
-version = "2.3.0"
+version = "2.3.1"
 source = { directory = "../inh-contracts" }
 dependencies = [
     { name = "httpx" },

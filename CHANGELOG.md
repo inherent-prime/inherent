@@ -5,6 +5,8 @@ All notable changes to Inherent are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-09-25
+
 ### Security
 
 - **Empty-string workspace scopes now raise instead of silently widening a
