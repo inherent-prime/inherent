@@ -178,7 +178,9 @@ weaviate:
 minio:
   enabled: true
   image:
-    repository: minio/minio
+    # quay.io, not Docker Hub: MinIO pulled its Docker Hub repos (minio/minio,
+    # minio/mc now 404), so an unqualified name hits ImagePullBackOff (#383).
+    repository: quay.io/minio/minio
     # Pinned MinIO release tag (compose uses no explicit minio service today
     # — Azure prod profile is the first place MinIO runs as its own
     # workload; pin per spec's "pinned minio/minio release tag").
@@ -186,7 +188,7 @@ minio:
   # `mc` client image for the bucket-init Job and the mirror CronJob — pinned
   # alongside the server image (same upstream release train).
   mcImage:
-    repository: minio/mc
+    repository: quay.io/minio/mc # quay.io for the same reason as above (#383)
     tag: "RELEASE.2024-10-08T09-37-26Z"
   resources:
     requests: { cpu: 250m, memory: 512Mi }

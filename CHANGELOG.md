@@ -22,6 +22,14 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Fixed
 
+- **Helm chart pulls MinIO from quay.io (#383).** MinIO removed the
+  `minio/minio` and `minio/mc` repositories from Docker Hub, so a fresh
+  `helm install`/upgrade or pod reschedule on the Azure prod profile hit
+  `ImagePullBackOff` on the MinIO StatefulSet and bucket-init Job.
+  `charts/inherent/values.yaml` now points both at `quay.io/minio/*` (same
+  pinned tags). Clusters overriding `minio.image.repository` /
+  `minio.mcImage.repository` must update the override. docker-compose is
+  unaffected (it runs `s3rver`, not MinIO).
 - **`_delivery_count` and five sibling Redis MQ guards survive `python -O`
   (#256).** Bare `assert self._redis is not None` statements are stripped
   under `-O`/`PYTHONOPTIMIZE=1`, moving the failure from a clear assertion to
