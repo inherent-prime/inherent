@@ -24,7 +24,7 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Fixed
 
-- **Helm chart pulls MinIO from quay.io (#383).** MinIO removed the
+- **Helm chart pulls MinIO from quay.io (#384, #383).** MinIO removed the
   `minio/minio` and `minio/mc` repositories from Docker Hub, so a fresh
   `helm install`/upgrade or pod reschedule on the Azure prod profile hit
   `ImagePullBackOff` on the MinIO StatefulSet and bucket-init Job.
