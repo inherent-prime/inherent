@@ -7,8 +7,15 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, Up
 
 from src.config import settings
 from src.core.exceptions import BadRequestError, ServiceUnavailableError
+from src.mcp_server.quotas import check_quota, quota_denial_to_rate_limit_error
 from src.models.document import Document, DocumentListResponse, DocumentUploadResponse
-from src.services.auth import ResolvedAuth, resolve_workspace_read, resolve_workspace_write
+from src.services.auth import (
+    Principal,
+    ResolvedAuth,
+    get_authorized_workspace_ids,
+    resolve_workspace_read,
+    resolve_workspace_write,
+)
 from src.services.compensation import mark_document_failed_with_retry
 from src.services.database import DatabaseService, get_database
 from src.services.deletion import delete_document_everywhere
@@ -44,6 +51,49 @@ async def upload_document(
         raise BadRequestError(
             detail="Workspace ID required. Provide X-Workspace-Id header.",
         )
+
+    # Per-identity entitlement/quota enforcement (#365): before #365 this
+    # route went straight from resolve_workspace_write to intake_document,
+    # so a principal with max_documents/writes_per_day configured was
+    # enforced over MCP (http_transport.py's call_tool) but NOT here -- the
+    # exact gap #365 closes. Reuses the SAME Principal + check_quota seam
+    # MCP already uses ("upload_document" -- not a REST-specific tool name --
+    # so this route participates in quotas.py's _DOCUMENT_INCREASING_TOOLS
+    # set without a second entry: uploading via REST or via the MCP tool is
+    # the same conceptual action, just a different transport). See
+    # quotas.py's module docstring for the fail-open/fail-closed split this
+    # inherits unchanged, and why this is a no-op for every deployment today
+    # (NullEntitlementsProvider -> unlimited -> check_quota returns
+    # immediately without touching the rate limiter or the database).
+    principal = Principal.from_api_key(auth.key_info)
+    denial = await check_quota(
+        principal,
+        "upload_document",
+        "write",
+        # max_documents is documented as a cap on "documents a principal may
+        # hold" (Entitlements.max_documents) -- PRINCIPAL-wide, not
+        # workspace-wide. MCP's own call site (http_transport.py's
+        # _workspace_ids_for_quota) therefore counts across every workspace
+        # the identity is authorised to write to, not just whichever
+        # workspace one particular tool call names -- because a caller could
+        # otherwise dodge the cap by spreading uploads across workspaces it
+        # can reach. The same is true here: a user-scoped REST key selects
+        # its target workspace per-request via X-Workspace-Id, so counting
+        # only THIS request's resolved workspace (resolve_workspace_write's
+        # single target) would make REST's enforcement weaker than MCP's for
+        # the identical principal and the identical limit -- exactly the
+        # kind of surface-inconsistent gap #365 exists to close. Passing the
+        # full authorised set (same helper MCP and resolve_workspace_write
+        # itself already use) keeps both surfaces counting the same thing
+        # for the same identity. For a workspace-scoped key (the common
+        # case) this set is exactly [workspace_id] anyway, so this changes
+        # nothing there.
+        workspace_ids_for_max_documents=lambda: get_authorized_workspace_ids(
+            auth.key_info, database
+        ),
+    )
+    if denial is not None:
+        raise quota_denial_to_rate_limit_error(denial)
 
     content_type = file.content_type or "application/octet-stream"
     file_content = await file.read()

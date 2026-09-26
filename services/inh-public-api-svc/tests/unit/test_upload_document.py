@@ -803,9 +803,10 @@ class TestUploadExtensionFallback:
     """#122: an `application/octet-stream` (or absent) Content-Type falls
     back to the filename extension -- completing the design
     `FileTypeSpec.extensions` was reserved for at #117. See
-    `inh_contracts.file_types.get_spec_for_upload`'s docstring for the full
+    `inh_contracts.file_types.resolve_upload_spec`'s docstring for the full
     resolution order and the security rationale for restricting this to
-    GENERIC content types only.
+    GENERIC content types only. #211: when the fallback fires, the stored
+    content_type is also normalized to the resolved spec's specific MIME.
     """
 
     def _app(self, write_key, mock_db, mock_storage, mock_mq):
@@ -870,10 +871,14 @@ class TestUploadExtensionFallback:
                     headers={"X-API-Key": "ink_test_key"},
                 )
         assert response.status_code == 201
-        # The client-sent value is preserved verbatim in stored content_type
-        # (#122) -- the resolved 'code' spec is used only to VALIDATE the
-        # upload, never to rewrite what was declared.
-        assert response.json()["mime_type"] == "application/octet-stream"
+        # #211: `application/octet-stream` is not a client assertion -- it's
+        # the "I don't know" default -- so once the extension fallback
+        # resolves the 'code' spec, the stored content_type is normalized to
+        # the specific MIME that fallback resolved to (`text/x-python` for
+        # `.py`), matching what an accurate direct declaration (the test
+        # above) already stores. This replaces #122's original "preserved
+        # verbatim" behavior for exactly the generic-content-type case.
+        assert response.json()["mime_type"] == "text/x-python"
         application.dependency_overrides.clear()
 
     async def test_yaml_and_xml_also_get_the_octet_stream_fallback(
@@ -1577,3 +1582,101 @@ class TestUploadContentDedup:
         assert seen == set(list(seen)[:1]), "all verbatim copies must reuse one document_id"
         assert len(seen) == 1
         application.dependency_overrides.clear()
+
+
+class _FixedEntitlementsProvider:
+    """Entitlements provider test double returning one fixed value --
+    mirrors ``tests/unit/test_quotas.py``'s ``_FixedProvider``.
+    ``set_entitlements_provider`` takes an ``EntitlementsProvider`` (an
+    object with an async ``get_entitlements`` method), not a bare
+    ``Entitlements`` value."""
+
+    def __init__(self, entitlements) -> None:
+        self._entitlements = entitlements
+
+    async def get_entitlements(self, principal):  # noqa: ARG002
+        return self._entitlements
+
+
+class TestUploadDocumentQuotaEnforcement:
+    """#365: POST /v1/documents was the REST gap in #309's per-identity
+    quotas -- ``check_quota`` ran on the MCP dispatcher only, never here.
+    These tests exercise the real HTTP route (not ``check_quota`` directly --
+    that's ``tests/unit/test_quotas.py``'s job) to pin the REST-specific
+    parts: the route actually calls it, and a denial renders as REST's
+    existing 429 contract rather than an MCP-shaped payload or a raw 500.
+    """
+
+    async def test_writes_per_day_exhausted_returns_429(
+        self, client, mock_storage, mock_mq, mock_db
+    ):
+        from src.services.entitlements import Entitlements, set_entitlements_provider
+
+        set_entitlements_provider(_FixedEntitlementsProvider(Entitlements(writes_per_day=0)))
+
+        response = await client.post(
+            "/v1/documents",
+            files=_file_payload(),
+            headers={"X-API-Key": "ink_test_key"},
+        )
+
+        assert response.status_code == 429
+        assert response.json()["detail"].count("writes_per_day") >= 1
+        # Denied before intake: no partial upload, no storage write, no MQ publish.
+        mock_storage.upload_file.assert_not_awaited()
+        mock_mq.publish.assert_not_awaited()
+
+    async def test_max_documents_exceeded_returns_429(self, client, mock_storage, mock_mq, mock_db):
+        from src.services.entitlements import Entitlements, set_entitlements_provider
+
+        set_entitlements_provider(_FixedEntitlementsProvider(Entitlements(max_documents=2)))
+        mock_db.get_document_count_for_workspaces = AsyncMock(return_value=2)
+
+        with patch("src.services.database.get_database", AsyncMock(return_value=mock_db)):
+            response = await client.post(
+                "/v1/documents",
+                files=_file_payload(),
+                headers={"X-API-Key": "ink_test_key"},
+            )
+
+        assert response.status_code == 429
+        assert "max_documents" in response.json()["detail"]
+        mock_storage.upload_file.assert_not_awaited()
+        mock_mq.publish.assert_not_awaited()
+        # The single workspace this write-scoped key is bound to was counted.
+        mock_db.get_document_count_for_workspaces.assert_awaited_once_with(["test-workspace-id"])
+
+    async def test_max_documents_under_cap_still_uploads(
+        self, client, mock_storage, mock_mq, mock_db
+    ):
+        """Sanity check for the boundary itself: under the cap still succeeds."""
+        from src.services.entitlements import Entitlements, set_entitlements_provider
+
+        set_entitlements_provider(_FixedEntitlementsProvider(Entitlements(max_documents=5)))
+        mock_db.get_document_count_for_workspaces = AsyncMock(return_value=1)
+
+        with patch("src.services.database.get_database", AsyncMock(return_value=mock_db)):
+            response = await client.post(
+                "/v1/documents",
+                files=_file_payload(),
+                headers={"X-API-Key": "ink_test_key"},
+            )
+
+        assert response.status_code == 201
+
+    async def test_default_deployment_unaffected(self, client, mock_storage, mock_mq):
+        """The regression guard that matters most (#365): with NO entitlements
+        provider installed -- the shipped ``NullEntitlementsProvider``, every
+        principal unlimited -- an ordinary REST upload behaves exactly as it
+        did before #365. Nothing in this test installs a provider; the
+        autouse ``_reset_entitlements_provider_singleton`` fixture
+        (``tests/conftest.py``) guarantees this test sees the true default,
+        not a value leaked from another test."""
+        response = await client.post(
+            "/v1/documents",
+            files=_file_payload(),
+            headers={"X-API-Key": "ink_test_key"},
+        )
+        assert response.status_code == 201
+        mock_storage.upload_file.assert_awaited_once()
+        mock_mq.publish.assert_awaited_once()

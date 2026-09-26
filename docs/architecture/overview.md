@@ -127,15 +127,24 @@ two implementations (`document_intake.py:1-9`). In order:
 2. **Three-signal type validation.** An upload carries three independent
    signals — declared `Content-Type`, filename extension, and actual bytes —
    and any pairwise disagreement is caught:
-   - `get_spec_for_upload` (`document_intake.py:118`) resolves the declared
+   - `resolve_upload_spec` (`document_intake.py:126`) resolves the declared
      MIME type against `FILE_TYPE_REGISTRY`; falls back to the filename
-     extension only when the declared type is generic/absent.
-   - `check_extension_consistency` (`document_intake.py:140`) — a filename
+     extension only when the declared type is generic/absent, and reports
+     which of those two paths fired.
+   - `check_extension_consistency` (`document_intake.py:149`) — a filename
      extension registered to a *different* type than the declared one is
      rejected (a real contradiction); text extensions never trigger this
      (`text/plain` is a truthful `Content-Type` for `.md`/`.csv`/etc).
-   - `sniff_content_type` (`document_intake.py:170`) — the bytes' magic
+   - `sniff_content_type` (`document_intake.py:179`) — the bytes' magic
      signature must agree with the declared type.
+   - **Stored label normalization (#211).** When resolution went through the
+     generic/extension fallback above, the STORED `content_type` (the
+     document row, the S3 object metadata, and the `document.uploaded` MQ
+     message ingestion reads from) is rewritten to the resolved spec's
+     specific MIME (via `mime_type_for_extension`, `document_intake.py:222`)
+     — `application/octet-stream` carries no real information, so nothing is
+     lost by replacing it with the answer already derived to validate the
+     upload. A SPECIFIC declared type is never rewritten, fallback or not.
    See [Supported file types](../reference/file-types.md#validation-at-upload)
    for the full validation table; this page's contribution is *why* three
    signals: any single check leaves a gap the other two close (a mislabeled
