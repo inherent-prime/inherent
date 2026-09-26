@@ -413,6 +413,24 @@ def test_chart_pins_weaviate_1_27_0() -> None:
     )
 
 
+def test_chart_pulls_minio_images_from_quay() -> None:
+    """#383: MinIO removed minio/minio and minio/mc from Docker Hub, so an
+    unqualified repository (which resolves to docker.io) ImagePullBackOffs
+    the StatefulSet and the bucket-init Job. Pin both to quay.io."""
+    values_text = _values_yaml_text()
+    assert values_text is not None, "charts/inherent/values.yaml is missing (#320)"
+    minio_block = _top_level_block(values_text, "minio")
+    repositories = re.findall(r"^\s*repository:\s*(\S+)", minio_block, re.MULTILINE)
+    for image in ("minio/minio", "minio/mc"):
+        assert f"quay.io/{image}" in repositories, (
+            f"expected quay.io/{image} in values.yaml's minio: block -- the "
+            f"Docker Hub {image} repository no longer exists (#383)"
+        )
+        assert image not in repositories, (
+            f"bare {image} resolves to Docker Hub, which 404s (#383)"
+        )
+
+
 def test_chart_sets_environment_production_for_api() -> None:
     values_text = _values_yaml_text()
     assert values_text is not None, "charts/inherent/values.yaml is missing (#320)"

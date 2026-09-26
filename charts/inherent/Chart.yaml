@@ -5,7 +5,7 @@ type: application
 version: 0.1.0
 # appVersion tracks inherent_version (root tfvar); helm_release (modules/apps)
 # overrides image.tag per-value, this is just the chart's own metadata default.
-appVersion: "0.6.0"
+appVersion: "0.7.1"
 keywords:
   - inherent
   - rag
