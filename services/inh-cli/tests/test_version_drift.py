@@ -4,6 +4,7 @@ import json
 
 from typer.testing import CliRunner
 
+from inh_cli import __version__
 from inh_cli.main import app
 from inh_cli.secrets import load_or_create_compose_env
 from inh_cli.stack import version_drift_message
@@ -41,4 +42,4 @@ def test_status_warning_uses_stderr_and_keeps_json_parseable(inherent_home, monk
 
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["health"]["version"] == "0.8.0"
-    assert "CLI 0.7.0 and engine 0.8.0 differ" in result.stderr
+    assert f"CLI {__version__} and engine 0.8.0 differ" in result.stderr
