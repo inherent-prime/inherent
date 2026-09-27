@@ -5,6 +5,10 @@ All notable changes to Inherent are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- `inherent` CLI version is `0.7.1rc1`, the first prerelease published to TestPyPI through the per-package Trusted Publisher environments. (#388, #386)
+
 ## [0.7.1] — 2026-09-25
 
 ### Security
