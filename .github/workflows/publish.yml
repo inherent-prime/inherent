@@ -134,6 +134,14 @@ jobs:
 
   # OIDC means PyPI verifies this repository and approved workflow identity;
   # no long-lived upload credential is stored in repository secrets.
+  #
+  # The environment MUST be per-package (#386): PyPI's Trusted Publisher match
+  # key is (owner, repository, workflow, environment) -- it does not see
+  # matrix.package. A single shared "pypi-publish" environment makes both
+  # packages present an identical OIDC `sub` claim, so PyPI can only ever hold
+  # a pending registration for whichever project claimed that tuple first;
+  # registering the second package's Trusted Publisher is refused outright
+  # ("already been registered for a different project name").
   publish-cli:
     name: publish ${{ matrix.package }} to PyPI
     needs: [check-cli-version, build-cli, wheel-install-check]
@@ -145,7 +153,7 @@ jobs:
       needs.build-cli.result == 'success' &&
       (needs.check-cli-version.outputs.matches != 'true' || needs.wheel-install-check.result == 'success')
     runs-on: ubuntu-latest
-    environment: pypi-publish
+    environment: pypi-publish-${{ matrix.package }}
     permissions:
       id-token: write
     strategy:

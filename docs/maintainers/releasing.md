@@ -183,12 +183,29 @@ docker run --rm --entrypoint grep \
 `inh-contracts>=2.2,<3`; publishing both keeps an installed CLI independent of
 the repository checkout.
 
-Configure **Settings → Environments → `pypi-publish` → Required reviewers**.
-Then configure PyPI and TestPyPI Trusted Publishing for this repository and
-workflow. A prerelease tag publishes to TestPyPI; a final tag publishes to
-PyPI. The workflow uses OIDC and stores no package-upload token. It builds a
-clean virtual environment from the two wheels, runs `inherent --version`, and
-checks that the bundled release Compose file is present before approval.
+The environment is **per package**, not shared (#386): PyPI's Trusted
+Publisher match key is (owner, repository, workflow, environment), which
+cannot see which matrix package is publishing. A single shared environment
+makes `inherent` and `inh-contracts` present an identical OIDC `sub` claim,
+so PyPI accepts a Trusted Publisher registration for whichever project
+claims that tuple first and refuses the other outright.
+
+Configure **Settings → Environments → `pypi-publish-inh-contracts` →
+Required reviewers** and **`pypi-publish-inherent` → Required reviewers**
+(two separate environments). Then, for **each** package, configure a PyPI
+*and* a TestPyPI Trusted Publisher naming that package's own environment —
+four registrations total:
+
+| PyPI project name | Owner | Repository | Workflow | Environment name |
+| --- | --- | --- | --- | --- |
+| `inh-contracts` | `inherent-prime` | `inherent` | `publish.yml` | `pypi-publish-inh-contracts` |
+| `inherent` | `inherent-prime` | `inherent` | `publish.yml` | `pypi-publish-inherent` |
+
+Repeat both rows on [test.pypi.org](https://test.pypi.org). A prerelease tag
+publishes to TestPyPI; a final tag publishes to PyPI. The workflow uses OIDC
+and stores no package-upload token. It builds a clean virtual environment
+from the two wheels, runs `inherent --version`, and checks that the bundled
+release Compose file is present before approval.
 
 ## Documentation Rule
 
