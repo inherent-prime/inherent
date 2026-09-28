@@ -554,6 +554,12 @@ for retrieval:
   merges rather than overwrites, since both tests share one file within a run;
   the standalone CLI (`run_search_benchmark.py`) writes the same shape under a
   `cli_search` key via its own `--report` flag.
+- **public-api MCP round-trip benchmark** (`test_mcp_round_trip.py`, #396)
+  writes the same p50/p95/p99/min/max shape under `mcp_search_documents_latency`,
+  `mcp_tool_profile_latency` (when a pack is bound, see below), and
+  `mcp_search_documents_latency_oauth` (when a real bearer token is supplied)
+  to the SAME `search-benchmark-report.json` — see
+  [MCP retrieval latency](#mcp-retrieval-latency-396) below.
 - **ingestion throughput benchmark** (`test_ingestion_throughput.py`) writes
   `ingestion-benchmark-report.json` with an `ingestion_throughput` key
   (`docs_per_sec`, `elapsed_s`, `batch_size`, commit SHA), via the sibling
@@ -568,6 +574,101 @@ retrievable. Override the output path locally with the `BENCHMARK_REPORT` env
 var. These are visibility only — no CI gate reads them back; the loose
 SLO assertions already in the tests are what fails the build on a gross
 regression.
+
+## MCP retrieval latency (#396)
+
+#396 sets a p95 < 3000ms target for end-to-end retrieval **via MCP**
+specifically (as opposed to REST's `/v1/search`, already covered by
+[the benchmarks above](#benchmark-json-report-artifacts-req-evl-3)). Two
+tests, at two different layers:
+
+- **Live round trip** (`tests/benchmark/test_mcp_round_trip.py`, `compose` +
+  `benchmark`): opens a real Streamable-HTTP MCP session against a booted
+  stack and sends real `tools/call` JSON-RPC requests for `search_documents`
+  and (when the benchmark workspace has one bound) a vertical-pack tool-profile
+  tool (#392) -- network, auth, the real search backend, everything. Asserts
+  p95 < `MCP_P95_LATENCY_SLO_MS` (default 3000, #396's own target; raise it
+  for a demonstrably slower CI runner, same escape hatch the REST benchmark
+  uses). Run it with:
+
+  ```bash
+  make dev
+  cd services/inh-public-api-svc
+  uv run pytest tests/benchmark/test_mcp_round_trip.py -m 'benchmark and compose' -v --no-cov
+  ```
+
+  The tool-profile case skips (doesn't fail) unless the stack's benchmark
+  workspace (`INTEGRATION_WORKSPACE_ID`, default `ws_local_001`) has a
+  vertical pack bound via `WORKSPACE_VERTICAL_PACKS` / `VERTICAL_PACKS_DIR`
+  (see `src/services/workspace_pack.py`) -- neither `make dev`'s default
+  compose config nor `integration.yml`'s CI job sets either today. The OAuth
+  case skips unless `INTEGRATION_OAUTH_TOKEN` (a bearer token from a real
+  authorization server pointed at the stack) is set -- the compose stack has
+  no IdP to mint one against, the same limit
+  `test_compose_mcp_oauth.py` documents for the discovery handshake.
+
+- **Offline dispatch-overhead micro-benchmark**
+  (`tests/benchmark/test_mcp_dispatch_overhead.py`, no marker -- runs in the
+  default suite, including in an environment with no Compose stack at all):
+  the search **backend is mocked** (`SearchService.search` returns instantly),
+  isolating OUR OWN per-call cost -- API-key/permission checks, tool-profile
+  resolution (workspace-pack lookup + caching, #392), audit-event construction
+  (#393), and JSON-serializing the structured response -- from network/DB/
+  vector-store latency. Runs both the built-in `search_documents` (stdio) and
+  a tool-profile tool (`search_sections`, over the real Streamable HTTP
+  dispatcher) through a warm-up pass, then 200 measured calls each, and
+  asserts p95 < `MCP_DISPATCH_P95_MS` (default 50ms -- ~1/60th of #396's
+  budget, loose on purpose so it never flakes; see the file's own docstring).
+
+  Measured on this sandbox (mocked DB/search, no Compose stack, 200 calls after
+  20 warm-up):
+
+  | path                                   | p50     | p95     | max     |
+  |-----------------------------------------|---------|---------|---------|
+  | `search_documents` (stdio)              | 3.65ms  | 5.44ms  | 8.73ms  |
+  | `search_sections` tool profile (HTTP)   | 1.70ms  | 2.57ms  | 5.57ms  |
+
+  Both are far inside the 50ms ceiling and negligible against the 3000ms
+  end-to-end budget. Profiling (`cProfile` over 500 warm calls) found that
+  ~90% of `search_documents`'s dispatch time is the `mcp` SDK's own
+  `jsonschema.validate(instance, schema)` call in
+  `mcp.server.lowlevel.server.Server.call_tool`'s wrapper -- `validate()` is
+  the convenience function that re-runs `Validator.check_schema(schema)` (full
+  meta-schema validation of the STATIC tool schema) on every single call, a
+  cost `jsonschema`'s own docs call out ("if you intend to validate multiple
+  instances with the same schema, you likely would prefer using the
+  `Validator.validate` method directly on a specific validator"). This lives
+  inside the pinned third-party `mcp` dependency, not this codebase, and even
+  at ~4-8ms/call it is nowhere near #396's 3000ms budget (network + DB +
+  vector-search latency dominates any real deployment by orders of magnitude),
+  so it was left as a documented finding rather than papered over with a
+  monkeypatch of vendored SDK internals -- see the tracked follow-up.
+
+  Every other hotspot #396 named was already handled as of this issue's HEAD
+  (`bce690b`), confirmed here by the same profiling pass rather than assumed:
+  - `resolve_workspace_pack` / `discover_all_packs` (`src/services/workspace_pack.py`):
+    `lru_cache`d by `packs_dir` (#390) -- a pack's YAML is parsed once per
+    worker process, not per call.
+  - JWKS fetch (`src/services/auth.py::_get_jwks_client`): a process-wide
+    cached `PyJWKClient` with `lifespan=settings.oauth_jwks_cache_seconds`,
+    not refetched per call (#295).
+  - `list_tools` rebuilding tool-profile `ToolDef`s per call
+    (`tool_profiles.resolve_profile_tools`): necessarily per-call (a caller's
+    bound pack can change between calls, and workspace authorization must be
+    re-checked every time -- #180's "re-validate on every call" posture), but
+    the pack lookup it calls into is the same cached `resolve_workspace_pack`
+    above, so this profiled at ~1-2ms of the ~2.6ms p95 measured for the
+    tool-profile path.
+  - Per-call DB lookups (`validate_api_key`, `get_authorized_workspace_ids`):
+    deliberately NOT cached -- re-checked on every call so key revocation and
+    workspace-membership changes take effect immediately (see #180's and
+    #138's comments in `src/services/auth.py`); caching these would trade a
+    few milliseconds for a real security regression, so they were left alone.
+  - The MCP SDK re-calling `list_tools` on a `call_tool` cache MISS
+    (`mcp.server.lowlevel.server.Server._get_cached_tool_definition`): the
+    SDK caches by tool name for the `Server` instance's whole process
+    lifetime (`src/main.py` builds it once, not per request), so this cost is
+    paid once per unique tool name for the life of the process, not per call.
 
 ## Coverage
 
