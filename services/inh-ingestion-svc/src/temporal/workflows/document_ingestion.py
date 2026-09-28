@@ -31,6 +31,7 @@ with workflow.unsafe.imports_passed_through():
     from src.temporal.activities.fetch import fetch_document
     from src.temporal.activities.status import create_pending_document, set_document_status
     from src.temporal.activities.store import store_in_postgresql, store_in_weaviate
+    from src.temporal.activities.tagging import tag_chunks
     from src.temporal.activities.tenant import ensure_tenant_ready, update_workspace_stats
     from src.temporal.document_failure import DOCUMENT_INGESTION_FAILED_TYPE
     from src.temporal.models import (
@@ -46,6 +47,7 @@ with workflow.unsafe.imports_passed_through():
         ResolveDeadLetterJobsInput,
         SetDocumentStatusInput,
         StoreDocumentInput,
+        TagChunksInput,
         UpdateStatsInput,
         WorkflowResult,
     )
@@ -500,6 +502,9 @@ class DocumentIngestionWorkflow:
                     # the registry chunking_hint when no explicit per-document
                     # strategy override was given.
                     content_type=input.content_type,
+                    # Vertical pack (inherent#390): None for every workspace
+                    # that hasn't opted into one -- unchanged dispatch.
+                    vertical_pack=input.vertical_pack,
                 ),
                 start_to_close_timeout=timedelta(minutes=2),
                 retry_policy=RetryPolicy(
@@ -512,6 +517,30 @@ class DocumentIngestionWorkflow:
 
             self._chunks_created = chunk_output.chunk_count
             self._progress_percent = 60
+
+            # Step 4b: Tag chunks (inherent#390 item 4) -- runs AFTER chunking,
+            # only for a pack-bound workspace (vertical_pack is None for every
+            # other document, in which case tag_chunks is a documented no-op).
+            # Best-effort: a tagging failure must never fail the whole
+            # document, since the untagged chunks are still perfectly usable.
+            if input.vertical_pack:
+                try:
+                    await workflow.execute_activity(
+                        tag_chunks,
+                        TagChunksInput(
+                            workflow_run_id=workflow_run_id,
+                            document_id=input.document_id,
+                            vertical_pack=input.vertical_pack,
+                            document_metadata={"title": input.original_filename},
+                        ),
+                        start_to_close_timeout=timedelta(minutes=2),
+                        retry_policy=RetryPolicy(maximum_attempts=2),
+                    )
+                except Exception as tag_err:  # noqa: BLE001 - best-effort, see above
+                    workflow.logger.warning(
+                        "tag_chunks failed; continuing without tags",
+                        error=str(tag_err),
+                    )
 
             # Calculate processing time up to this point
             processing_time_ms = int((workflow.now() - start_time).total_seconds() * 1000)

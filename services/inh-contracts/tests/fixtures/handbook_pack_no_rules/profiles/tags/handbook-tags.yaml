@@ -1,0 +1,13 @@
+# Tag schema WITHOUT any rules block -- backward-compat fixture (inherent#390):
+# packs written before `rules` existed must still validate unchanged.
+fields:
+  section_type:
+    type: enum
+    required: true
+    values: [pricing, security, other]
+  product:
+    type: string
+    required: false
+  effective_date:
+    type: date
+    required: false

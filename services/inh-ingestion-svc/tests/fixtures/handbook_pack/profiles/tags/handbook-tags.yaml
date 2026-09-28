@@ -1,0 +1,17 @@
+# Tag schema for the generic test fixture pack (inherent#390).
+fields:
+  section_type:
+    type: enum
+    required: true
+    values: [pricing, security, other]
+    rules:            # value -> case-insensitive keywords/regexes (heading+text)
+      pricing: ["price", "fee", "\\bcost\\b"]
+      security: ["security", "encrypt", "\\baccess control\\b"]
+      # "other" intentionally has no rules: it is the fallback value when
+      # nothing else scores a match (see RulesTagger).
+  product:
+    type: string
+    required: false
+  effective_date:
+    type: date
+    required: false

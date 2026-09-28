@@ -34,6 +34,10 @@ def _make_settings():
     settings.temporal_host = "localhost:7233"
     settings.temporal_namespace = "default"
     settings.temporal_task_queue = "ingestion"
+    # Vertical pack binding (inherent#390 follow-up): a real dict, not a
+    # MagicMock, so `.get(workspace_id)` returns a real None by default
+    # instead of another MagicMock leaking into DocumentIngestionInput.
+    settings.workspace_vertical_packs = {}
     return settings
 
 

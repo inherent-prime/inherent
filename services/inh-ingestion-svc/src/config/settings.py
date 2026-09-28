@@ -5,7 +5,8 @@ from typing import Literal
 
 from inh_contracts.defaults import DEFAULT_MONGODB_URI, DEFAULT_S3_BUCKET, DEFAULT_S3_REGION
 from inh_contracts.events import StorageBackend
-from pydantic import Field
+from inh_contracts.workspace_packs import parse_workspace_vertical_packs
+from pydantic import Field, PrivateAttr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -98,6 +99,47 @@ class Settings(BaseSettings):
     )
     max_chunk_size: int = Field(1000, alias="MAX_CHUNK_SIZE")
     chunk_overlap: int = Field(200, alias="CHUNK_OVERLAP")
+
+    # Vertical packs (inherent#390): directory of mounted packs, one
+    # subdirectory per pack, each with its own vertical.yaml at its root.
+    # Unset (None) by default -- pack discovery is OFF and every workspace
+    # behaves exactly as it did before this feature existed. Set this to opt
+    # a deployment INTO pack support; a given workspace still only uses a
+    # pack when it is explicitly bound to one (ChunkTextInput.vertical_pack).
+    vertical_packs_dir: str | None = Field(None, alias="VERTICAL_PACKS_DIR")
+
+    # Operator-configured workspace -> pack binding for a hand-onboarded
+    # pilot (inherent#390 follow-up): "ws_abc=support,ws_def=handbook". Empty
+    # by default -- no bindings, every workspace unaffected. Parsed once at
+    # startup (see parse_workspace_vertical_packs, below) into
+    # `workspace_vertical_packs`; a malformed value fails the service to
+    # start with a clear error rather than degrading quietly. Kept as a
+    # plain `str` field (not `dict`) so pydantic-settings never tries to
+    # JSON-decode the raw env value itself -- the parsing below is the only
+    # parser that ever runs on it.
+    #
+    # Only application code that starts a workflow (api/app.py, trigger.py)
+    # reads the parsed mapping -- workflow code never touches settings
+    # directly (Temporal determinism, #38); the resolved pack name is
+    # threaded through DocumentIngestionInput.vertical_pack as plain
+    # workflow input instead.
+    workspace_vertical_packs_raw: str = Field("", alias="WORKSPACE_VERTICAL_PACKS")
+    _workspace_vertical_packs: dict[str, str] = PrivateAttr(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _parse_workspace_vertical_packs(self) -> "Settings":
+        """Eagerly parse+validate at construction time (== service startup)
+        so a malformed WORKSPACE_VERTICAL_PACKS raises here, not later when
+        something first looks up a workspace."""
+        self._workspace_vertical_packs = parse_workspace_vertical_packs(
+            self.workspace_vertical_packs_raw
+        )
+        return self
+
+    @property
+    def workspace_vertical_packs(self) -> dict[str, str]:
+        """The parsed {workspace_id: pack_name} mapping (see field above)."""
+        return self._workspace_vertical_packs
 
     # Embedding Configuration
     # The model itself runs in a separate text-embeddings-inference (TEI) sidecar.

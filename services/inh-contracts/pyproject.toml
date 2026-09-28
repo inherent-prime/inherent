@@ -9,6 +9,9 @@ dependencies = [
     # Embedding provider HTTP adapters (#311) -- matches the floor already
     # required by inh-ingestion-svc so the resolved version can't drift.
     "httpx>=0.25.0",
+    # Vertical pack manifests are YAML (inherent#390) -- both consuming
+    # services already carry PyYAML transitively, this just makes it explicit.
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -23,6 +26,8 @@ dev = [
     "mypy==1.19.1",
     "bandit[toml]==1.9.3",
     "pre-commit>=3.6.0",
+    # Type stubs for the vertical-pack YAML loader (inherent#390).
+    "types-PyYAML",
 ]
 
 [build-system]
@@ -93,4 +98,5 @@ dev = [
     "mypy==1.19.1",
     "bandit[toml]==1.9.3",
     "pre-commit>=3.6.0",
+    "types-PyYAML",
 ]

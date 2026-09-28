@@ -6,7 +6,8 @@ from importlib.metadata import version as _pkg_version
 from typing import Literal
 
 from inh_contracts.defaults import DEFAULT_MONGODB_URI, DEFAULT_S3_BUCKET, DEFAULT_S3_REGION
-from pydantic import AliasChoices, Field
+from inh_contracts.workspace_packs import parse_workspace_vertical_packs
+from pydantic import AliasChoices, Field, PrivateAttr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.config.constants import DEFAULT_DATABASE_NAME, ERROR_BASE_URL
@@ -365,6 +366,39 @@ class Settings(BaseSettings):
             "reads as on."
         ),
     )
+
+    # Vertical packs (inherent#390): mirrors inh-ingestion-svc's own setting
+    # of the same name. A directory of mounted packs, one subdirectory per
+    # pack, each with its own vertical.yaml at its root. Unset (None) by
+    # default -- pack discovery is OFF and every workspace/search behaves
+    # exactly as it did before this feature existed.
+    vertical_packs_dir: str | None = Field(None, alias="VERTICAL_PACKS_DIR")
+
+    # Operator-configured workspace -> pack binding for a hand-onboarded
+    # pilot (inherent#390 follow-up): "ws_abc=support,ws_def=handbook". Empty
+    # by default -- no bindings, every workspace unaffected. Parsed once at
+    # startup (see parse_workspace_vertical_packs, below) into
+    # `workspace_vertical_packs`; a malformed value fails the service to
+    # start with a clear error rather than degrading quietly. Kept as a
+    # plain `str` field (not `dict`) so pydantic-settings never tries to
+    # JSON-decode the raw env value itself.
+    workspace_vertical_packs_raw: str = Field("", alias="WORKSPACE_VERTICAL_PACKS")
+    _workspace_vertical_packs: dict[str, str] = PrivateAttr(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _parse_workspace_vertical_packs(self) -> "Settings":
+        """Eagerly parse+validate at construction time (== service startup)
+        so a malformed WORKSPACE_VERTICAL_PACKS raises here, not later when
+        a search first looks up a workspace's bound pack."""
+        self._workspace_vertical_packs = parse_workspace_vertical_packs(
+            self.workspace_vertical_packs_raw
+        )
+        return self
+
+    @property
+    def workspace_vertical_packs(self) -> dict[str, str]:
+        """The parsed {workspace_id: pack_name} mapping (see field above)."""
+        return self._workspace_vertical_packs
 
     # Evals v1 — traffic-mined retrieval evals (design spec: evals-v1).
     # Capture is ON by default (opt-out model): every search is recorded to

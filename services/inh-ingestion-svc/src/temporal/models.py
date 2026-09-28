@@ -43,6 +43,15 @@ class DocumentIngestionInput:
     max_chunk_size: int | None = None
     chunk_overlap: int | None = None
 
+    # The vertical pack this document's workspace is bound to (inherent#390),
+    # e.g. "handbook". None (the default) is the ONLY value every existing
+    # caller ever passes today -- resolving workspace_id -> pack name is the
+    # upload path's job (out of scope for this issue: workspace records are
+    # owned by a different service, see inherent#390's report), so this
+    # field exists as the wiring point a future change plugs into, without
+    # requiring any change here.
+    vertical_pack: str | None = None
+
 
 @dataclass
 class WorkflowResult:
@@ -221,6 +230,11 @@ class ChunkData:
     # Defaults to "" so a chunk built without going through the activity
     # (unit tests constructing ChunkData directly) stays valid.
     chunking_strategy: str = ""
+    # This chunk's own section heading line, set only by the numbered_sections
+    # strategy (inherent#390) -- e.g. "1.1 Standard plan". Empty for every
+    # other strategy/every chunk staged before this field existed, so it is
+    # purely additive and never changes existing chunks' shape.
+    section_heading: str = ""
 
 
 @dataclass
@@ -245,6 +259,14 @@ class ChunkTextInput:
     # (or a content type with no registry entry) degrades to the pre-#129
     # global-config dispatch instead of crashing -- see _chunk_text_inner.
     content_type: str | None = None
+    # The vertical pack bound to this document's workspace (inherent#390),
+    # e.g. "handbook" -- a name looked up in VERTICAL_PACKS_DIR. None (the
+    # default) means "no pack bound" -- either pack discovery is off
+    # (VERTICAL_PACKS_DIR unset) or the workspace hasn't opted into one, and
+    # chunking behaves exactly as it did before this field existed. Resolving
+    # workspace_id -> pack name is the CALLER's job (the workflow/upload
+    # path); this activity only ever loads a pack it's explicitly told to.
+    vertical_pack: str | None = None
 
 
 @dataclass
@@ -255,6 +277,34 @@ class ChunkTextOutput:
     """
 
     chunk_count: int = 0
+
+
+@dataclass
+class TagChunksInput:
+    """Input for the tag_chunks activity (inherent#390 item 4).
+
+    Reads chunks from staging (same pattern as ChunkTextInput) and writes
+    them back with a "tags" key added to each chunk dict that got any.
+    """
+
+    workflow_run_id: str
+    document_id: str
+    # The vertical pack bound to this document's workspace. None (the
+    # default) means "no pack" -- tagging is skipped entirely and every
+    # chunk is written back completely unchanged (legacy behaviour exactly).
+    vertical_pack: str | None = None
+    # Trivially-derivable document-level values the rules tagger may use to
+    # fill string/date tag fields (e.g. {"title": "...", "uploaded_at":
+    # "2026-01-01"}) -- NOT free-text for the tagger to interpret; only used
+    # when a tag field's name matches a key here exactly (see RulesTagger).
+    document_metadata: dict[str, str] | None = None
+
+
+@dataclass
+class TagChunksOutput:
+    """Output from tag_chunks. Chunks (with tags) live in staging."""
+
+    tagged_count: int = 0
 
 
 @dataclass

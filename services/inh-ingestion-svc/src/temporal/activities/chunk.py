@@ -211,6 +211,20 @@ async def _chunk_text_inner(input: ChunkTextInput) -> ChunkTextOutput:
     # already failed loudly at extraction (#117's UnregisteredContentType),
     # so by the time chunking runs, "no hint" just means "an older caller
     # that hasn't been updated to pass content_type yet".
+    # numbered_sections pack resolution (inherent#390): a NEW top precedence
+    # level, below the explicit per-document override but above the
+    # chunking_hint/global dispatch below. Resolves to None (falls through to
+    # the pre-existing dispatch, unchanged) unless the caller explicitly
+    # bound this document's workspace to a pack (input.vertical_pack) AND
+    # that pack's own chunking profile says "numbered_sections" -- so an
+    # unset VERTICAL_PACKS_DIR, or a workspace with no pack, or a pack that
+    # uses a different strategy, all behave exactly as before this existed.
+    vertical = None
+    if input.strategy is None and input.vertical_pack:
+        from src.temporal.activities.numbered_sections import resolve_pack
+
+        vertical = resolve_pack(settings.vertical_packs_dir, input.vertical_pack)
+
     chunking_hint = None
     if input.strategy is None and input.content_type:
         from inh_contracts.file_types import get_spec_for_mime
@@ -252,6 +266,14 @@ async def _chunk_text_inner(input: ChunkTextInput) -> ChunkTextOutput:
             chunks = _chunk_by_paragraphs(text, document_id, max_size)
         else:  # tokens
             chunks = _chunk_by_size(text, document_id, max_size, overlap)
+    elif vertical is not None and vertical.chunking.strategy == "numbered_sections":
+        # New top precedence level (inherent#390): a pack-bound workspace
+        # whose chunking profile is numbered_sections wins over the
+        # chunking_hint/global dispatch below.
+        from src.temporal.activities.numbered_sections import split_numbered_sections
+
+        chunks = split_numbered_sections(text, document_id, vertical.chunking, overlap)
+        chunking_strategy_used = "numbered_sections"
     elif chunking_hint == "tabular":
         chunks = _chunk_by_rows(text, document_id, max_size)
         chunking_strategy_used = "rows"
@@ -347,6 +369,9 @@ async def _chunk_text_inner(input: ChunkTextInput) -> ChunkTextOutput:
             # signal is, then promoted into the persisted metadata JSONB by
             # store.py.
             "chunking_strategy": c.chunking_strategy,
+            # This chunk's own section heading (inherent#390's
+            # numbered_sections strategy only; "" for every other chunk).
+            "section_heading": c.section_heading,
         }
         for c in chunks
     ]

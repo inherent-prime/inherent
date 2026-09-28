@@ -5,7 +5,7 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
 from inh_contracts.embedding.identity import EmbeddingIdentityMismatchError
 
 from src.config import settings
@@ -28,7 +28,7 @@ from src.services.eval_capture import (
     purge_expired_events,
 )
 from src.services.quality_gate import evaluate as evaluate_quality
-from src.services.search import SearchService, get_search_service
+from src.services.search import SearchService, TagFilterError, get_search_service
 from src.utils import get_logger
 
 router = APIRouter()
@@ -349,6 +349,23 @@ async def search_documents(
     source = x_source if x_source in valid_sources else "api_key"
 
     workspace_id = auth.workspace_id
+
+    # Vertical pack tag filters (inherent#390 item 5): validated up front, as
+    # a plain 400, before any workspace/Weaviate work. Multi-workspace search
+    # has no single pack's tag schema to validate against (each workspace may
+    # be bound to a different pack, or none) -- rather than guess which one,
+    # filters are simply not supported there yet.
+    if request.filters and not workspace_id:
+        raise HTTPException(
+            status_code=400,
+            detail="search filters are only supported for a single-workspace search "
+            "(set X-Workspace-Id)",
+        )
+    if request.filters and workspace_id:
+        try:
+            SearchService._validate_tag_filters(workspace_id, request.filters)
+        except TagFilterError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     if workspace_id:
         response = await search_service.search(

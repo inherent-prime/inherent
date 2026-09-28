@@ -315,6 +315,15 @@ class WeaviateService:
             # ("only rows-strategy chunks") is a legitimate, cheap use this
             # field should keep supporting once #196 wires it through.
             Property(name="chunking_strategy", data_type=DataType.TEXT, index_searchable=False),
+            # Pack tags (inherent#390 item 4): "field=value" strings, e.g.
+            # "section_type=pricing" -- lets the public API filter on ANY
+            # pack schema field without a per-pack Weaviate schema change.
+            # Empty list for every workspace with no bound pack (the vast
+            # majority, unchanged) or a chunk the rules tagger left untagged.
+            # `index_searchable=False`: these are exact-match filter tokens,
+            # not prose meant to be keyword/BM25-matched (same reasoning as
+            # chunking_strategy above).
+            Property(name="tags", data_type=DataType.TEXT_ARRAY, index_searchable=False),
             # Conversation turn attribution (#306): promoted from
             # chunk.metadata by store_chunks_with_tenant below, same
             # promote-from-metadata pattern as content_risk/chunking_strategy
@@ -722,6 +731,11 @@ class WeaviateService:
                         "content_risk": content_risk,
                         "content_risk_reasons": content_risk_reasons,
                         "chunking_strategy": chunking_strategy,
+                        # Pack tags (inherent#390 item 4): same promote-from-
+                        # metadata pattern as content_risk above. Empty list
+                        # (not omitted) so the property always reads as a
+                        # real, filterable TEXT_ARRAY.
+                        "tags": list(chunk_meta.get("tags_weaviate") or []),
                     }
 
                     # Conversation turn attribution (#306): promote from

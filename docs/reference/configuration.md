@@ -75,6 +75,8 @@ and binds all datastore ports to `127.0.0.1`.
 | `ENABLE_RERANKER` / `ENABLE_GRAPHRAG_INDEX` / `ENABLE_HIERARCHY_INDEX` | `false` | EXPERIMENTAL retrieval scaffolding — off by default, not implemented |
 | `ENABLE_DIVERSIFICATION` | `true` | Round-robin search results across `document_id` before truncating to page size, so one document can't crowd out every other result (#146). Set `false` to restore pre-2026-08-06 ranking. |
 | `DIVERSIFICATION_OVER_FETCH_MULTIPLIER` | `5` | When `ENABLE_DIVERSIFICATION` is on, fetch up to `min(100, limit * this)` candidates to diversify across; ignored when off |
+| `VERTICAL_PACKS_DIR` | unset | Vertical packs (#390): directory of mounted packs. Unset = pack discovery off; `SearchRequest.filters` is always rejected. Also read by `inh-ingestion-svc`. See [Vertical packs](vertical-packs.md) |
+| `WORKSPACE_VERTICAL_PACKS` | unset | Vertical packs (#390 follow-up): hand-onboarded pilot workspace→pack binding, `ws_abc=support,ws_def=handbook`. Unset = no bindings. Malformed value fails the service to start. Also read by `inh-ingestion-svc`, identically parsed. See [Vertical packs](vertical-packs.md) |
 
 ### Evals
 
@@ -146,6 +148,8 @@ and binds all datastore ports to `127.0.0.1`.
 | --- | --- | --- |
 | `CHUNKING_STRATEGY` | `sentences` | `tokens` / `sentences` / `paragraphs`. **#129:** only consulted for a content type with no registry entry — every currently-registered format resolves a `chunking_hint` instead (see below), so this var no longer governs chunking in practice for any of them. **No per-document override reaches the upload surface yet** (`DocumentIngestionInput.chunking_strategy` exists at the workflow layer, but neither `POST /v1/documents` nor the MCP `upload_document` tool expose it — tracked in [#198](https://github.com/inherent-prime/inherent/issues/198)); there is currently no way to force one strategy uniformly across formats after this change. |
 | `MAX_CHUNK_SIZE` / `CHUNK_OVERLAP` | `1000` / `200` | Chunk sizing |
+| `VERTICAL_PACKS_DIR` | unset | Vertical packs (#390): directory of mounted packs. Unset = pack discovery off, every workspace unchanged. Also read by `inh-public-api-svc`. See [Vertical packs](vertical-packs.md) |
+| `WORKSPACE_VERTICAL_PACKS` | unset | Vertical packs (#390 follow-up): hand-onboarded pilot workspace→pack binding, `ws_abc=support,ws_def=handbook`. Unset = no bindings. Malformed value fails the service to start. Also read by `inh-public-api-svc`, identically parsed. See [Vertical packs](vertical-packs.md) |
 | `EMBEDDING_ENABLED` | `true` | Toggle embedding generation |
 | `EMBEDDING_PROVIDER` | `tei` | `tei` (default, non-negotiable) or `openai_compatible` — see [Embedding provider](#embedding-provider-model-identity-guard) below |
 | `EMBEDDING_SERVICE_URL` / `EMBEDDING_DIM` | `http://text-embeddings-inference:80` / `384` | Embedding endpoint base URL / vector dimension |

@@ -32,6 +32,20 @@ class SearchRequest(BaseModel):
         default=None, description="Filter to specific document IDs"
     )
 
+    # Vertical pack tag filters (inherent#390 item 5): field -> one value or
+    # a list of values (any-of). Combinable with document_ids (both apply,
+    # ANDed). Only valid for a workspace bound to a vertical pack -- the
+    # search service validates field names against that pack's tag schema
+    # and returns a 400 for an unknown field or for a workspace with no pack
+    # bound at all (see SearchService._resolve_tag_filters).
+    filters: dict[str, str | list[str]] | None = Field(
+        default=None,
+        description=(
+            "Vertical pack tag filters: {field: value} or {field: [values]} "
+            "(any-of). Requires the workspace to be bound to a vertical pack."
+        ),
+    )
+
     # Context window (PM-S019)
     include_context: bool = Field(
         default=False,
@@ -126,6 +140,12 @@ class SearchResult(BaseModel):
     #   content_risk_reasons — matched heuristic reason codes (None if unknown)
     content_risk: str | None = None
     content_risk_reasons: list[str] | None = None
+
+    # Vertical pack tags (inherent#390 item 4/5) — optional, backward-
+    # compatible. Parsed from Weaviate's "field=value" TEXT_ARRAY property
+    # into {field: value}; None for every chunk with no pack tags (the vast
+    # majority, unchanged).
+    tags: dict[str, str] | None = None
 
     # Claim-level citation (#39) — optional, backward-compatible. Built from this
     # result's own fields (chunk_id + spans + score + provenance + freshness) so

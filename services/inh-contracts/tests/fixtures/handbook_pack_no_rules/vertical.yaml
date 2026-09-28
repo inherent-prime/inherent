@@ -1,0 +1,12 @@
+# Generic test fixture pack ("policy handbook") -- no domain terms, used only
+# to exercise the pack loader (inherent#390). Paths are relative to this file.
+name: handbook-no-rules
+version: 0.1.0
+description: Generic numbered-sections handbook, for tests only
+requires_core: ">=0.8.0"
+profiles:
+  chunking: profiles/chunking/handbook.yaml
+  tags: profiles/tags/handbook-tags.yaml
+  tagger_examples: profiles/tagger/examples.yaml
+  tools:
+    - profiles/tools/search-sections.yaml

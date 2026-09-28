@@ -1,0 +1,8 @@
+# Few-shot examples for the tagger. Synthetic/generic only.
+examples:
+  - text: "The monthly fee for the standard plan is $10 per seat."
+    tags: {section_type: pricing}
+  - text: "All customer data must be encrypted at rest and in transit."
+    tags: {section_type: security}
+  - text: "This handbook is reviewed annually by the operations team."
+    tags: {section_type: other}

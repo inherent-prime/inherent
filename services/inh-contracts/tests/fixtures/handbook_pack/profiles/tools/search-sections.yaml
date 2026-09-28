@@ -1,0 +1,8 @@
+# MCP tool profile served by core. Generic test fixture only.
+name: search_sections
+description: >-
+  Search the handbook's numbered sections for policy text relevant to a
+  question. Returns matching section text with its section number and heading.
+filters: [section_type, product]
+default_limit: 3
+max_limit: 10

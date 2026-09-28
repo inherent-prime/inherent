@@ -5,6 +5,10 @@ All notable changes to Inherent are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Vertical packs: generic core, domain config supplied by a separate pack repo (#390).** Core has no domain terms baked in anywhere — a "vertical pack" supplies chunking rules, a tag schema (with optional per-value keyword/regex `rules`), tagger examples, and MCP tool profiles via a `vertical.yaml` manifest. `inh-contracts` gains the pack contract/loader (`load_vertical`) and discovery (`discover_packs` off a `VERTICAL_PACKS_DIR`, `discover_entry_point_packs` off the `inherent.verticals` entry-point group) — both feature-off by default. `inh-ingestion-svc` gains a `numbered_sections` chunking strategy (a new, pack-driven precedence level below the explicit per-document override) and a pluggable `Tagger`/`RulesTagger` chunk-tagging activity that writes tags into chunk metadata and a filterable Weaviate `tags` TEXT_ARRAY property. `inh-public-api-svc`'s `SearchRequest` gains `filters` (field → value/values) applied on top of `document_ids` across all search modes, validated against the workspace's bound pack. Workspace → pack binding for a hand-onboarded pilot is now wired end-to-end via one operator setting, `WORKSPACE_VERTICAL_PACKS` (`ws_abc=support,ws_def=handbook`), read identically by both services and resolved outside workflow code (Temporal determinism, #38); malformed entries fail the service to start. Every existing workspace/document/collection with no pack bound is completely unaffected. See `docs/reference/vertical-packs.md`. (#390)
+
 ### Changed
 
 - `inherent` CLI version is `0.7.1rc1`, the first prerelease published to TestPyPI through the per-package Trusted Publisher environments. (#388, #386)

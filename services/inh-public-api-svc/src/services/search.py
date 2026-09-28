@@ -20,9 +20,20 @@ from src.config import settings
 from src.models.citation import Citation
 from src.models.search import ScoreSource, SearchRequest, SearchResponse, SearchResult
 from src.services.database import DatabaseService, get_database
+from src.services.workspace_pack import resolve_workspace_pack
 from src.utils import get_logger
 
 logger = get_logger(__name__)
+
+
+class TagFilterError(ValueError):
+    """`request.filters` is invalid for this workspace (inherent#390 item 5).
+
+    Raised for: filters given on a workspace with no vertical pack bound, or
+    a filter field name that isn't in the bound pack's tag schema. The API
+    layer maps this to HTTP 400 with the message as-is (it never leaks
+    anything beyond the pack's own public field names).
+    """
 
 
 def _require_safe_name(name: str, kind: str) -> None:
@@ -550,6 +561,11 @@ class SearchService:
         See the API layer for the multi-workspace partial-result policy.
         """
         start_time = time.time()
+        # Vertical pack tag filter validation (inherent#390 item 5) — BEFORE
+        # any Weaviate call, so a bad filter never spends a query. Raises
+        # TagFilterError (-> HTTP 400 at the API layer) rather than silently
+        # ignoring an unusable filter.
+        self._validate_tag_filters(workspace_id, request.filters)
         results = await self._search_weaviate(workspace_id, user_id, request, query_vector)
         # Advanced-methods dispatch point (#47). NO-OP by default — when the
         # experimental flags are off (the default) this returns results
@@ -898,6 +914,19 @@ class SearchService:
                 else None
             )
 
+            # Vertical pack tags (inherent#390 item 5): Weaviate's "field=value"
+            # TEXT_ARRAY -> {field: value}. Malformed entries (no "=", e.g. from
+            # a future format change) are skipped rather than raising.
+            raw_tags = chunk.get("tags")
+            tags: dict[str, str] | None = None
+            if isinstance(raw_tags, list) and raw_tags:
+                parsed = {}
+                for entry in raw_tags:
+                    if isinstance(entry, str) and "=" in entry:
+                        field_name, _, value = entry.partition("=")
+                        parsed[field_name] = value
+                tags = parsed or None
+
             rounded_score = round(score, 4)
             chunk_id = additional.get("id", "")
             document_id = chunk.get("document_id", "")
@@ -955,6 +984,7 @@ class SearchService:
                     is_stale=is_stale,
                     content_risk=content_risk,
                     content_risk_reasons=content_risk_reasons,
+                    tags=tags,
                     citation=citation,
                 )
             )
@@ -1046,11 +1076,22 @@ class SearchService:
                 fetch_limit,
                 min(100, request.limit * settings.diversification_over_fetch_multiplier),
             )
-        where_clause = ""
+        # Combine the document_ids filter (#218) with pack tag filters
+        # (inherent#390 item 5) -- both apply together (ANDed) when both are
+        # given, exactly like #218's own "keep document_ids working" bar.
+        where_operands: list[str] = []
         if request.document_ids:
-            where_clause = (
-                f"where: {self._format_where(['document_id'], 'ContainsAny', request.document_ids)}"
+            where_operands.append(
+                self._format_where(["document_id"], "ContainsAny", request.document_ids)
             )
+        where_operands.extend(self._tag_filter_operands(request.filters))
+
+        where_clause = ""
+        if len(where_operands) == 1:
+            where_clause = f"where: {where_operands[0]}"
+        elif len(where_operands) > 1:
+            joined = ", ".join(where_operands)
+            where_clause = f"where: {{ operator: And, operands: [{joined}] }}"
 
         if request.search_mode == "keyword":
             search_args = f'bm25: {{ query: "{escaped_query}" }}'
@@ -1094,6 +1135,7 @@ class SearchService:
                     content_type
                     content_risk
                     content_risk_reasons
+                    tags
                     _additional {{ id score certainty distance }}
                 }}
             }}
@@ -1107,6 +1149,48 @@ class SearchService:
     # instead of being interpolated unchecked into a GraphQL query string
     # (#218 pattern sweep).
     _WHERE_OPERATORS = frozenset({"Equal", "ContainsAny", "ContainsAll"})
+
+    @staticmethod
+    def _validate_tag_filters(
+        workspace_id: str, filters: dict[str, str | list[str]] | None
+    ) -> None:
+        """Validate `filters` against the workspace's bound vertical pack.
+
+        No filters given -> no-op (the overwhelming majority of requests,
+        completely unaffected). Filters given but the workspace has no pack
+        bound, or a filter names a field the pack's tag schema doesn't
+        declare -> ``TagFilterError`` (see its docstring).
+        """
+        if not filters:
+            return
+        vertical = resolve_workspace_pack(workspace_id)
+        if vertical is None:
+            raise TagFilterError(
+                "search filters require the workspace to be bound to a vertical pack; "
+                "this workspace has none"
+            )
+        unknown = set(filters) - set(vertical.tags.fields)
+        if unknown:
+            raise TagFilterError(
+                f"unknown filter field(s) {sorted(unknown)}; "
+                f"this pack's tag schema declares {sorted(vertical.tags.fields)}"
+            )
+
+    @staticmethod
+    def _tag_filter_operands(filters: dict[str, str | list[str]] | None) -> list[str]:
+        """Render `filters` as Weaviate `where` operand strings on the `tags`
+        TEXT_ARRAY property (inherent#390 item 5's recommended representation:
+        "field=value" strings). One operand per field (ANDed together by the
+        caller); within a field, any of its given values matches (ContainsAny).
+        Assumes `_validate_tag_filters` already ran -- this never itself checks
+        field names against a schema.
+        """
+        operands = []
+        for field, value in (filters or {}).items():
+            values = value if isinstance(value, list) else [value]
+            wanted = [f"{field}={v}" for v in values]
+            operands.append(SearchService._format_where(["tags"], "ContainsAny", wanted))
+        return operands
 
     @staticmethod
     def _format_where(path: list[str], operator: str, value: str | list[str]) -> str:

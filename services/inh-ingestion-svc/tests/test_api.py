@@ -63,6 +63,9 @@ def _make_mock_settings(**overrides):
         "temporal_namespace": "default",
         "temporal_task_queue": "document-ingestion",
         "log_level": "INFO",
+        # Vertical pack binding (inherent#390 follow-up): a real dict, not a
+        # MagicMock, so `.get(workspace_id)` returns real None by default.
+        "workspace_vertical_packs": {},
     }
     defaults.update(overrides)
     s = MagicMock()
@@ -426,6 +429,57 @@ class TestIngestTrigger:
         )
         _, kwargs = client._mock_temporal_client.start_workflow.call_args
         assert kwargs["memo"] == {"source": "api-direct"}
+
+    # -------------------------------------------------------------------
+    # inherent#390 follow-up: workspace -> vertical pack binding resolved
+    # HERE (plain application code), not inside workflow code.
+    # -------------------------------------------------------------------
+
+    def test_workflow_input_carries_vertical_pack_from_mapping(self):
+        """A workspace mapped in WORKSPACE_VERTICAL_PACKS gets its pack name
+        threaded onto DocumentIngestionInput.vertical_pack."""
+        mock_settings = _make_mock_settings(workspace_vertical_packs={"ws_001": "handbook"})
+        mock_temporal_client = AsyncMock()
+        mock_handle = AsyncMock()
+        mock_handle.result = AsyncMock(return_value=_FakeWorkflowResult())
+        mock_temporal_client.start_workflow = AsyncMock(return_value=mock_handle)
+
+        with (
+            patch("src.api.app.TemporalWorkerManager") as mock_manager_cls,
+            patch("src.api.auth.get_settings", return_value=mock_settings),
+        ):
+            instance = mock_manager_cls.return_value
+            instance.start = AsyncMock()
+            instance.stop = AsyncMock()
+            instance.get_client = AsyncMock(return_value=mock_temporal_client)
+            instance.is_running = True
+
+            from src.api.app import create_app
+
+            app = create_app(mock_settings)
+            with TestClient(app) as tc:
+                resp = tc.post(
+                    "/ingest",
+                    json=_INGEST_PAYLOAD,
+                    headers={"X-API-Key": VALID_API_KEY},
+                )
+
+        assert resp.status_code == 202
+        args, _kwargs = mock_temporal_client.start_workflow.call_args
+        workflow_input = args[1]
+        assert workflow_input.vertical_pack == "handbook"
+
+    def test_workflow_input_vertical_pack_none_when_unmapped(self, client: TestClient):
+        """The default fixture's settings map no workspace at all -- every
+        existing /ingest call must be completely unaffected."""
+        client.post(
+            "/ingest",
+            json=_INGEST_PAYLOAD,
+            headers={"X-API-Key": VALID_API_KEY},
+        )
+        args, _kwargs = client._mock_temporal_client.start_workflow.call_args
+        workflow_input = args[1]
+        assert workflow_input.vertical_pack is None
 
     def test_403_detail_states_both_accepted_storage_path_forms(self, client: TestClient):
         """Attacker-persona review finding: naming the mismatch without

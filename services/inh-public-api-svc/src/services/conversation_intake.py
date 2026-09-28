@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from inh_contracts.events import ConversationTurnMessage
+from inh_contracts.events import CONTRACT_VERSION, ConversationTurnMessage
 
 from src.config import settings
 from src.core.exceptions import ServiceUnavailableError
@@ -69,6 +69,13 @@ async def intake_turns(
             ts=turn.ts,
             client=turn.client,
             timestamp=now_iso,
+            # Default-valued/optional on the shared contract (inh_contracts.
+            # events) -- passed explicitly because no pydantic mypy plugin is
+            # configured here, so mypy's plain dataclass_transform handling
+            # doesn't recognize a `Field(default, ...)` call as making a
+            # field optional (same pattern as inh-ingestion-svc's identical
+            # DocumentUploadMessage construction sites).
+            contract_version=CONTRACT_VERSION,
         )
         try:
             await mq.publish(settings.mq_topic_conversation_turn, message.model_dump())

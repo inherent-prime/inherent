@@ -339,6 +339,12 @@ def create_app(settings: Settings) -> FastAPI:
             storage_bucket=body.storage_bucket,
             storage_url=body.storage_url,
             timestamp=datetime.now(UTC).isoformat(),
+            # Vertical pack binding (inherent#390 follow-up): resolved HERE,
+            # in plain application code, from the operator-configured
+            # WORKSPACE_VERTICAL_PACKS mapping -- never inside the workflow
+            # (Temporal determinism, #38). None (unmapped workspace) is the
+            # pre-existing, unaffected default.
+            vertical_pack=settings.workspace_vertical_packs.get(workspace_id),
         )
 
         workflow_id = f"ingest-{body.document_id}"

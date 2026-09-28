@@ -54,6 +54,31 @@ from inh_contracts.naming import (
     get_user_tenant_name,
     get_workspace_collection_name,
 )
+from inh_contracts.vertical_discovery import (
+    ENTRY_POINT_GROUP,
+    DiscoveryResult,
+    discover_all_packs,
+    discover_entry_point_packs,
+    discover_packs,
+)
+from inh_contracts.vertical_pack import (
+    ChunkingProfile,
+    HeadingPattern,
+    Manifest,
+    ProfilePaths,
+    TagField,
+    TaggerExample,
+    TaggerExamples,
+    TagSchema,
+    ToolProfile,
+    Vertical,
+    VerticalError,
+    load_vertical,
+)
+from inh_contracts.workspace_packs import (
+    WorkspaceVerticalPacksError,
+    parse_workspace_vertical_packs,
+)
 
 __all__ = [
     "CONTRACT_VERSION",
@@ -97,4 +122,24 @@ __all__ = [
     "embed_batch_with_retry",
     "is_transient_embed_error",
     "DEFAULT_EMBEDDING_PROVIDER",
+    # Vertical packs (inherent#390).
+    "Vertical",
+    "VerticalError",
+    "Manifest",
+    "ProfilePaths",
+    "ChunkingProfile",
+    "HeadingPattern",
+    "TagSchema",
+    "TagField",
+    "TaggerExamples",
+    "TaggerExample",
+    "ToolProfile",
+    "load_vertical",
+    "DiscoveryResult",
+    "discover_packs",
+    "discover_entry_point_packs",
+    "discover_all_packs",
+    "ENTRY_POINT_GROUP",
+    "parse_workspace_vertical_packs",
+    "WorkspaceVerticalPacksError",
 ]

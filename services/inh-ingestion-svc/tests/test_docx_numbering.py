@@ -40,11 +40,11 @@ def _add_abstract_num(
     numbering_element,
     abstract_id: str,
     levels: list[tuple[str, str, str]],
-    legal_ilvls: set[int] | None = None,
+    decimal_override_ilvls: set[int] | None = None,
 ):
     """Append one `<w:abstractNum>` with one `<w:lvl>` per
     `(num_fmt, lvl_text, start)` triple, at consecutive ilvl 0, 1, 2, ...
-    `legal_ilvls` marks which of those levels also carry a bare
+    `decimal_override_ilvls` marks which of those levels also carry a bare
     `<w:isLgl/>` flag (OOXML's "render every placeholder in this level's
     pattern as decimal" marker)."""
     abstract_num = numbering_element.makeelement(qn("w:abstractNum"), {})
@@ -55,7 +55,7 @@ def _add_abstract_num(
         _set_val(lvl, "w:start", start)
         _set_val(lvl, "w:numFmt", num_fmt)
         _set_val(lvl, "w:lvlText", lvl_text)
-        if legal_ilvls and ilvl in legal_ilvls:
+        if decimal_override_ilvls and ilvl in decimal_override_ilvls:
             lvl.append(lvl.makeelement(qn("w:isLgl"), {}))
         abstract_num.append(lvl)
     numbering_element.append(abstract_num)
@@ -301,7 +301,7 @@ class TestIsLglDecimalOverride:
                 ("upperRoman", "%1", "1"),
                 ("decimal", "%1.%2", "1"),
             ],
-            legal_ilvls={1},
+            decimal_override_ilvls={1},
         )
         _add_num(numbering_element, "909", "909")
         scheme = NumberingScheme.from_document(document)
@@ -325,7 +325,7 @@ class TestIsLglDecimalOverride:
                 ("lowerLetter", "%1.%2", "1"),
                 ("decimal", "%1.%2.%3", "1"),
             ],
-            legal_ilvls={2},
+            decimal_override_ilvls={2},
         )
         _add_num(numbering_element, "911", "911")
         scheme = NumberingScheme.from_document(document)

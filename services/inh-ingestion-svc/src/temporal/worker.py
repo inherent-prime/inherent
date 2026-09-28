@@ -34,6 +34,7 @@ from src.temporal.activities import (
     set_document_status,
     store_in_postgresql,
     store_in_weaviate,
+    tag_chunks,
     update_chunk_postgresql,
     update_chunk_weaviate,
     update_workspace_stats,
@@ -73,6 +74,8 @@ _ALL_ACTIVITIES: list[Callable[..., Any]] = [
     # Conversation ingestion (#306, #307)
     redact_turns,
     chunk_conversation,
+    # Vertical pack tagging (inherent#390)
+    tag_chunks,
 ]
 
 # All workflows registered with the ingestion worker

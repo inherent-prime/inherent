@@ -325,6 +325,13 @@ class TemporalWorkflowTrigger:
                 storage_bucket=upload_message.storage_bucket,
                 storage_url=upload_message.storage_url,
                 timestamp=upload_message.timestamp,
+                # Vertical pack binding (inherent#390 follow-up): resolved
+                # HERE, in plain application code, from the operator-
+                # configured WORKSPACE_VERTICAL_PACKS mapping -- never
+                # inside the workflow (Temporal determinism, #38).
+                vertical_pack=self.settings.workspace_vertical_packs.get(
+                    upload_message.workspace_id
+                ),
             )
 
             # Start the workflow
@@ -493,6 +500,9 @@ class TemporalWorkflowTrigger:
             storage_bucket=upload_message.storage_bucket,
             storage_url=upload_message.storage_url,
             timestamp=upload_message.timestamp,
+            # Vertical pack binding (inherent#390 follow-up) -- see the
+            # other construction site's comment above for the rationale.
+            vertical_pack=self.settings.workspace_vertical_packs.get(upload_message.workspace_id),
         )
 
         if self._client is None:
