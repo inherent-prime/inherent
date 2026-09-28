@@ -142,7 +142,7 @@ sequenceDiagram
         SS->>SS: nearVector: {vector[384]}
     end
 
-    SS->>WV: POST /v1/graphql  Get { <Collection>(…, tenant: "<tenant>") {<br/>document_id, original_filename, content, chunk_index, start_char, end_char,<br/>content_hash, source_uri, source_url, ingested_at, content_risk, content_risk_reasons,<br/>_additional {id score certainty distance}}}
+    SS->>WV: POST /v1/graphql  Get { <Collection>(…, tenant: "<tenant>") {<br/>document_id, original_filename, content, chunk_index, start_char, end_char,<br/>content_hash, source_uri, source_url, ingested_at, content_risk, content_risk_reasons,<br/>reuse_count, _additional {id score certainty distance}}}
     alt HTTP 422
         WV-->>SS: class/tenant not created yet (ingest→search race)
         SS-->>SS: return [] — empty, not 500
@@ -166,6 +166,7 @@ sequenceDiagram
         SS->>SS: poisoning risk (#44): content_risk ("none"→None) + reasons<br/>(flagged, never dropped)
         SS->>SS: build Citation (#39) from the chunk's own fields<br/>(chunk_id, doc, content, start/end_char, score, source_uri, source_url, staleness)
     end
+    SS->>SS: usage-based ranking boost (#394): score *= min(1.5, 1 + weight * log1p(reuse_count))<br/>weight = WORKSPACE_REUSE_BOOST[workspace_id] or 0.0 (no-op when unset/0);<br/>re-sort by boosted score
     SS->>SS: truncate to request.limit (undo the over-fetch)
     SS-->>SS: SearchResponse{results, total_results, processing_time_ms, search_mode}
 ```

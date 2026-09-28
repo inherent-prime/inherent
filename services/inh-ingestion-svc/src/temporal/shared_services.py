@@ -106,6 +106,18 @@ def _get_settings() -> Settings:
     return get_settings()
 
 
+def get_settings() -> Settings:
+    """Public accessor for the process-wide Settings (inherent#394).
+
+    Thin wrapper over ``_get_settings`` -- activities need read-only access
+    to config (e.g. the per-workspace reuse-detection opt-in) the same way
+    they already reach the shared DB/Weaviate services below, so this
+    follows the exact same "public get_* wrapper" shape as the rest of this
+    module instead of every activity reaching into the private helper.
+    """
+    return _get_settings()
+
+
 def get_db_service():
     """Get or create shared DatabaseService."""
     global _db_service

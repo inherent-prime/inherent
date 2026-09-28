@@ -465,6 +465,47 @@ async def store_in_weaviate(input: StoreDocumentInput) -> StoreDocumentOutput:
             chunks_stored=len(chunks),
         )
 
+        # Usage-based ranking boost: chunk reuse detection (inherent#394).
+        # Opt-in per workspace (WORKSPACE_REUSE_DETECTION, off by default) --
+        # a workspace not listed pays zero extra cost here, byte-identical to
+        # before this feature existed. Best-effort: the WHOLE block (settings
+        # lookup included) is caught and logged, never re-raised -- this must
+        # never fail ingestion, which is why it runs AFTER the document's own
+        # store already succeeded.
+        try:
+            from src.temporal.shared_services import get_settings
+
+            settings = get_settings()
+            if input.workspace_id in settings.workspace_reuse_detection:
+                from src.services.reuse_detection import detect_and_record_chunk_reuse
+
+                reused = await detect_and_record_chunk_reuse(
+                    weaviate_service=weaviate_service,
+                    db_service=db_service,
+                    workspace_id=input.workspace_id,
+                    user_id=input.user_id,
+                    document_id=input.document_id,
+                    chunks=chunks,
+                    vector_similarity_threshold=settings.reuse_similarity_threshold,
+                    text_similarity_threshold=settings.reuse_text_similarity_threshold,
+                    top_k=settings.reuse_top_k,
+                    min_chunk_chars=settings.reuse_min_chunk_chars,
+                )
+                if reused:
+                    logger.info(
+                        "Recorded chunk reuse",
+                        document_id=input.document_id,
+                        workspace_id=input.workspace_id,
+                        reuse_events_recorded=reused,
+                    )
+        except Exception as reuse_err:  # noqa: BLE001 -- best-effort (#394)
+            logger.warning(
+                "Chunk reuse detection failed (non-fatal)",
+                document_id=input.document_id,
+                workspace_id=input.workspace_id,
+                error=str(reuse_err),
+            )
+
         # Record lineage event on success
         try:
             db_service = get_db_service()

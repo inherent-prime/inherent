@@ -8,6 +8,7 @@ from typing import Literal
 from inh_contracts.defaults import DEFAULT_MONGODB_URI, DEFAULT_S3_BUCKET, DEFAULT_S3_REGION
 from inh_contracts.workspace_hybrid_alpha import parse_workspace_hybrid_alpha
 from inh_contracts.workspace_packs import parse_workspace_vertical_packs
+from inh_contracts.workspace_reuse_boost import parse_workspace_reuse_boost
 from pydantic import AliasChoices, Field, PrivateAttr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -477,6 +478,32 @@ class Settings(BaseSettings):
     def workspace_hybrid_alpha(self) -> dict[str, float]:
         """The parsed {workspace_id: alpha} mapping (see field above)."""
         return self._workspace_hybrid_alpha
+
+    # Usage-based ranking boost (inherent#394): "ws_a=0.1,ws_b=0.3" -- a chunk
+    # whose content keeps reappearing in newer documents in the same
+    # workspace (see inh-ingestion-svc's reuse_detection.py, itself opt-in
+    # per workspace via WORKSPACE_REUSE_DETECTION) ranks somewhat higher for
+    # the same query. Same config-based shape as WORKSPACE_HYBRID_ALPHA above
+    # (see inh_contracts.workspace_reuse_boost's module docstring). Empty by
+    # default -- every workspace's ranking stays byte-for-byte identical to
+    # before this feature existed (SearchService._apply_reuse_boost is a
+    # no-op multiply-by-1.0 for a workspace with no entry here). See
+    # inh_contracts.reuse_boost for the bounded boost formula.
+    workspace_reuse_boost_raw: str = Field("", alias="WORKSPACE_REUSE_BOOST")
+    _workspace_reuse_boost: dict[str, float] = PrivateAttr(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _parse_workspace_reuse_boost(self) -> "Settings":
+        """Eagerly parse+validate at construction time (== service startup)
+        so a malformed WORKSPACE_REUSE_BOOST raises here, not later when a
+        search first looks up a workspace's boost weight."""
+        self._workspace_reuse_boost = parse_workspace_reuse_boost(self.workspace_reuse_boost_raw)
+        return self
+
+    @property
+    def workspace_reuse_boost(self) -> dict[str, float]:
+        """The parsed {workspace_id: weight} mapping (see field above)."""
+        return self._workspace_reuse_boost
 
     # Evals v1 — traffic-mined retrieval evals (design spec: evals-v1).
     # Capture is ON by default (opt-out model): every search is recorded to

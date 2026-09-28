@@ -6,6 +6,7 @@ from typing import Literal
 from inh_contracts.defaults import DEFAULT_MONGODB_URI, DEFAULT_S3_BUCKET, DEFAULT_S3_REGION
 from inh_contracts.events import StorageBackend
 from inh_contracts.workspace_packs import parse_workspace_vertical_packs
+from inh_contracts.workspace_reuse_detection import parse_workspace_reuse_detection
 from pydantic import Field, PrivateAttr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -140,6 +141,58 @@ class Settings(BaseSettings):
     def workspace_vertical_packs(self) -> dict[str, str]:
         """The parsed {workspace_id: pack_name} mapping (see field above)."""
         return self._workspace_vertical_packs
+
+    # Chunk reuse detection (inherent#394): usage-based ranking boost feeds on
+    # a ``reuse_count`` this service bumps at ingest time -- see
+    # ``src/services/reuse_detection.py``. That extra work (a near-duplicate
+    # lookup per new chunk) runs ONLY for a workspace listed here; unset
+    # (the default) means no workspace runs detection, so ingestion behaves
+    # exactly as before this feature existed. Same "raise at startup, not
+    # later" contract as WORKSPACE_VERTICAL_PACKS above.
+    workspace_reuse_detection_raw: str = Field("", alias="WORKSPACE_REUSE_DETECTION")
+    _workspace_reuse_detection: set[str] = PrivateAttr(default_factory=set)
+
+    @model_validator(mode="after")
+    def _parse_workspace_reuse_detection(self) -> "Settings":
+        """Eagerly parse+validate at construction time (== service startup)
+        so a malformed WORKSPACE_REUSE_DETECTION raises here, not later when
+        a document is first ingested for that workspace."""
+        self._workspace_reuse_detection = parse_workspace_reuse_detection(
+            self.workspace_reuse_detection_raw
+        )
+        return self
+
+    @property
+    def workspace_reuse_detection(self) -> set[str]:
+        """The parsed {workspace_id, ...} opt-in set (see field above)."""
+        return self._workspace_reuse_detection
+
+    # Reuse-detection tuning (inherent#394): engine-wide knobs, unlike the
+    # per-workspace opt-in/weight above -- these bound the COST of detection
+    # (top-k neighbours per chunk, a similarity floor, skip tiny chunks), not
+    # a per-tenant ranking preference, so one sensible default suffices.
+    #
+    # reuse_similarity_threshold: cosine similarity (converted to Weaviate certainty = (1 + cos) / 2)
+    #   floor for a vector near-duplicate candidate. 0.92 -- chosen high
+    #   enough that two DIFFERENT chunks discussing the same topic (which
+    #   land close in embedding space but are not the same content) rarely
+    #   cross it, while an actual copy/paste or near-verbatim reuse reliably
+    #   does.
+    reuse_similarity_threshold: float = Field(0.92, alias="REUSE_SIMILARITY_THRESHOLD")
+    # reuse_text_similarity_threshold: a cheap secondary confirmation
+    #   (difflib.SequenceMatcher ratio on the raw text) applied only to the
+    #   handful of candidates that already passed the vector threshold --
+    #   guards against the rare vector near-duplicate that reads completely
+    #   differently. 0.0 disables this secondary check entirely.
+    reuse_text_similarity_threshold: float = Field(0.7, alias="REUSE_TEXT_SIMILARITY_THRESHOLD")
+    # reuse_top_k: bounds the cost of detection -- each new chunk is compared
+    #   against at most this many nearest neighbours, never the whole
+    #   workspace.
+    reuse_top_k: int = Field(5, alias="REUSE_TOP_K")
+    # reuse_min_chunk_chars: chunks shorter than this are skipped entirely --
+    #   a two-word chunk hits the similarity threshold against almost
+    #   anything and would flood reuse_count with noise.
+    reuse_min_chunk_chars: int = Field(40, alias="REUSE_MIN_CHUNK_CHARS")
 
     # Embedding Configuration
     # The model itself runs in a separate text-embeddings-inference (TEI) sidecar.

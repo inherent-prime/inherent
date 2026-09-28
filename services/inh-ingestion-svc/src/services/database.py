@@ -14,6 +14,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     Engine,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -341,6 +342,15 @@ class DatabaseService:
                 nullable=True,
                 default=lambda: datetime.now(UTC),
             ),
+            # Usage-based ranking boost (inherent#394, migration 024): how many
+            # times this chunk's content has been detected as reused in a
+            # NEWER document in this same workspace (see
+            # src/services/reuse_detection.py). Defaults to 0 -- unreused
+            # until a later ingest says otherwise. Mirrored onto the Weaviate
+            # object so the public API's ranking boost reads it without a DB
+            # join (see weaviate.py's `reuse_count` property).
+            Column("reuse_count", Integer, nullable=False, default=0),
+            Column("last_reused_at", DateTime(timezone=True), nullable=True),
             UniqueConstraint(
                 "processed_document_id", "chunk_index", name="uq_document_chunks_doc_idx"
             ),
@@ -348,6 +358,40 @@ class DatabaseService:
             Index("idx_document_chunks_workspace_id", "workspace_id"),
             Index("idx_document_chunks_tenant_id", "tenant_id"),
             Index("idx_document_chunks_processed_document_id", "processed_document_id"),
+        )
+
+        # Chunk reuse events (inherent#394, migration 024): idempotency ledger
+        # for the reuse-detection step. One row per (source_chunk, reusing
+        # document, reusing chunk's CURRENT content) triple -- see the
+        # migration file for the full dedupe-key rationale.
+        self.chunk_reuse_events = Table(
+            "chunk_reuse_events",
+            self.metadata,
+            Column("id", BigInteger, primary_key=True, autoincrement=True),
+            Column(
+                "source_chunk_id",
+                BigInteger,
+                ForeignKey("document_chunks.id", ondelete="CASCADE"),
+                nullable=False,
+            ),
+            Column("reusing_document_id", String(100), nullable=False),
+            Column("reusing_chunk_content_hash", String(64), nullable=False),
+            Column("workspace_id", String(100), nullable=False),
+            Column("similarity", Float, nullable=False),
+            Column(
+                "created_at",
+                DateTime(timezone=True),
+                nullable=False,
+                default=lambda: datetime.now(UTC),
+            ),
+            UniqueConstraint(
+                "source_chunk_id",
+                "reusing_document_id",
+                "reusing_chunk_content_hash",
+                name="uq_chunk_reuse_dedupe",
+            ),
+            Index("idx_chunk_reuse_events_source_chunk", "source_chunk_id"),
+            Index("idx_chunk_reuse_events_workspace_id", "workspace_id"),
         )
 
         # Ingestion events table: Data lineage / audit trail for pipeline steps
@@ -1819,6 +1863,111 @@ class DatabaseService:
                 .limit(1)
             ).first()
             return row is not None
+
+    async def get_chunk_for_reuse(
+        self, document_id: str, chunk_index: int
+    ) -> dict[str, Any] | None:
+        """Look up a chunk's identity for reuse bookkeeping (inherent#394).
+
+        Called with the (document_id, chunk_index) of a candidate SOURCE
+        chunk a reuse-detection near-object query just matched, to resolve
+        it to the Postgres row ``record_chunk_reuse`` needs to update.
+        Returns ``None`` when no such row exists (e.g. the matched Weaviate
+        object is stale relative to Postgres -- best-effort, the caller
+        simply skips it).
+        """
+        if not self.engine:
+            raise RuntimeError("Database not connected")
+
+        with self.get_session() as session:
+            row = session.execute(
+                select(
+                    self.document_chunks.c.id,
+                    self.document_chunks.c.reuse_count,
+                ).where(
+                    self.document_chunks.c.document_id == document_id,
+                    self.document_chunks.c.chunk_index == chunk_index,
+                )
+            ).first()
+            if row is None:
+                return None
+            return {"id": row[0], "reuse_count": row[1]}
+
+    async def record_chunk_reuse(
+        self,
+        *,
+        source_chunk_id: int,
+        reusing_document_id: str,
+        reusing_chunk_content_hash: str,
+        workspace_id: str,
+        similarity: float,
+    ) -> int | None:
+        """Idempotently record one reuse event and bump reuse_count (inherent#394).
+
+        Dedupe key: ``(source_chunk_id, reusing_document_id,
+        reusing_chunk_content_hash)`` -- see migration 024's docstring. A
+        second call with the SAME triple (e.g. re-ingesting an unchanged
+        document) hits ``ON CONFLICT DO NOTHING``: no new event row, no
+        double increment, and this returns ``None`` so the caller knows to
+        skip re-patching Weaviate too. A genuinely NEW triple (first time
+        this source chunk is reused by this document at this content, or a
+        previously-reused chunk edited to a new content_hash) inserts a row
+        and atomically increments ``document_chunks.reuse_count`` in the
+        same call, returning the chunk's new count.
+
+        The increment (``reuse_count = reuse_count + 1``) happens in SQL, on
+        the SAME row the just-inserted event references, so two concurrent
+        reuse detections for two different reusing documents both land
+        correctly instead of racing a read-modify-write in Python.
+        """
+        if not self.engine:
+            raise RuntimeError("Database not connected")
+
+        with self.get_session() as session:
+            insert_result = session.execute(
+                pg_insert(self.chunk_reuse_events)
+                .values(
+                    source_chunk_id=source_chunk_id,
+                    reusing_document_id=reusing_document_id,
+                    reusing_chunk_content_hash=reusing_chunk_content_hash,
+                    workspace_id=workspace_id,
+                    similarity=similarity,
+                )
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        "source_chunk_id",
+                        "reusing_document_id",
+                        "reusing_chunk_content_hash",
+                    ]
+                )
+            )
+            if (insert_result.rowcount or 0) == 0:
+                # Already recorded for this exact (source, reusing document,
+                # content) triple -- idempotent no-op, matching #394's
+                # "re-ingesting the same unchanged document must not
+                # double-count" requirement.
+                return None
+
+            now = datetime.now(UTC)
+            update_result = session.execute(
+                self.document_chunks.update()
+                .where(self.document_chunks.c.id == source_chunk_id)
+                .values(
+                    reuse_count=self.document_chunks.c.reuse_count + 1,
+                    last_reused_at=now,
+                )
+                .returning(self.document_chunks.c.reuse_count)
+            )
+            row = update_result.first()
+            new_count = int(row[0]) if row is not None else None
+            logger.info(
+                "Recorded chunk reuse",
+                source_chunk_id=source_chunk_id,
+                reusing_document_id=reusing_document_id,
+                workspace_id=workspace_id,
+                new_reuse_count=new_count,
+            )
+            return new_count
 
     async def get_document_chunks(
         self,

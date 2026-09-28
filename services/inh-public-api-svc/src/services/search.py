@@ -15,6 +15,7 @@ from inh_contracts.naming import (
     get_user_tenant_name,
     get_workspace_collection_name,
 )
+from inh_contracts.reuse_boost import apply_reuse_boost
 from inh_contracts.source_url import sanitize_source_url
 
 from src.config import settings
@@ -963,6 +964,12 @@ class SearchService:
                         parsed[field_name] = value
                 tags = parsed or None
 
+            # Usage-based ranking boost (inherent#394): promote the raw
+            # count so it's available both for the boost math below AND for
+            # transparency on the returned result (see SearchResult.reuse_count).
+            raw_reuse_count = chunk.get("reuse_count")
+            reuse_count = raw_reuse_count if isinstance(raw_reuse_count, int) else 0
+
             rounded_score = round(score, 4)
             chunk_id = additional.get("id", "")
             document_id = chunk.get("document_id", "")
@@ -1023,9 +1030,20 @@ class SearchService:
                     content_risk=content_risk,
                     content_risk_reasons=content_risk_reasons,
                     tags=tags,
+                    reuse_count=reuse_count,
                     citation=citation,
                 )
             )
+        # Usage-based ranking boost (inherent#394): applied AFTER fusion (the
+        # Weaviate score/certainty this loop just resolved into `score`, for
+        # semantic/hybrid/keyword alike -- all three modes share this method)
+        # and BEFORE diversify/truncate, so a boosted chunk can win a spot in
+        # the page it would otherwise have been cut from. Unset/empty
+        # WORKSPACE_REUSE_BOOST (the default) makes this a no-op -- see
+        # _apply_reuse_boost's docstring for the byte-for-byte-unchanged
+        # guarantee that matters for #394's own ordering test.
+        results = self._apply_reuse_boost(results, workspace_id)
+
         # Truncate back to the requested page size after min_score filtering
         # (the query may have over-fetched to avoid under-filling) (#31), or
         # diversify-then-truncate when enable_diversification is on (#146,
@@ -1034,6 +1052,39 @@ class SearchService:
         if settings.enable_diversification:
             return self._diversify_by_document(results, request.limit)
         return results[: request.limit]
+
+    @staticmethod
+    def _apply_reuse_boost(results: list[SearchResult], workspace_id: str) -> list[SearchResult]:
+        """Boost each result's score by its chunk's reuse_count, then re-sort (inherent#394).
+
+        ``score * min(cap, 1 + weight * log1p(reuse_count))`` (see
+        ``inh_contracts.reuse_boost`` for the full formula/rationale) where
+        ``weight`` is this workspace's ``WORKSPACE_REUSE_BOOST`` entry, or
+        ``0.0`` when unset -- which multiplies every score by exactly 1.0,
+        so a workspace with no override (the default) gets BYTE-FOR-BYTE the
+        same ordering as before this feature existed (pinned by
+        ``test_search_reuse_boost.py``'s "no override" ordering test). A chunk that
+        was never detected as reused (``reuse_count == 0``) is likewise
+        always multiplied by exactly 1.0, even for a workspace WITH a
+        configured weight.
+
+        Re-sorts by the boosted score (descending) since a boost can change
+        relative order -- callers downstream (diversify/truncate) assume
+        ``results`` arrives score-sorted, same invariant Weaviate's own
+        response provided before any boost existed.
+        """
+        weight = settings.workspace_reuse_boost.get(workspace_id, 0.0)
+        if weight <= 0.0:
+            return results  # no override configured -- skip the no-op work entirely
+
+        boosted = [
+            r.model_copy(
+                update={"score": round(apply_reuse_boost(r.score, r.reuse_count, weight), 4)}
+            )
+            for r in results
+        ]
+        boosted.sort(key=lambda r: r.score, reverse=True)
+        return boosted
 
     @staticmethod
     def _diversify_by_document(results: list[SearchResult], limit: int) -> list[SearchResult]:
@@ -1175,6 +1226,7 @@ class SearchService:
                     content_risk
                     content_risk_reasons
                     tags
+                    reuse_count
                     _additional {{ id score certainty distance }}
                 }}
             }}

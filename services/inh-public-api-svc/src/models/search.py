@@ -162,6 +162,18 @@ class SearchResult(BaseModel):
     # majority, unchanged).
     tags: dict[str, str] | None = None
 
+    # Usage-based ranking boost (inherent#394) — optional, backward-
+    # compatible. How many times this chunk's content has been detected as
+    # reused (near-duplicated) in a newer document in this same workspace
+    # (see inh-ingestion-svc's reuse_detection.py). 0 for every chunk never
+    # detected as reused (the vast majority, unchanged). ``score`` above is
+    # ALREADY boosted by this value when the workspace has a
+    # ``WORKSPACE_REUSE_BOOST`` weight configured (see
+    # ``SearchService._apply_reuse_boost``) -- this field is exposed purely
+    # for transparency/debugging, the same way ``bm25_score``/
+    # ``vector_similarity`` expose the OTHER signals that produced ``score``.
+    reuse_count: int = 0
+
     # Claim-level citation (#39) — optional, backward-compatible. Built from this
     # result's own fields (chunk_id + spans + score + provenance + freshness) so
     # the evidence is citable without a second lookup.
