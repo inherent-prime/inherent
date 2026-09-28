@@ -98,8 +98,15 @@ def _schedule_audit(
     response: SearchResponse,
     source: str,
     workspace_id: str,
+    workspace_ids: list[str] | None = None,
 ) -> None:
-    """Build and schedule an audit event for fire-and-forget publishing."""
+    """Build and schedule an audit event for fire-and-forget publishing.
+
+    ``workspace_ids`` (#393) is the full set of workspaces this call actually
+    queried (more than one for a multi-workspace fan-out); it defaults to
+    ``[workspace_id]`` so every existing single-workspace caller gets a
+    correct list with no extra argument.
+    """
     event = build_audit_event(
         workspace_id=workspace_id,
         user_id=auth.key_info.user_id,
@@ -120,6 +127,16 @@ def _schedule_audit(
         alpha=request.alpha,
         # RAG-poisoning visibility (#44): counts of returned chunks by risk level.
         risk_counts=count_results_by_risk(response.results),
+        # Attribution (#393): REST search is always an API-key caller today
+        # (POST /v1/search has no OAuth path -- that is MCP-HTTP-only, see
+        # src/mcp_server/http_transport.py), on the "rest" surface, through
+        # this exact route.
+        principal_type="api_key",
+        principal_id=auth.key_info.key_id,
+        surface="rest",
+        tool_name="search_documents",
+        workspace_ids=workspace_ids if workspace_ids is not None else [workspace_id],
+        outcome="ok",
     )
     # Adaptive retrieval quality gate (#43): record verdict + any fallback so the
     # audit trail shows when retrieval was weak / a fallback ran.
@@ -455,6 +472,7 @@ async def search_documents(
             response=response,
             source=source,
             workspace_id="multi",
+            workspace_ids=[],  # #393: no authorised workspace to attribute this to
         )
         return response
 
@@ -505,5 +523,8 @@ async def search_documents(
         response=response,
         source=source,
         workspace_id=user_workspaces[0] if len(user_workspaces) == 1 else "multi",
+        # #393: the FULL authorised set actually fanned out over, not just the
+        # single legacy `workspace_id` label above.
+        workspace_ids=user_workspaces,
     )
     return response

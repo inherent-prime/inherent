@@ -108,6 +108,16 @@ async def upsert_audit_log(
         "response_time_ms": event["response_time_ms"],
         "request_id": event.get("request_id"),
         "query_timestamp": query_ts,
+        # Attribution fields (inherent#393): additive -- absent on every event
+        # published before this change, so `.get(...)` with no default keeps
+        # those documents storing exactly `None` for these paths, same as any
+        # other optional field above (e.g. `llm_response`).
+        "principal_type": event.get("principal_type"),
+        "principal_id": event.get("principal_id"),
+        "surface": event.get("surface"),
+        "tool_name": event.get("tool_name"),
+        "workspace_ids": event.get("workspace_ids", []),
+        "outcome": event.get("outcome", "ok"),
         "feedback": {
             "rating": None,
             "note": None,

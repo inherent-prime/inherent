@@ -111,6 +111,12 @@ from sqlalchemy import text
 from src.api.v1.whoami import build_whoami
 from src.config.constants import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
 from src.config.settings import settings
+from src.mcp_server.audit import (
+    audit_denied,
+    dispatch_and_audit,
+    record_returned_chunk_ids,
+    record_workspace_ids,
+)
 from src.models.api_key import APIKeyInfo
 from src.models.document import (
     DEFAULT_MAX_CHARS,
@@ -206,6 +212,16 @@ class ToolDef:
     # this one. stdio (this module) ignores the flag entirely -- every tool
     # stays reachable over stdio regardless of its HTTP exposure.
     http_exposed: bool = True
+    # Whether this tool returns retrieved chunk content, and so must be
+    # attributed in the audit trail (inherent#393). Default False: most
+    # tools (whoami, upload_document, delete_document, ...) never surface
+    # evidence and are audited exactly as before this change -- no event at
+    # all. True for search_documents/search_memory/get_citations/
+    # get_document_context/list_chunks and every vertical-pack profile tool
+    # (``tool_profiles.build_profile_tools``). ``src/mcp_server/audit.py``'s
+    # ``dispatch_and_audit``/``audit_denied`` are the ONE choke point that
+    # reads this flag; nothing else in this module checks it.
+    returns_chunk_content: bool = False
 
 
 # Schema shared by the two search-shaped tools so they stay identical (#14/#40).
@@ -352,6 +368,11 @@ def create_mcp_server() -> Server:
             # Permission parity with REST (#14): check BEFORE executing the body
             # so a denied key never reaches the search/db/verify services.
             if not key_info.has_permission(tool.permission):
+                # Attribution (#393): a permission-denied call to a
+                # retrieval-returning tool is still logged, with
+                # outcome="denied" and no returned ids -- see audit.py's
+                # docstring for why this is a no-op for every other tool.
+                audit_denied(tool, name, key_info, arguments, surface="mcp")
                 return [
                     TextContent(
                         type="text",
@@ -359,7 +380,9 @@ def create_mcp_server() -> Server:
                     )
                 ]
 
-            return await tool.handler(key_info, arguments)
+            # Attribution (#393): the ONE choke point for stdio -- see
+            # src/mcp_server/audit.py's module docstring.
+            return await dispatch_and_audit(tool, name, key_info, arguments, surface="mcp")
 
         except Exception as e:
             logger.error("MCP tool error", tool=name, error=str(e))
@@ -568,6 +591,13 @@ async def _handle_search(key_info: APIKeyInfo, arguments: dict) -> list[TextCont
     if error:
         return [TextContent(type="text", text=error)]
 
+    # Attribution (#393): report the actually-returned chunk ids and searched
+    # workspaces to the audit choke point (src/mcp_server/audit.py). A no-op
+    # when this handler isn't running inside an audited dispatch (e.g. a unit
+    # test calling it directly).
+    record_returned_chunk_ids([result.chunk_id for _, result in tagged if result.chunk_id])
+    record_workspace_ids(workspace_ids)
+
     query = arguments.get("query", "")
     note = _coverage_note(workspace_ids)
     if not tagged:
@@ -646,6 +676,10 @@ async def _handle_get_citations(key_info: APIKeyInfo, arguments: dict) -> list[T
     for workspace_id, result in tagged:
         if result.citation is not None:
             citations.append({"workspace_id": workspace_id, **result.citation.model_dump()})
+
+    # Attribution (#393): see _handle_search's comment above.
+    record_returned_chunk_ids([cit["chunk_id"] for cit in citations if cit.get("chunk_id")])
+    record_workspace_ids(workspace_ids)
 
     if not citations:
         return _structured(
@@ -728,6 +762,9 @@ async def _handle_get_context(key_info: APIKeyInfo, arguments: dict) -> list[Tex
         "offset": window.offset,
         "next_offset": window.next_offset,
     }
+    # Attribution (#393): see _handle_search's comment for the mechanism.
+    record_returned_chunk_ids([chunk.id for chunk in window.chunks])
+    record_workspace_ids([document.workspace_id])
     return _structured(result_text, payload)
 
 
@@ -1111,6 +1148,9 @@ async def _handle_list_chunks(key_info: APIKeyInfo, arguments: dict) -> list[Tex
     database = await get_database()
     chunks = await database.get_document_chunks_by_doc_id(document.id)
     payload = [chunk.model_dump() for chunk in chunks]
+    # Attribution (#393): see _handle_search's comment for the mechanism.
+    record_returned_chunk_ids([chunk.id for chunk in chunks])
+    record_workspace_ids([document.workspace_id])
     return _structured(f"{len(chunks)} chunks for document '{document.id}'", payload)
 
 
@@ -1567,6 +1607,7 @@ _TOOLS: dict[str, ToolDef] = {
         input_schema=_SEARCH_INPUT_SCHEMA,
         permission="search",
         handler=_handle_search,
+        returns_chunk_content=True,
     ),
     "search_memory": ToolDef(
         description="Memory primitive: retrieve evidence chunks for a query (canonical "
@@ -1580,6 +1621,7 @@ _TOOLS: dict[str, ToolDef] = {
         # two tools doing one job costs every HTTP agent permanent context
         # overhead with no capability gained. Unchanged on stdio.
         http_exposed=False,
+        returns_chunk_content=True,
     ),
     "get_citations": ToolDef(
         description="Run a search and return the claim-level Citation objects attached to "
@@ -1593,6 +1635,7 @@ _TOOLS: dict[str, ToolDef] = {
         # (chunk_id, document_name, content, start_char, end_char). Unchanged
         # on stdio.
         http_exposed=False,
+        returns_chunk_content=True,
     ),
     "get_document_context": ToolDef(
         description="Get a bounded window of a document's content for context. Response is "
@@ -1625,6 +1668,7 @@ _TOOLS: dict[str, ToolDef] = {
         },
         permission="read",
         handler=_handle_get_context,
+        returns_chunk_content=True,
     ),
     "list_documents": ToolDef(
         description="List all documents. Omit workspace_id to list from every workspace "
@@ -1811,6 +1855,7 @@ _TOOLS: dict[str, ToolDef] = {
         },
         permission="read",
         handler=_handle_list_chunks,
+        returns_chunk_content=True,
     ),
     "create_chunk": ToolDef(
         description="Append a chunk to a document at max(chunk_index)+1 (#133 Option A) — "

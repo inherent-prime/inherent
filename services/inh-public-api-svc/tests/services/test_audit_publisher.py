@@ -106,6 +106,44 @@ class TestBuildAuditEvent:
         event = build_audit_event(**kwargs)
         assert event["request_id"] == "req-123"
 
+    # -----------------------------------------------------------------
+    # Attribution fields (inherent#393) — additive, omitted when absent
+    # -----------------------------------------------------------------
+
+    def test_attribution_fields_omitted_by_default(self):
+        """A caller that omits every #393 kwarg (every pre-#393 call site,
+        and every existing test) gets an event with none of the new keys —
+        the additive contract the ingestion consumer/writer and prime's
+        reader depend on."""
+        event = build_audit_event(**self._base_kwargs())
+        for key in (
+            "principal_type",
+            "principal_id",
+            "surface",
+            "tool_name",
+            "workspace_ids",
+            "outcome",
+        ):
+            assert key not in event
+
+    def test_attribution_fields_included_when_provided(self):
+        kwargs = self._base_kwargs()
+        kwargs.update(
+            principal_type="oauth",
+            principal_id="oauth-subject-1",
+            surface="mcp",
+            tool_name="search_documents",
+            workspace_ids=["ws-1", "ws-2"],
+            outcome="denied",
+        )
+        event = build_audit_event(**kwargs)
+        assert event["principal_type"] == "oauth"
+        assert event["principal_id"] == "oauth-subject-1"
+        assert event["surface"] == "mcp"
+        assert event["tool_name"] == "search_documents"
+        assert event["workspace_ids"] == ["ws-1", "ws-2"]
+        assert event["outcome"] == "denied"
+
 
 # ---------------------------------------------------------------------------
 # publish_audit_event

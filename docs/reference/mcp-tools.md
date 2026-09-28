@@ -35,8 +35,11 @@ claude mcp add --transport http inherent https://api.inherent.sh/mcp \
   (see [Surface difference](#surface-difference-http-vs-stdio) below) —
   unchanged on stdio.
 - Rides the REST app's existing middleware stack — CORS, security headers,
-  audit logging, and **rate limiting** all apply to `/mcp` the same way they
-  apply to `/v1/*`, by construction (no second copy to keep in sync).
+  request-level audit logging, and **rate limiting** all apply to `/mcp` the
+  same way they apply to `/v1/*`, by construction (no second copy to keep in
+  sync). Separately, every retrieval-returning tool call (both API-key and
+  OAuth callers, stdio and HTTP alike) also publishes its own query-level
+  audit event — see [Audit log](audit-log.md) (#393).
 - Stateless: every call (`initialize`, `tools/list`, `tools/call`) is one
   independent HTTP request; the key is re-validated on every call.
 - Tool errors set `isError: true` with a machine-branchable `error_class` in

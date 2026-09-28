@@ -59,6 +59,36 @@ def build_audit_event(
     context_window: int | None = None,
     alpha: float | None = None,
     risk_counts: dict[str, int] | None = None,
+    # Attribution fields (inherent#393): every query attributed to its actual
+    # caller, for BOTH REST and MCP, API-key and OAuth alike. Additive and
+    # optional -- omitted entirely (not written with a null placeholder) when
+    # not provided, so every pre-#393 caller (and the ingestion consumer /
+    # Mongo writer / prime's audit-log reader) keeps working unchanged.
+    #   - principal_type: "api_key" | "oauth" -- which credential authenticated
+    #     this call. Distinct from `source` (dashboard/chat/api_key), which
+    #     describes which product surface issued the request, not how it
+    #     authenticated.
+    #   - principal_id: the API key's id, or the OAuth token's subject --
+    #     NEVER the raw key/token. For an MCP OAuth caller this is the
+    #     resolved principal id (see src/mcp_server/audit.py), not `user_id`.
+    #   - surface: "rest" | "mcp" -- which transport the call came in on.
+    #   - tool_name: the MCP tool name (including a vertical-pack profile
+    #     tool) or the REST route name, so a single "search" query_type can
+    #     still be traced back to the exact entry point that ran it.
+    #   - workspace_ids: every workspace actually queried by this call (a
+    #     multi-workspace fan-out searches more than one); `workspace_id`
+    #     above stays a single value for backward compatibility and is the
+    #     first of these when several apply.
+    #   - outcome: "ok" | "error" | "denied" -- how the call ended. Omitted
+    #     entirely means "ok" (every pre-#393 event -- REST's success path --
+    #     implicitly was), so no existing consumer needs to treat a missing
+    #     outcome as anything other than what it always meant.
+    principal_type: str | None = None,
+    principal_id: str | None = None,
+    surface: str | None = None,
+    tool_name: str | None = None,
+    workspace_ids: list[str] | None = None,
+    outcome: str | None = None,
 ) -> dict[str, Any]:
     """Construct an audit event dict ready for MQ publishing.
 
@@ -68,8 +98,9 @@ def build_audit_event(
     - At most 5 result snippets kept
 
     The optional keyword arguments ``search_mode``, ``include_context``,
-    ``context_window``, and ``alpha`` are included only when provided (i.e.
-    not ``None``), so existing callers that omit them are unaffected.
+    ``context_window``, ``alpha``, and the attribution fields below are
+    included only when provided (i.e. not ``None``), so existing callers that
+    omit them are unaffected.
     """
     audit_id = str(uuid.uuid4())
 
@@ -118,6 +149,20 @@ def build_audit_event(
     # an auditor can spot when risky evidence is surfacing in answers.
     if risk_counts is not None:
         event["risk_counts"] = risk_counts
+
+    # Attribution fields (#393) -- see the parameter docstring above.
+    if principal_type is not None:
+        event["principal_type"] = principal_type
+    if principal_id is not None:
+        event["principal_id"] = principal_id
+    if surface is not None:
+        event["surface"] = surface
+    if tool_name is not None:
+        event["tool_name"] = tool_name
+    if workspace_ids is not None:
+        event["workspace_ids"] = workspace_ids
+    if outcome is not None:
+        event["outcome"] = outcome
 
     return event
 

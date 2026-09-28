@@ -71,6 +71,7 @@ from typing import TYPE_CHECKING
 
 from mcp.types import TextContent
 
+from src.mcp_server.audit import record_returned_chunk_ids, record_workspace_ids
 from src.models.api_key import APIKeyInfo
 from src.services.auth import get_authorized_workspace_ids
 from src.services.search import (
@@ -180,6 +181,13 @@ def _make_profile_handler(profile: "ToolProfile", workspace_id: str):
             # "Error: ..." message -- never a raw 500/traceback.
             return [TextContent(type="text", text=f"Error: {exc}")]
 
+        # Attribution (#393): report the actually-returned chunk ids and the
+        # single workspace this profile is bound to, for the audit choke
+        # point in src/mcp_server/audit.py. A no-op outside an audited
+        # dispatch (e.g. a unit test calling this handler directly).
+        record_returned_chunk_ids([r.chunk_id for r in response.results if r.chunk_id])
+        record_workspace_ids([workspace_id])
+
         if not response.results:
             return _structured(
                 f"No results found for: {query}",
@@ -252,6 +260,9 @@ def build_profile_tools(
             # same permission as search_documents/search_memory (#14).
             permission="search",
             handler=_make_profile_handler(profile, workspace_id),
+            # Attribution (#393): profile tools return chunk content exactly
+            # like search_documents does, so they must be audited too.
+            returns_chunk_content=True,
         )
     return tools
 

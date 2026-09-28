@@ -78,6 +78,11 @@ from starlette.requests import Request
 from starlette.types import Receive, Scope, Send
 
 from src.config import settings
+from src.mcp_server.audit import (
+    audit_denied,
+    audit_denied_unresolved_oauth,
+    dispatch_and_audit,
+)
 from src.mcp_server.quotas import QuotaDenial, check_quota, publish_usage_event
 from src.mcp_server.server import _TOOLS, ToolDef, current_mcp_endpoint
 from src.mcp_server.tool_profiles import resolve_profile_tools
@@ -445,6 +450,10 @@ def create_http_mcp_server() -> Server:
             return _error_result(f"Error: Unknown tool '{name}'", FAILURE_CLASS_UNKNOWN_TOOL)
 
         if not key_info.has_permission(tool.permission):
+            # Attribution (#393): see dispatch_and_audit's call below and
+            # audit.py's module docstring for why this is the ONE choke
+            # point rather than a call inside every handler.
+            audit_denied(tool, name, key_info, arguments, surface="mcp")
             return _error_result(
                 f"Error: API key does not have '{tool.permission}' permission",
                 FAILURE_CLASS_AUTHORIZATION,
@@ -465,10 +474,13 @@ def create_http_mcp_server() -> Server:
         )
         if denial is not None:
             publish_usage_event(principal, name, allowed=False)
+            audit_denied(tool, name, key_info, arguments, surface="mcp")
             return _quota_exceeded_result(denial)
 
         try:
-            content = await tool.handler(key_info, arguments)
+            # Attribution (#393): the ONE choke point for HTTP API-key
+            # calls -- see src/mcp_server/audit.py's module docstring.
+            content = await dispatch_and_audit(tool, name, key_info, arguments, surface="mcp")
         except Exception as exc:  # noqa: BLE001 - must not crash the transport
             logger.error("MCP HTTP tool error", tool=name, error=str(exc))
             return _error_result(f"Error: {exc}", FAILURE_CLASS_INTERNAL)
@@ -577,6 +589,16 @@ async def _call_tool_oauth(name: str, arguments: dict, principal: Principal) -> 
 
     required_scope = PERMISSION_SCOPE_MAP.get(tool.permission, tool.permission)
     if not principal.has_scope(required_scope):
+        # Attribution (#393): logged even though no APIKeyInfo exists yet for
+        # this principal -- audit_denied needs one (it derives
+        # principal_type/id from `key_info.key_id`), so use the resolved one
+        # when we have it and otherwise the bare-subject helper.
+        if key_info is not None:
+            audit_denied(tool, name, key_info, arguments, surface="mcp")
+        else:
+            audit_denied_unresolved_oauth(
+                tool, name, principal.principal_id, arguments, surface="mcp"
+            )
         return CallToolResult(
             content=[
                 TextContent(
@@ -613,6 +635,12 @@ async def _call_tool_oauth(name: str, arguments: dict, principal: Principal) -> 
     )
     if denial is not None:
         publish_usage_event(principal, name, allowed=False)
+        if key_info is not None:
+            audit_denied(tool, name, key_info, arguments, surface="mcp")
+        else:
+            audit_denied_unresolved_oauth(
+                tool, name, principal.principal_id, arguments, surface="mcp"
+            )
         return _quota_exceeded_result(denial)
 
     if key_info is None:
@@ -623,6 +651,11 @@ async def _call_tool_oauth(name: str, arguments: dict, principal: Principal) -> 
         # `resolve_oauth_user`'s docstring (src/services/auth.py) for the
         # two ways an operator closes this: `OAUTH_USER_ID_CLAIM` or
         # `OAUTH_SUBJECT_USERS`.
+        #
+        # Attribution (#393): logged as "denied" too -- a caller reading the
+        # audit trail must be able to see this OAuth subject tried and was
+        # rejected, not just silently missing.
+        audit_denied_unresolved_oauth(tool, name, principal.principal_id, arguments, surface="mcp")
         return _error_result(
             "Error: no Inherent identity is linked to this token's subject -- "
             "set OAUTH_USER_ID_CLAIM or OAUTH_SUBJECT_USERS to link OAuth "
@@ -632,7 +665,12 @@ async def _call_tool_oauth(name: str, arguments: dict, principal: Principal) -> 
         )
 
     try:
-        content = await tool.handler(key_info, arguments)
+        # Attribution (#393): the ONE choke point for HTTP OAuth calls -- see
+        # src/mcp_server/audit.py's module docstring. key_info here is the
+        # synthesized identity built above from principal.resolved_user_id,
+        # so `dispatch_and_audit`'s key_id-prefix check correctly reports
+        # principal_type="oauth".
+        content = await dispatch_and_audit(tool, name, key_info, arguments, surface="mcp")
     except Exception as exc:  # noqa: BLE001 - must not crash the transport
         logger.error("MCP HTTP tool error (oauth)", tool=name, error=str(exc))
         return _error_result(f"Error: {exc}", FAILURE_CLASS_INTERNAL)
