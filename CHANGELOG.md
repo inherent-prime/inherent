@@ -107,7 +107,7 @@ All notable changes to Inherent are documented here. The format follows
   now fails if a package CI typechecks is absent from the target.
 - Legacy `.xls`/`.ppt` upload rejections now add a bespoke sentence naming the modern replacement (`.xlsx`/`.pptx`) on top of the existing generic supported-types message, on both REST and MCP (#192).
 - REST uploads declaring the generic `application/octet-stream` now store the resolved spec's specific `content_type` label (e.g. `text/x-go` for a `.go` file) instead of the generic string verbatim, matching what MCP already stores for the identical file; a specific declared type is still preserved verbatim on both surfaces (#211).
-- `inherent` CLI ships as `0.7.1` on PyPI via the per-package Trusted Publisher environments, after the `0.7.1rc1` TestPyPI dry run (#388, #386, #397).
+- `inherent` CLI ships as `0.7.1` on PyPI via the per-package Trusted Publisher environments, after the `0.7.1rc1` TestPyPI dry run (#398, #397, #388, #386).
 
 ### Removed
 
