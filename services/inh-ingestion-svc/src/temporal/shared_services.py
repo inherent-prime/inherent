@@ -38,6 +38,15 @@ _weaviate_service = None
 _mq_service = None
 _mq_service_owned = False
 _mq_connect_lock = asyncio.Lock()
+# Temporal client (inherent#395): the `cancel_inflight_ingestion` purge
+# activity needs to reach INTO Temporal itself (cancel a sibling workflow),
+# unlike every other activity here which only reaches out to DB/Weaviate/
+# Mongo. Registered externally (worker.py already owns a connected client
+# for the SAME namespace/task queue) so this never opens a second gRPC
+# channel; falls back to creating one lazily if nothing registered it
+# (e.g. a unit test exercising the activity directly).
+_temporal_client = None
+_temporal_client_lock = asyncio.Lock()
 
 
 def initialize(settings: Settings) -> None:
@@ -51,7 +60,7 @@ def shutdown() -> None:
     """Disconnect all shared services. Called on worker shutdown."""
     global _db_service, _staging_service
     global _storage_service, _weaviate_service, _settings
-    global _mq_service, _mq_service_owned
+    global _mq_service, _mq_service_owned, _temporal_client
 
     services = [
         ("db", _db_service),
@@ -83,6 +92,9 @@ def shutdown() -> None:
     _storage_service = None
     _weaviate_service = None
     _settings = None
+    # Externally owned (worker.py disconnects its own client) -- just drop
+    # the reference here, same as the mq_service branch above.
+    _temporal_client = None
     logger.info("Shared service registry shutdown")
 
 
@@ -167,6 +179,26 @@ async def get_mq_service():
                 _mq_service_owned = True
                 logger.debug("Shared MQ service connected")
     return _mq_service
+
+
+def set_temporal_client(client) -> None:
+    """Register the already-connected Temporal client the worker uses (externally owned)."""
+    global _temporal_client
+    _temporal_client = client
+    logger.debug("Shared Temporal client registered")
+
+
+async def get_temporal_client():
+    """Get the registered Temporal client, lazily connecting one if nothing registered it."""
+    global _temporal_client
+    if _temporal_client is None:
+        async with _temporal_client_lock:
+            if _temporal_client is None:
+                from src.temporal.worker import create_temporal_client
+
+                _temporal_client = await create_temporal_client(_get_settings())
+                logger.debug("Shared Temporal client lazily connected")
+    return _temporal_client
 
 
 def get_weaviate_service():

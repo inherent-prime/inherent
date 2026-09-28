@@ -119,6 +119,10 @@ class TestTenantManager:
         db_service.upsert_workspace_metadata = AsyncMock(return_value=1)
         db_service.update_workspace_stats = AsyncMock(return_value=True)
         db_service.get_tenant = AsyncMock(return_value={"user_id": "test_user", "status": "active"})
+        # inherent#395: ensure_workspace_ready now checks purge status first.
+        # None (never purged) so these pre-existing tests keep exercising the
+        # normal ready-workspace path.
+        db_service.get_workspace_purge_status = AsyncMock(return_value=None)
         return db_service
 
     @pytest.fixture

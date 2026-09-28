@@ -36,11 +36,16 @@ from src.temporal.models import (
     ChunkEditInput,
     ChunkEditResult,
     DocumentIngestionInput,
+    PurgeWorkspaceInput,
     WorkflowResult,
 )
 from src.temporal.trigger import build_ingestion_source_memo
 from src.temporal.worker import TemporalWorkerManager
-from src.temporal.workflows import ChunkEditWorkflow, DocumentIngestionWorkflow
+from src.temporal.workflows import (
+    ChunkEditWorkflow,
+    DocumentIngestionWorkflow,
+    PurgeWorkspaceWorkflow,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -177,6 +182,46 @@ class HealthResponse(BaseModel):
     status: Literal["healthy", "degraded"]
     temporal_worker: bool
     version: str
+
+
+class PurgeWorkspaceRequest(BaseModel):
+    """Body for POST /admin/workspaces/{workspace_id}/purge (inherent#395)."""
+
+    operator: str = Field(
+        ..., min_length=1, description="Who requested this purge, for the receipt"
+    )
+    retain_audit_logs: bool = Field(
+        False,
+        description=(
+            "Skip deleting Mongo audit logs for this workspace. Default False "
+            "(purge) -- the data-deletion commitment this endpoint exists for "
+            "names 'index and logs' explicitly; set True only for a "
+            "retention requirement that outlives the workspace."
+        ),
+    )
+
+
+class PurgeWorkspaceAcceptedResponse(BaseModel):
+    """202 response: the purge has started, poll GET for the report."""
+
+    purge_workflow_id: str
+    workspace_id: str
+
+
+class PurgeWorkspaceReportResponse(BaseModel):
+    """GET /admin/workspaces/{workspace_id}/purge/{purge_workflow_id}: status + verification report.
+
+    ``residue``/``verified``/``receipt`` are only populated once the purge
+    workflow has completed -- while it is still running, ``status`` is
+    ``"purging"`` and those fields are ``None``.
+    """
+
+    purge_workflow_id: str
+    workspace_id: str
+    status: Literal["purging", "completed", "not_found"]
+    residue: dict[str, int] | None = None
+    verified: bool | None = None
+    receipt: dict[str, object] | None = None
 
 
 # =============================================================================
@@ -1010,4 +1055,114 @@ def create_app(settings: Settings) -> FastAPI:
         return {"abandoned": True, "job_id": job_id}
 
     app.include_router(dl_router)
+
+    # ------------------------------------------------------------------
+    # Admin purge route (protected, inherent#395)
+    # ------------------------------------------------------------------
+    #
+    # Auth: gated by the SAME `verify_api_key` dependency as every other
+    # mutating route in this file -- the shared INGESTION_API_KEY is
+    # already this service's internal/operator secret (no per-tenant
+    # customer ever holds it; public-api-svc holds it to call ingestion
+    # service-to-service). Deliberately not a new auth mechanism -- the
+    # issue asks to reuse the existing admin/operator pattern, not invent
+    # a second, weaker one.
+
+    admin_router = APIRouter(
+        prefix="/admin/workspaces",
+        tags=["admin"],
+        dependencies=[Depends(verify_api_key)],
+    )
+
+    @admin_router.post(
+        "/{workspace_id}/purge",
+        status_code=202,
+        response_model=PurgeWorkspaceAcceptedResponse,
+    )
+    async def purge_workspace(
+        workspace_id: str,
+        body: PurgeWorkspaceRequest,
+        request: Request,
+    ):
+        """Start (or resume) an idempotent full purge of every store's data for this workspace.
+
+        Deterministic workflow id (``purge-{workspace_id}``): calling this
+        twice for the same workspace while a purge is already running
+        resumes/attaches to that SAME run rather than starting a second,
+        overlapping one -- a `WorkflowAlreadyStartedError` on the retry is
+        swallowed and the existing job id returned, matching the "idempotent
+        trigger" requirement.
+        """
+        client: Client = request.app.state.temporal_client
+        settings: Settings = request.app.state.settings
+
+        purge_workflow_id = f"purge-{workspace_id}"
+        try:
+            await client.start_workflow(
+                PurgeWorkspaceWorkflow.run,
+                PurgeWorkspaceInput(
+                    workspace_id=workspace_id,
+                    operator=body.operator,
+                    retain_audit_logs=body.retain_audit_logs,
+                ),
+                id=purge_workflow_id,
+                task_queue=settings.temporal_task_queue,
+            )
+        except WorkflowAlreadyStartedError:
+            logger.info(
+                "Purge already running/completed for workspace; returning existing job",
+                workspace_id=workspace_id,
+                purge_workflow_id=purge_workflow_id,
+            )
+
+        return PurgeWorkspaceAcceptedResponse(
+            purge_workflow_id=purge_workflow_id, workspace_id=workspace_id
+        )
+
+    @admin_router.get(
+        "/{workspace_id}/purge/{purge_workflow_id}",
+        response_model=PurgeWorkspaceReportResponse,
+    )
+    async def get_purge_status(
+        workspace_id: str,
+        purge_workflow_id: str,
+        request: Request,
+    ):
+        """Poll a purge job's status; once completed, returns the verification report + receipt."""
+        from src.temporal import shared_services
+
+        client: Client = request.app.state.temporal_client
+
+        try:
+            handle = client.get_workflow_handle(purge_workflow_id)
+            description = await handle.describe()
+        except RPCError:
+            return PurgeWorkspaceReportResponse(
+                purge_workflow_id=purge_workflow_id,
+                workspace_id=workspace_id,
+                status="not_found",
+            )
+
+        if description.status is None or description.status.name != "COMPLETED":
+            return PurgeWorkspaceReportResponse(
+                purge_workflow_id=purge_workflow_id,
+                workspace_id=workspace_id,
+                status="purging",
+            )
+
+        result = await handle.result()
+        db_svc = shared_services.get_db_service()
+        receipt = await db_svc.get_purge_receipt_by_workflow_id(purge_workflow_id)
+
+        return PurgeWorkspaceReportResponse(
+            purge_workflow_id=purge_workflow_id,
+            workspace_id=workspace_id,
+            status="completed",
+            residue=result.residue,
+            verified=result.verified,
+            receipt=receipt,
+        )
+
+    app.include_router(admin_router)
+
     return app

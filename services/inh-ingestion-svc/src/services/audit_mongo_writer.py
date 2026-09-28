@@ -135,3 +135,56 @@ async def upsert_audit_log(
     except DuplicateKeyError:
         logger.info("Audit log duplicate (idempotent skip)", audit_id=event["audit_id"])
         return False
+
+
+# ---------------------------------------------------------------------------
+# Workspace purge (inherent#395)
+# ---------------------------------------------------------------------------
+#
+# Audit logs record a `workspace_id` (single-workspace query) OR a
+# `workspace_ids` array (a multi-workspace/MCP call attributed to several
+# workspaces at once, see #393's attribution work). A workspace's purge must
+# reach both shapes, so the filter matches on either field.
+
+
+def _workspace_filter(workspace_id: str) -> dict[str, Any]:
+    """Mongo filter matching either the single `workspace_id` field or a `workspace_ids` array membership."""
+    return {"$or": [{"workspace_id": workspace_id}, {"workspace_ids": workspace_id}]}
+
+
+async def count_workspace_audit_logs(
+    workspace_id: str,
+    mongo_uri: str,
+    db_name: str,
+    collection_name: str = "audit_logs",
+) -> int:
+    """Count audit log documents that reference this workspace (either field). Used for the purge's residue check."""
+    client = get_mongo_client(mongo_uri)
+    collection = client[db_name][collection_name]
+    return int(await collection.count_documents(_workspace_filter(workspace_id)))
+
+
+async def delete_workspace_audit_logs(
+    workspace_id: str,
+    mongo_uri: str,
+    db_name: str,
+    collection_name: str = "audit_logs",
+) -> int:
+    """Delete every audit log document that references this workspace.
+
+    Idempotent: a second call after the first already deleted everything
+    just deletes zero documents. This is the DEFAULT purge behavior -- the
+    data-deletion commitment this feature exists for ("index and logs") is
+    explicit about logs, so `PurgeWorkspaceWorkflow` only SKIPS this when an
+    operator opts in to `retain_audit_logs=True` (see that workflow's
+    module docstring for the trade-off).
+    """
+    client = get_mongo_client(mongo_uri)
+    collection = client[db_name][collection_name]
+    result = await collection.delete_many(_workspace_filter(workspace_id))
+    logger.info(
+        "Deleted workspace audit logs",
+        workspace_id=workspace_id,
+        deleted_count=result.deleted_count,
+    )
+    return int(result.deleted_count)

@@ -625,6 +625,34 @@ class WeaviateService:
             )
             return False
 
+    def workspace_collection_object_count(self, workspace_id: str) -> int:
+        """Residue count for the purge verification report (inherent#395).
+
+        `delete_workspace_collection` removes the WHOLE collection, so the
+        only two states after a purge are "collection gone" (0) or
+        "collection still exists" (residue -- report every object still in
+        it, not just 1, so an operator can see the real remaining size).
+        """
+        if not self.client:
+            raise RuntimeError("Weaviate not connected")
+
+        collection_name = get_workspace_collection_name(workspace_id)
+        try:
+            if not self.client.collections.exists(collection_name):
+                return 0
+            collection = self.client.collections.get(collection_name)
+            agg = collection.aggregate.over_all(total_count=True)
+            return int(agg.total_count or 0)
+        except Exception as e:
+            logger.error(
+                "Failed to count workspace collection residue",
+                collection=collection_name,
+                error=str(e),
+            )
+            # Fail closed: an unknown count must never be reported as the
+            # all-zero "verified" state the receipt treats as proof of purge.
+            return -1
+
     # =========================================================================
     # Multi-Tenant Storage Methods
     # =========================================================================

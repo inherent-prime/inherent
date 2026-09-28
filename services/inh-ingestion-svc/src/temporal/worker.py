@@ -19,6 +19,7 @@ from temporalio.worker import Worker
 
 from src.config.settings import Settings
 from src.temporal.activities import (
+    cancel_inflight_ingestion,
     chunk_conversation,
     chunk_text,
     cleanup_staging,
@@ -26,11 +27,19 @@ from src.temporal.activities import (
     ensure_tenant_ready,
     extract_text,
     fetch_document,
+    mark_workspace_purged,
+    mark_workspace_purging,
     publish_completion,
+    purge_audit_logs,
+    purge_postgres_documents,
+    purge_postgres_side_tables,
+    purge_weaviate_collection,
     record_chunk_edit_weaviate_failure,
     record_dead_letter,
+    record_purge_receipt,
     redact_turns,
     resolve_dead_letter_jobs,
+    revoke_workspace_api_keys,
     set_document_status,
     store_in_postgresql,
     store_in_weaviate,
@@ -38,6 +47,7 @@ from src.temporal.activities import (
     update_chunk_postgresql,
     update_chunk_weaviate,
     update_workspace_stats,
+    verify_purge,
 )
 from src.temporal.activities.audit_activities import (
     emit_audit_metric,
@@ -48,6 +58,7 @@ from src.temporal.workflows import (
     ChunkEditWorkflow,
     ConversationMemoryWorkflow,
     DocumentIngestionWorkflow,
+    PurgeWorkspaceWorkflow,
 )
 from src.temporal.workflows.audit_log import WriteAuditLogWorkflow
 
@@ -76,6 +87,17 @@ _ALL_ACTIVITIES: list[Callable[..., Any]] = [
     chunk_conversation,
     # Vertical pack tagging (inherent#390)
     tag_chunks,
+    # Workspace purge (inherent#395)
+    mark_workspace_purging,
+    mark_workspace_purged,
+    cancel_inflight_ingestion,
+    purge_postgres_documents,
+    purge_postgres_side_tables,
+    revoke_workspace_api_keys,
+    purge_weaviate_collection,
+    purge_audit_logs,
+    verify_purge,
+    record_purge_receipt,
 ]
 
 # All workflows registered with the ingestion worker
@@ -83,6 +105,7 @@ _ALL_WORKFLOWS = [
     DocumentIngestionWorkflow,
     ChunkEditWorkflow,
     ConversationMemoryWorkflow,
+    PurgeWorkspaceWorkflow,
 ]
 
 # Audit namespace activities and workflows
@@ -235,6 +258,9 @@ async def run_worker(
     staging_sweep_task = asyncio.create_task(_periodic_staging_cleanup(settings))
 
     client = await create_temporal_client(settings)
+    # Registered so the cancel_inflight_ingestion purge activity (inherent#395)
+    # can cancel a sibling workflow without opening a second gRPC channel.
+    shared_services.set_temporal_client(client)
 
     # Create ingestion worker.
     # Concurrency limits (#18 backpressure): cap in-flight activities and
@@ -371,6 +397,7 @@ class TemporalWorkerManager:
 
         self._client = await create_temporal_client(self.settings)
         self._audit_client = await create_audit_temporal_client(self.settings)
+        shared_services.set_temporal_client(self._client)
 
         self._worker = Worker(
             self._client,

@@ -747,3 +747,45 @@ class ChunkConversationOutput:
     """
 
     chunk_count: int = 0
+
+
+# =============================================================================
+# Workspace purge (inherent#395)
+# =============================================================================
+
+
+@dataclass
+class PurgeWorkspaceInput:
+    """Input for `PurgeWorkspaceWorkflow`.
+
+    `retain_audit_logs` defaults to False: the data-deletion commitment this
+    workflow exists for (pilot end, customer deletion request) is described
+    as covering "index and logs", so purging Mongo audit logs is the
+    default, not an opt-in. An operator sets this True only when a
+    retention requirement on the audit trail outlives the workspace itself
+    -- see the workflow's module docstring for that trade-off written out.
+    """
+
+    workspace_id: str
+    operator: str
+    retain_audit_logs: bool = False
+
+
+@dataclass
+class PurgeWorkspaceResult:
+    """Output of `PurgeWorkspaceWorkflow`: the verification report + receipt id.
+
+    `residue` is `{store_name: remaining_count}` after every delete step
+    ran -- all zeros (`verified=True`) is the proof-of-purge this feature
+    exists to produce. A non-zero entry means that store still has rows for
+    this workspace and the operator should re-run the purge (every step is
+    idempotent, so re-running is always safe).
+    """
+
+    workspace_id: str
+    purge_workflow_id: str
+    residue: dict[str, int]
+    verified: bool
+    revoked_api_keys: int
+    cancelled_ingestion_workflows: int
+    audit_logs_purged: bool

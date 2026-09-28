@@ -10,6 +10,7 @@ from typing import Any
 import structlog
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     Column,
     DateTime,
     Engine,
@@ -486,6 +487,67 @@ class DatabaseService:
             Index("idx_redaction_audit_turn_id", "turn_id"),
             Index("idx_redaction_audit_workflow_run_id", "workflow_run_id"),
             Index("idx_redaction_audit_document_id", "document_id"),
+        )
+
+        # Workspace purge state (inherent#395, migration 023): the gate
+        # `ensure_workspace_ready` checks before letting new documents into a
+        # workspace, and the marker PurgeWorkspaceWorkflow's steps use to
+        # know a workspace is off-limits for new ingest while the purge is
+        # in flight. Lives in its own table (not a column on
+        # workspace_metadata) because the purge deletes that row outright
+        # (see delete_workspace_data) -- purge state has to outlive it.
+        self.workspace_purge_state = Table(
+            "workspace_purge_state",
+            self.metadata,
+            Column("workspace_id", String(100), primary_key=True),
+            Column("status", String(20), nullable=False, default="purging"),
+            Column(
+                "requested_at",
+                DateTime(timezone=True),
+                nullable=False,
+                server_default=func.now(),
+            ),
+            Column(
+                "updated_at",
+                DateTime(timezone=True),
+                nullable=False,
+                server_default=func.now(),
+                onupdate=func.now(),
+            ),
+        )
+
+        # Durable purge receipts (inherent#395): per-store row COUNTS only
+        # (before/after), never document content -- proof a data-deletion
+        # commitment was honored. Keyed by the purge workflow id so
+        # re-recording the SAME run's receipt is an idempotent upsert.
+        self.workspace_purge_receipts = Table(
+            "workspace_purge_receipts",
+            self.metadata,
+            Column("purge_workflow_id", String(255), primary_key=True),
+            Column("workspace_id", String(100), nullable=False),
+            Column("operator", String(255), nullable=False),
+            Column("retain_audit_logs", Boolean, nullable=False, default=False),
+            Column("counts_before", JSONB, nullable=False, default={}),
+            Column("counts_after", JSONB, nullable=False, default={}),
+            Column("verified", Boolean, nullable=False, default=False),
+            Column(
+                "requested_at",
+                DateTime(timezone=True),
+                nullable=False,
+                server_default=func.now(),
+            ),
+            Column("completed_at", DateTime(timezone=True), nullable=True),
+            Column(
+                "created_at",
+                DateTime(timezone=True),
+                nullable=False,
+                server_default=func.now(),
+            ),
+            Index(
+                "idx_workspace_purge_receipts_workspace_id",
+                "workspace_id",
+                "created_at",
+            ),
         )
 
     def connect(self) -> None:
@@ -1906,6 +1968,300 @@ class DatabaseService:
                 )
 
             return int(count)  # type: ignore[arg-type]
+
+    # =========================================================================
+    # Workspace Purge (inherent#395)
+    #
+    # Everything below supports the operator-triggered PurgeWorkspaceWorkflow:
+    # the purge-state gate, deletes for the per-workspace tables that
+    # `delete_workspace_data`/`delete_workspace_documents` above do NOT
+    # touch (they only ever covered processed_documents + its cascaded
+    # document_chunks), a residue count for the verification report, and the
+    # durable receipt. Every delete is a plain `WHERE workspace_id = ...`
+    # statement, so re-running it after it already deleted everything just
+    # deletes zero rows -- idempotent by construction, no extra bookkeeping
+    # needed.
+    # =========================================================================
+
+    async def set_workspace_purge_status(self, workspace_id: str, status: str) -> None:
+        """Upsert this workspace's purge marker (idempotent: same status twice is a no-op write).
+
+        Args:
+            workspace_id: The workspace being purged.
+            status: 'purging' (blocks new ingest, purge in progress) or
+                'purged' (terminal -- purge completed and verified).
+        """
+        if not self.engine:
+            raise RuntimeError("Database not connected")
+
+        if status not in ("purging", "purged"):
+            raise ValueError(f"Invalid purge status: {status!r}")
+
+        with self.get_session() as session:
+            stmt = pg_insert(self.workspace_purge_state).values(
+                workspace_id=workspace_id,
+                status=status,
+            )
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["workspace_id"],
+                set_={"status": status, "updated_at": func.now()},
+            )
+            session.execute(stmt)
+
+        logger.info("Set workspace purge status", workspace_id=workspace_id, status=status)
+
+    async def get_workspace_purge_status(self, workspace_id: str) -> str | None:
+        """Return this workspace's purge status, or None if it has never been purged."""
+        if not self.engine:
+            raise RuntimeError("Database not connected")
+
+        with self.get_session() as session:
+            row = session.execute(
+                select(self.workspace_purge_state.c.status).where(
+                    self.workspace_purge_state.c.workspace_id == workspace_id
+                )
+            ).first()
+            return row[0] if row else None
+
+    async def get_in_flight_document_ids(self, workspace_id: str) -> list[str]:
+        """Document ids in this workspace still mid-ingestion (pending/processing).
+
+        Used by the purge workflow to cancel the corresponding Temporal
+        ingestion workflows (workflow id ``f"ingest-{document_id}"``) before
+        deleting any data, so a slow in-flight run can't write a document
+        back in after the purge has already counted it as gone.
+        """
+        if not self.engine:
+            raise RuntimeError("Database not connected")
+
+        with self.get_session() as session:
+            rows = session.execute(
+                select(self.processed_documents.c.document_id).where(
+                    self.processed_documents.c.workspace_id == workspace_id,
+                    self.processed_documents.c.status.in_(
+                        [DocumentStatus.PENDING.value, DocumentStatus.PROCESSING.value]
+                    ),
+                )
+            ).all()
+            return [r[0] for r in rows]
+
+    async def delete_workspace_side_tables(self, workspace_id: str) -> dict[str, int]:
+        """Delete the per-workspace Postgres rows outside processed_documents/chunks.
+
+        These tables have no FK cascade from processed_documents (unlike
+        document_chunks), so `delete_workspace_data` never touched them:
+        dead_letter_jobs, ingestion_events, redaction_audit, and the
+        workspace_stats_ledger idempotency ledger. Returns the count deleted
+        per table.
+        """
+        if not self.engine:
+            raise RuntimeError("Database not connected")
+
+        deleted: dict[str, int] = {}
+        with self.get_session() as session:
+            for table in (
+                self.dead_letter_jobs,
+                self.ingestion_events,
+                self.redaction_audit,
+                self.workspace_stats_ledger,
+            ):
+                result = session.execute(table.delete().where(table.c.workspace_id == workspace_id))
+                deleted[table.name] = int(result.rowcount)  # type: ignore[arg-type]
+
+        logger.info("Deleted workspace side tables", workspace_id=workspace_id, **deleted)
+        return deleted
+
+    # eval_query_events/eval_feedback/eval_cases/eval_runs (eval_run_results
+    # cascades from eval_runs) are owned/written by inh-public-api-svc's
+    # eval_capture.py, but they live in this SAME Postgres database (see
+    # migration 015's own comment: "Workspace deletion must delete eval rows
+    # by workspace_id, app-level, like the other per-workspace tables").
+    # There is no SQLAlchemy Table object for them here (nothing in
+    # inh-ingestion-svc reads/writes eval rows outside this purge), so these
+    # are plain `text()` deletes by table name rather than duplicating
+    # public-api's ORM models into this service.
+    _EVAL_TABLES = ("eval_query_events", "eval_feedback", "eval_cases", "eval_runs")
+
+    async def delete_workspace_eval_data(self, workspace_id: str) -> dict[str, int]:
+        """Delete this workspace's rows from the (public-api-owned) eval tables."""
+        if not self.engine:
+            raise RuntimeError("Database not connected")
+
+        deleted: dict[str, int] = {}
+        with self.get_session() as session:
+            for table_name in self._EVAL_TABLES:
+                result = session.execute(
+                    text(
+                        f"DELETE FROM {table_name} WHERE workspace_id = :workspace_id"
+                    ),  # noqa: S608
+                    {"workspace_id": workspace_id},
+                )
+                deleted[table_name] = int(result.rowcount)  # type: ignore[arg-type]
+
+        logger.info("Deleted workspace eval data", workspace_id=workspace_id, **deleted)
+        return deleted
+
+    async def revoke_workspace_api_keys(self, workspace_id: str) -> int:
+        """Revoke (not delete) every active API key scoped to this workspace.
+
+        Purge REVOKES rather than deletes keys: a revoked key still lets an
+        operator see who had access to a now-purged workspace and when it
+        was cut off (audit value), and `verify_api_key`/key lookups already
+        treat status != 'active' as unusable, so revoking is sufficient to
+        stop all further use. Returns the number of keys revoked.
+        """
+        if not self.engine:
+            raise RuntimeError("Database not connected")
+
+        with self.get_session() as session:
+            result = session.execute(
+                self.api_keys.update()
+                .where(
+                    self.api_keys.c.workspace_id == workspace_id,
+                    self.api_keys.c.status == "active",
+                )
+                .values(status="revoked", updated_at=func.now())
+            )
+            count = int(result.rowcount)  # type: ignore[arg-type]
+
+        logger.info("Revoked workspace API keys", workspace_id=workspace_id, count=count)
+        return count
+
+    async def count_workspace_residue(self, workspace_id: str) -> dict[str, int]:
+        """Count remaining rows per Postgres store for this workspace.
+
+        Zero everywhere means Postgres holds nothing left for this
+        workspace. Used both BEFORE a purge (the receipt's `counts_before`)
+        and AFTER (`counts_after` / the verification report).
+        """
+        if not self.engine:
+            raise RuntimeError("Database not connected")
+
+        counts: dict[str, int] = {}
+        with self.get_session() as session:
+            for table in (
+                self.workspace_metadata,
+                self.processed_documents,
+                self.document_chunks,
+                self.dead_letter_jobs,
+                self.ingestion_events,
+                self.redaction_audit,
+                self.workspace_stats_ledger,
+            ):
+                counts[table.name] = int(
+                    session.execute(
+                        select(func.count())
+                        .select_from(table)
+                        .where(table.c.workspace_id == workspace_id)
+                    ).scalar_one()
+                )
+
+            counts["api_keys_active"] = int(
+                session.execute(
+                    select(func.count())
+                    .select_from(self.api_keys)
+                    .where(
+                        self.api_keys.c.workspace_id == workspace_id,
+                        self.api_keys.c.status == "active",
+                    )
+                ).scalar_one()
+            )
+
+            for table_name in self._EVAL_TABLES:
+                counts[table_name] = int(
+                    session.execute(
+                        text(
+                            f"SELECT COUNT(*) FROM {table_name} WHERE workspace_id = :workspace_id"
+                        ),  # noqa: S608
+                        {"workspace_id": workspace_id},
+                    ).scalar_one()
+                )
+
+        return counts
+
+    async def record_purge_receipt(
+        self,
+        purge_workflow_id: str,
+        workspace_id: str,
+        operator: str,
+        retain_audit_logs: bool,
+        counts_before: dict[str, int],
+        counts_after: dict[str, int],
+        verified: bool,
+    ) -> None:
+        """Upsert the durable purge receipt for one purge run (idempotent by purge_workflow_id).
+
+        Content-free by construction: every value here is either an
+        identifier/flag or a per-store integer count, never document text.
+        """
+        if not self.engine:
+            raise RuntimeError("Database not connected")
+
+        with self.get_session() as session:
+            stmt = pg_insert(self.workspace_purge_receipts).values(
+                purge_workflow_id=purge_workflow_id,
+                workspace_id=workspace_id,
+                operator=operator,
+                retain_audit_logs=retain_audit_logs,
+                counts_before=counts_before,
+                counts_after=counts_after,
+                verified=verified,
+                completed_at=func.now(),
+            )
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["purge_workflow_id"],
+                set_={
+                    "counts_before": counts_before,
+                    "counts_after": counts_after,
+                    "verified": verified,
+                    "completed_at": func.now(),
+                },
+            )
+            session.execute(stmt)
+
+        logger.info(
+            "Recorded workspace purge receipt",
+            purge_workflow_id=purge_workflow_id,
+            workspace_id=workspace_id,
+            verified=verified,
+        )
+
+    async def get_purge_receipt(self, workspace_id: str) -> dict[str, Any] | None:
+        """Return the most recent purge receipt for a workspace, or None."""
+        if not self.engine:
+            raise RuntimeError("Database not connected")
+
+        with self.get_session() as session:
+            row = (
+                session.execute(
+                    select(self.workspace_purge_receipts)
+                    .where(self.workspace_purge_receipts.c.workspace_id == workspace_id)
+                    .order_by(self.workspace_purge_receipts.c.created_at.desc())
+                    .limit(1)
+                )
+                .mappings()
+                .first()
+            )
+            return dict(row) if row else None
+
+    async def get_purge_receipt_by_workflow_id(
+        self, purge_workflow_id: str
+    ) -> dict[str, Any] | None:
+        """Return the purge receipt for a specific purge workflow run, or None."""
+        if not self.engine:
+            raise RuntimeError("Database not connected")
+
+        with self.get_session() as session:
+            row = (
+                session.execute(
+                    select(self.workspace_purge_receipts).where(
+                        self.workspace_purge_receipts.c.purge_workflow_id == purge_workflow_id
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            return dict(row) if row else None
 
     async def get_processing_stats(self, workspace_id: str) -> dict[str, Any]:
         """Get processing statistics, always scoped to a workspace.

@@ -16,6 +16,18 @@ from src.temporal.activities.conversation_chunk import chunk_conversation
 from src.temporal.activities.dead_letter import record_dead_letter, resolve_dead_letter_jobs
 from src.temporal.activities.extract import extract_text
 from src.temporal.activities.fetch import fetch_document
+from src.temporal.activities.purge import (
+    cancel_inflight_ingestion,
+    mark_workspace_purged,
+    mark_workspace_purging,
+    purge_audit_logs,
+    purge_postgres_documents,
+    purge_postgres_side_tables,
+    purge_weaviate_collection,
+    record_purge_receipt,
+    revoke_workspace_api_keys,
+    verify_purge,
+)
 from src.temporal.activities.redact import redact_turns
 from src.temporal.activities.status import create_pending_document, set_document_status
 from src.temporal.activities.store import store_in_postgresql, store_in_weaviate
@@ -46,4 +58,15 @@ __all__ = [
     "chunk_conversation",
     # Vertical pack tagging (inherent#390)
     "tag_chunks",
+    # Workspace purge (inherent#395)
+    "mark_workspace_purging",
+    "mark_workspace_purged",
+    "cancel_inflight_ingestion",
+    "purge_postgres_documents",
+    "purge_postgres_side_tables",
+    "revoke_workspace_api_keys",
+    "purge_weaviate_collection",
+    "purge_audit_logs",
+    "verify_purge",
+    "record_purge_receipt",
 ]

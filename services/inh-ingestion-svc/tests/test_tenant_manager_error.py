@@ -58,6 +58,8 @@ class TestTenantManagerErrors:
         tenant_manager.db_service = MagicMock()
         tenant_manager.db_service.upsert_tenant = AsyncMock(return_value=1)
         tenant_manager.db_service.upsert_workspace_metadata = AsyncMock(return_value=1)
+        # inherent#395: ensure_workspace_ready now checks purge status first.
+        tenant_manager.db_service.get_workspace_purge_status = AsyncMock(return_value=None)
 
         tenant_manager.weaviate_service = MagicMock()
         tenant_manager.weaviate_service.ensure_workspace_collection = AsyncMock(

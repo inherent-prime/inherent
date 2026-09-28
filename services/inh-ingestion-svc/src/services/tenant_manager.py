@@ -167,6 +167,20 @@ class TenantManager:
             user_id=user_id,
         )
 
+        # Ordering guard (inherent#395): refuse new ingest for a workspace
+        # that a purge has touched. Checked BEFORE any of the steps below
+        # write anything, so a purge that ran (or is running) always wins --
+        # a document that slips in after the purge's own delete activities
+        # would otherwise be silent residue the verification report can
+        # never see (it only counts what's in the stores, not what should
+        # have been rejected).
+        if self.db_service:
+            purge_status = await self.db_service.get_workspace_purge_status(workspace_id)
+            if purge_status is not None:
+                raise RuntimeError(
+                    f"Workspace {workspace_id!r} is {purge_status} -- new ingest is refused."
+                )
+
         # Step 1: Ensure tenant exists in PostgreSQL
         tenant_id = await self.ensure_tenant_exists(user_id)
 

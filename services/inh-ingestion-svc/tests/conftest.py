@@ -6,6 +6,7 @@ from collections.abc import Generator
 from datetime import UTC, datetime
 
 import pytest
+from sqlalchemy import text
 
 from src.config.settings import Settings
 from src.models.document import DocumentChunk
@@ -211,5 +212,41 @@ async def cleanup_test_data(db_service: DatabaseService):
                     db_service.ingestion_events.c.document_id.like("test_%")
                 )
             )
+            # Workspace purge state/receipts + the other per-workspace
+            # tables the purge workflow touches (inherent#395).
+            session.execute(
+                db_service.workspace_purge_state.delete().where(
+                    db_service.workspace_purge_state.c.workspace_id.like("test_%")
+                )
+            )
+            session.execute(
+                db_service.workspace_purge_receipts.delete().where(
+                    db_service.workspace_purge_receipts.c.workspace_id.like("test_%")
+                )
+            )
+            session.execute(
+                db_service.dead_letter_jobs.delete().where(
+                    db_service.dead_letter_jobs.c.workspace_id.like("test_%")
+                )
+            )
+            session.execute(
+                db_service.redaction_audit.delete().where(
+                    db_service.redaction_audit.c.workspace_id.like("test_%")
+                )
+            )
+            session.execute(
+                db_service.workspace_stats_ledger.delete().where(
+                    db_service.workspace_stats_ledger.c.workspace_id.like("test_%")
+                )
+            )
+            session.execute(
+                db_service.api_keys.delete().where(
+                    db_service.api_keys.c.workspace_id.like("test_%")
+                )
+            )
+            for eval_table in DatabaseService._EVAL_TABLES:
+                session.execute(
+                    text(f"DELETE FROM {eval_table} WHERE workspace_id LIKE 'test_%'")  # noqa: S608
+                )
     except Exception:
         pass  # Ignore cleanup errors
