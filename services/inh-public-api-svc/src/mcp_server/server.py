@@ -131,6 +131,7 @@ from src.services.eval_scorecard import build_scorecard
 from src.services.lineage import build_lineage
 from src.services.search import (
     SearchService,
+    TagFilterError,
     build_search_request,
     get_search_service,
 )
@@ -244,6 +245,19 @@ _SEARCH_INPUT_SCHEMA = {
             "type": "number",
             "description": "Hybrid fusion weight in [0,1] (1.0=vector-heavy, 0.0=keyword-heavy); only used when search_mode=hybrid",
             "default": 0.7,
+        },
+        # Vertical pack tag filters (inherent#392) -- same shape REST's
+        # SearchRequest.filters has had since #390: {field: value} or
+        # {field: [values]} (any-of). Only valid for a workspace bound to a
+        # vertical pack; an unbound workspace or an unknown field name gets a
+        # friendly "Error: ..." message (TagFilterError), never a traceback
+        # -- see _run_search's try/except below.
+        "filters": {
+            "type": "object",
+            "description": "Optional: vertical pack tag filters, {field: value} or "
+            "{field: [values]} (any-of). Requires the (single) searched workspace to be "
+            "bound to a vertical pack; an unknown field name is rejected with a message "
+            "naming the pack's actual fields.",
         },
         # include_context / context_window were advertised but never honored by
         # _run_search (a silent no-op). Use the dedicated get_document_context
@@ -465,7 +479,18 @@ async def _run_search(
     event_id: str | None = None
     single_workspace = len(workspace_ids) == 1
     for workspace_id in workspace_ids:
-        response = await search_service.search(workspace_id, key_info.user_id, request)
+        # Friendly errors (inherent#392): TagFilterError (an unbound
+        # workspace, or a filter field the pack's tag schema doesn't
+        # declare) must surface as a normal "Error: ..." tool result, never
+        # an unhandled exception -- the stdio dispatcher's outer try/except
+        # would already turn this into text, but doing it here gives the
+        # SAME message on both transports and lets http_transport.py
+        # classify it as a `tool_error`/`validation_error` instead of the
+        # generic `internal_error` an uncaught exception gets there.
+        try:
+            response = await search_service.search(workspace_id, key_info.user_id, request)
+        except TagFilterError as exc:
+            return [], workspace_ids, f"Error: {exc}", None
         for result in response.results:
             tagged.append((workspace_id, result))
 

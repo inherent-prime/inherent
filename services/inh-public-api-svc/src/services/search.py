@@ -78,6 +78,12 @@ _SEARCH_REQUEST_FIELDS: tuple[str, ...] = (
     "context_window",
     "search_mode",
     "alpha",
+    # Vertical pack tag filters (inherent#392): search_documents/search_memory
+    # now accept the SAME `filters` shape REST's SearchRequest already had
+    # since #390 -- {field: value} or {field: [values]} -- instead of
+    # silently dropping it. See server.py's _run_search for the friendly
+    # TagFilterError -> "Error: ..." mapping (never a raw 500/traceback).
+    "filters",
 )
 
 

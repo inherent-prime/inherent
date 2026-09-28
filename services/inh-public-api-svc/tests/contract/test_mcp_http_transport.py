@@ -36,20 +36,38 @@ Two layers of test double as in ``tests/contract/test_mcp_contract.py`` /
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import mcp.types as mcp_types
 import pytest
 from fastapi.testclient import TestClient
+from inh_contracts.vertical_discovery import discover_all_packs
 from mcp.types import CallToolResult
 
 import src.services.auth as auth_mod
+from src.config import settings
 from src.main import create_app
-from src.mcp_server import http_transport
+from src.mcp_server import http_transport, tool_profiles
 from src.mcp_server import server as mcp_server
 from src.models.api_key import APIKeyInfo
+from src.models.search import SearchResponse, SearchResult
 
 pytestmark = [pytest.mark.contract]
+
+# tests/fixtures/handbook_pack (#390's generic fixture pack) and
+# tests/fixtures/collision_pack (its name-collision twin) -- see
+# tests/unit/test_mcp_tool_profiles.py's module docstring.
+_FIXTURE_PACKS_DIR = Path(__file__).resolve().parents[1] / "fixtures"
+
+
+def handbook_vertical():
+    return discover_all_packs(str(_FIXTURE_PACKS_DIR)).packs["handbook"]
+
+
+def collision_vertical():
+    return discover_all_packs(str(_FIXTURE_PACKS_DIR)).packs["collision-pack"]
+
 
 # The issue's "10, not 13" acceptance list (#220), plus the later whoami
 # (#278) and list_workspaces (#297) tools, plus chunk CRUD (#133).
@@ -98,10 +116,20 @@ def _key(
 # directly, without an HTTP layer (mirrors test_mcp_contract.py's _list_tools
 # / _call_tool for stdio).
 # --------------------------------------------------------------------------- #
-async def _list_http_tools() -> dict[str, mcp_types.Tool]:
+async def _list_http_tools(key_info: APIKeyInfo | None = None) -> dict[str, mcp_types.Tool]:
+    """``key_info`` defaults to ``None`` (no caller identity set) -- the
+    original call shape every pre-#392 test here uses, which must keep
+    returning exactly ``_http_tools()`` unaffected by tool profiles. Passing
+    a ``key_info`` sets ``_current_key_info`` first (inherent#392), the same
+    contextvar the real ASGI auth gate sets, so ``list_tools`` can resolve
+    that caller's own vertical-pack tool profiles."""
     server = http_transport.create_http_mcp_server()
     handler = server.request_handlers[mcp_types.ListToolsRequest]
-    result = await handler(mcp_types.ListToolsRequest(method="tools/list"))
+    token = http_transport._current_key_info.set(key_info)
+    try:
+        result = await handler(mcp_types.ListToolsRequest(method="tools/list"))
+    finally:
+        http_transport._current_key_info.reset(token)
     return {tool.name: tool for tool in result.root.tools}
 
 
@@ -533,3 +561,337 @@ class TestMcpFullProtocolRoundTrip:
         result = r.json()["result"]
         assert result["isError"] is True
         assert result["structuredContent"] == {"error_class": "unknown_tool"}
+
+
+# =========================================================================== #
+# Per-workspace tool profiles (inherent#392)
+# =========================================================================== #
+# Uses tests/fixtures/handbook_pack (#390's generic fixture pack: one tool
+# profile, "search_sections", filtered on the enum field "section_type" and
+# the string field "product") and tests/fixtures/collision_pack (a second
+# fixture pack whose first tool profile deliberately shadows the built-in
+# "search_documents" name). Workspace -> pack resolution
+# (``tool_profiles.resolve_effective_pack``) and the search dispatch itself
+# are unit-tested directly in ``tests/unit/test_mcp_tool_profiles.py`` -- this
+# class covers the HTTP wiring: list_tools/call_tool actually exposing and
+# dispatching a profile tool for a real caller, and leaving a caller with no
+# resolvable pack completely unaffected.
+class TestHttpToolProfiles:
+    async def test_caller_with_no_pack_sees_byte_for_byte_the_same_list(self):
+        """The acceptance bar from the issue, pinned literally: a caller
+        whose workspace has no bound pack sees EXACTLY today's tool list --
+        not a superset with zero profile tools silently included."""
+        with (
+            patch.object(
+                tool_profiles, "get_authorized_workspace_ids", AsyncMock(return_value=["ws-1"])
+            ),
+            patch.object(tool_profiles, "resolve_workspace_pack", return_value=None),
+            patch.object(http_transport, "get_database", AsyncMock()),
+        ):
+            without_key = await _list_http_tools()
+            with_key = await _list_http_tools(_key(["read", "search"], workspace_id="ws-1"))
+        assert set(without_key) == HTTP_EXPOSED_TOOLS
+        assert without_key == with_key
+
+    async def test_pack_bound_workspace_gets_its_profile_tool_listed(self):
+        vertical = handbook_vertical()
+        key = _key(["read", "search"], workspace_id="ws-1")
+        with (
+            patch.object(
+                tool_profiles, "get_authorized_workspace_ids", AsyncMock(return_value=["ws-1"])
+            ),
+            patch.object(tool_profiles, "resolve_workspace_pack", return_value=vertical),
+            patch.object(http_transport, "get_database", AsyncMock()),
+        ):
+            tools = await _list_http_tools(key)
+        assert HTTP_EXPOSED_TOOLS.issubset(set(tools))  # built-ins still all present
+        assert "search_sections" in tools
+        schema = tools["search_sections"].inputSchema
+        assert schema["properties"]["section_type"]["enum"] == ["pricing", "security", "other"]
+        assert "api_key" not in schema["properties"]  # profile tools never take api_key either
+
+    async def test_ambiguous_multi_workspace_caller_gets_no_profile_tools(self):
+        """More than one authorized workspace -- even sharing a pack -- is
+        the documented "no safe default" case (tool_profiles.py)."""
+        vertical = handbook_vertical()
+        key = _key(["read", "search"])  # user-scoped: owns several workspaces
+        with (
+            patch.object(
+                tool_profiles,
+                "get_authorized_workspace_ids",
+                AsyncMock(return_value=["ws-1", "ws-2"]),
+            ),
+            patch.object(tool_profiles, "resolve_workspace_pack", return_value=vertical),
+            patch.object(http_transport, "get_database", AsyncMock()),
+        ):
+            tools = await _list_http_tools(key)
+        assert set(tools) == HTTP_EXPOSED_TOOLS
+
+    async def test_colliding_profile_tool_name_never_shadows_the_built_in(self):
+        vertical = collision_vertical()
+        key = _key(["read", "search"], workspace_id="ws-1")
+        with (
+            patch.object(
+                tool_profiles, "get_authorized_workspace_ids", AsyncMock(return_value=["ws-1"])
+            ),
+            patch.object(tool_profiles, "resolve_workspace_pack", return_value=vertical),
+            patch.object(http_transport, "get_database", AsyncMock()),
+        ):
+            tools = await _list_http_tools(key)
+        # The real, built-in search_documents tool -- never overwritten by
+        # the pack's colliding profile of the same name.
+        assert "api_key" not in tools["search_documents"].inputSchema["properties"]
+        assert (
+            tools["search_documents"].description
+            == mcp_server._TOOLS["search_documents"].description
+        )
+        # The pack's OTHER (non-colliding) profile still loaded.
+        assert "search_sections" in tools
+
+    async def test_call_tool_dispatches_a_profile_tool_end_to_end(self):
+        vertical = handbook_vertical()
+        key = _key(["read", "search"], workspace_id="ws-1")
+        response = SearchResponse(
+            results=[
+                SearchResult(
+                    chunk_id="chunk-1",
+                    document_id="doc-1",
+                    document_name="Handbook.md",
+                    content="Section text about pricing.",
+                    score=0.87,
+                    metadata={"section_heading": "3.2 PRICING"},
+                    tags={"section_type": "pricing"},
+                    source_url="https://drive.example/doc-1",
+                )
+            ],
+            query="pricing",
+            total_results=1,
+            processing_time_ms=1.0,
+            search_mode="semantic",
+        )
+        search_service = AsyncMock()
+        search_service.search = AsyncMock(return_value=response)
+        with (
+            patch.object(
+                tool_profiles, "get_authorized_workspace_ids", AsyncMock(return_value=["ws-1"])
+            ),
+            patch.object(tool_profiles, "resolve_workspace_pack", return_value=vertical),
+            patch.object(http_transport, "get_database", AsyncMock()),
+            patch.object(
+                tool_profiles, "get_search_service", AsyncMock(return_value=search_service)
+            ),
+        ):
+            result = await _call_http_tool(
+                "search_sections", {"query": "pricing", "section_type": "pricing"}, key
+            )
+        assert result.isError is False
+        assert "3.2 PRICING" in result.content[0].text
+
+    async def test_call_tool_profile_tag_filter_error_is_friendly_not_internal(self):
+        """inherent#392: an invalid filter value must classify as a normal
+        tool error, never `internal_error` (the class an unhandled
+        exception reaching this dispatcher's outer except would get)."""
+        from src.services.search import TagFilterError
+
+        vertical = handbook_vertical()
+        key = _key(["read", "search"], workspace_id="ws-1")
+        search_service = AsyncMock()
+        search_service.search = AsyncMock(
+            side_effect=TagFilterError("unknown filter field(s) ['bogus']")
+        )
+        with (
+            patch.object(
+                tool_profiles, "get_authorized_workspace_ids", AsyncMock(return_value=["ws-1"])
+            ),
+            patch.object(tool_profiles, "resolve_workspace_pack", return_value=vertical),
+            patch.object(http_transport, "get_database", AsyncMock()),
+            patch.object(
+                tool_profiles, "get_search_service", AsyncMock(return_value=search_service)
+            ),
+        ):
+            result = await _call_http_tool(
+                "search_sections", {"query": "q", "section_type": "pricing"}, key
+            )
+        assert result.isError is True
+        assert result.structuredContent["error_class"] != "internal_error"
+        assert "unknown filter field" in result.content[0].text
+
+    async def test_profile_tool_requires_search_permission(self):
+        vertical = handbook_vertical()
+        key = _key(["read"], workspace_id="ws-1")  # no 'search' permission
+        with (
+            patch.object(
+                tool_profiles, "get_authorized_workspace_ids", AsyncMock(return_value=["ws-1"])
+            ),
+            patch.object(tool_profiles, "resolve_workspace_pack", return_value=vertical),
+            patch.object(http_transport, "get_database", AsyncMock()),
+        ):
+            result = await _call_http_tool("search_sections", {"query": "pricing"}, key)
+        assert result.isError is True
+        assert result.structuredContent == {"error_class": "authorization_failed"}
+
+
+# =========================================================================== #
+# search_documents accepting `filters` (inherent#392) -- friendly TagFilterError
+# =========================================================================== #
+class TestSearchDocumentsFilters:
+    async def test_tag_filter_error_is_a_friendly_tool_error_not_internal(self):
+        from src.services.search import TagFilterError
+
+        key = _key(["read", "search"])  # user-scoped key
+        search_service = AsyncMock()
+        search_service.search = AsyncMock(
+            side_effect=TagFilterError(
+                "search filters require the workspace to be bound to a vertical pack; "
+                "this workspace has none"
+            )
+        )
+        db = AsyncMock()
+        db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
+        with (
+            patch.object(mcp_server, "get_database", AsyncMock(return_value=db)),
+            patch.object(mcp_server, "get_search_service", AsyncMock(return_value=search_service)),
+        ):
+            result = await _call_http_tool(
+                "search_documents",
+                {"query": "pricing", "filters": {"section_type": "pricing"}},
+                key,
+            )
+        assert result.isError is True
+        assert result.structuredContent["error_class"] != "internal_error"
+        assert "bound to a vertical pack" in result.content[0].text
+
+
+# =========================================================================== #
+# OAuth callers get tool profiles too (inherent#392 follow-up)
+# =========================================================================== #
+# Full-stack (real create_app(), real ASGI OAuth gate) since the OAuth
+# dispatch path lives behind `mount_mcp_http`'s `_current_oauth_principal`
+# contextvar, which `_call_http_tool` (API-key only) never sets. Tokens are
+# minted with `tests._oauth_test_helpers`, the same offline local-JWKS
+# approach `tests/security/test_oauth_token_validation.py` uses.
+class TestOAuthToolProfiles:
+    @pytest.fixture(autouse=True)
+    def _oauth_settings(self, monkeypatch):
+        from tests._oauth_test_helpers import ISSUER, RESOURCE
+
+        monkeypatch.setattr(settings, "oauth_enabled", True)
+        monkeypatch.setattr(settings, "oauth_authorization_server", ISSUER)
+        monkeypatch.setattr(settings, "oauth_resource_identifier", RESOURCE)
+        monkeypatch.setattr(settings, "_oauth_subject_users", {"oauth-user-123": "user-42"})
+        yield
+
+    def _client(self):
+        app = create_app()
+        with patch("src.main.get_database", new_callable=AsyncMock):
+            with TestClient(app) as client:
+                yield client
+
+    def test_oauth_caller_with_resolved_identity_sees_the_profile_tool(self, monkeypatch):
+        from tests._oauth_test_helpers import make_token, patch_jwks_client
+
+        patch_jwks_client(monkeypatch, auth_mod)
+        vertical = handbook_vertical()
+        token = make_token(scope="kb:read kb:search")
+        with (
+            patch.object(
+                tool_profiles, "get_authorized_workspace_ids", AsyncMock(return_value=["ws-1"])
+            ),
+            patch.object(tool_profiles, "resolve_workspace_pack", return_value=vertical),
+        ):
+            for client in self._client():
+                r = client.post(
+                    "/mcp",
+                    headers={**_HTTP_MCP_HEADERS, "Authorization": f"Bearer {token}"},
+                    json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                )
+        assert r.status_code == 200
+        names = {t["name"] for t in r.json()["result"]["tools"]}
+        assert "search_sections" in names
+
+    def test_oauth_caller_can_call_the_profile_tool_end_to_end(self, monkeypatch):
+        from tests._oauth_test_helpers import make_token, patch_jwks_client
+
+        patch_jwks_client(monkeypatch, auth_mod)
+        vertical = handbook_vertical()
+        token = make_token(scope="kb:read kb:search")
+        response = SearchResponse(
+            results=[
+                SearchResult(
+                    chunk_id="chunk-1",
+                    document_id="doc-1",
+                    document_name="Handbook.md",
+                    content="Section text about pricing.",
+                    score=0.9,
+                    metadata={"section_heading": "3.2 PRICING"},
+                    tags={"section_type": "pricing"},
+                    source_url="https://drive.example/doc-1",
+                )
+            ],
+            query="pricing",
+            total_results=1,
+            processing_time_ms=1.0,
+            search_mode="semantic",
+        )
+        search_service = AsyncMock()
+        search_service.search = AsyncMock(return_value=response)
+        with (
+            patch.object(
+                tool_profiles, "get_authorized_workspace_ids", AsyncMock(return_value=["ws-1"])
+            ),
+            patch.object(tool_profiles, "resolve_workspace_pack", return_value=vertical),
+            patch.object(
+                tool_profiles, "get_search_service", AsyncMock(return_value=search_service)
+            ),
+        ):
+            for client in self._client():
+                r = client.post(
+                    "/mcp",
+                    headers={**_HTTP_MCP_HEADERS, "Authorization": f"Bearer {token}"},
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "search_sections",
+                            "arguments": {"query": "pricing", "section_type": "pricing"},
+                        },
+                    },
+                )
+        assert r.status_code == 200
+        result = r.json()["result"]
+        assert result["isError"] is False
+        assert "3.2 PRICING" in result["content"][0]["text"]
+        # search_service.search was called with the OAuth-resolved user_id,
+        # not the token's opaque `sub` -- proves the synthesized identity
+        # (not a raw claim) actually drove the call.
+        called_user_id = search_service.search.await_args.args[1]
+        assert called_user_id == "user-42"
+
+    def test_oauth_caller_with_no_identity_link_sees_no_profile_tool(self, monkeypatch):
+        """No OAUTH_USER_ID_CLAIM / OAUTH_SUBJECT_USERS match for this
+        token's subject -- tools/list falls back to exactly the built-in
+        list, same as any other unresolved OAuth caller."""
+        from tests._oauth_test_helpers import make_token, patch_jwks_client
+
+        monkeypatch.setattr(
+            settings, "_oauth_subject_users", {}
+        )  # override the fixture: no mapping
+        patch_jwks_client(monkeypatch, auth_mod)
+        vertical = handbook_vertical()
+        token = make_token(scope="kb:read kb:search")
+        with (
+            patch.object(
+                tool_profiles, "get_authorized_workspace_ids", AsyncMock(return_value=["ws-1"])
+            ),
+            patch.object(tool_profiles, "resolve_workspace_pack", return_value=vertical),
+        ):
+            for client in self._client():
+                r = client.post(
+                    "/mcp",
+                    headers={**_HTTP_MCP_HEADERS, "Authorization": f"Bearer {token}"},
+                    json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                )
+        assert r.status_code == 200
+        names = {t["name"] for t in r.json()["result"]["tools"]}
+        assert names == HTTP_EXPOSED_TOOLS

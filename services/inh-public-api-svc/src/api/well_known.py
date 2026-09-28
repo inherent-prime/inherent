@@ -36,6 +36,27 @@ router = APIRouter(tags=["OAuth"])
     ),
     include_in_schema=False,
 )
+# Path-suffixed variant (inherent#392 spec audit): RFC 9728 sec 3.1 and the
+# MCP authorization spec (2025-06-18) both describe deriving the metadata
+# URL by inserting the resource's own path after the well-known prefix --
+# `/.well-known/oauth-protected-resource/mcp` for a resource whose path is
+# `/mcp` -- as the client-side fallback when a bare origin-root document
+# isn't found. claude.ai's custom-connector client tries this form; serving
+# it from the SAME handler as the origin-root path (rather than a second,
+# hand-duplicated function) means the two documents can never drift from
+# each other. Registered under the SAME gate as the origin-root route --
+# absent, not merely empty, when OAuth is disabled.
+@router.get(
+    "/.well-known/oauth-protected-resource/mcp",
+    summary="RFC 9728 protected-resource metadata (path-suffixed, /mcp)",
+    description=(
+        "Same document as /.well-known/oauth-protected-resource -- served at "
+        "the path-suffixed location some MCP clients (including claude.ai's "
+        "custom connectors) probe for a resource whose path is /mcp. Only "
+        "registered when OAUTH_ENABLED=true."
+    ),
+    include_in_schema=False,
+)
 async def oauth_protected_resource_metadata() -> dict:
     """RFC 9728 protected-resource metadata document for ``/mcp``.
 

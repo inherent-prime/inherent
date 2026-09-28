@@ -387,3 +387,211 @@ class TestTokenNeverLogged:
             await verify_oauth_token(token)
         assert token not in str(exc_info.value)
         assert token not in repr(exc_info.value)
+
+
+# --------------------------------------------------------------------------- #
+# OAuth caller -> Inherent user identity link (inherent#392 follow-up)
+# --------------------------------------------------------------------------- #
+# #295 shipped OAuth authentication with no way to ever execute a tool --
+# every `tools/call` came back "not yet available" regardless of scope. That
+# is unusable for #392's actual point (claude.ai's custom connectors, which
+# ALWAYS connect via OAuth), so this adds a minimal, generic, config-first
+# identity link: OAUTH_USER_ID_CLAIM (a claim on the token itself) checked
+# before OAUTH_SUBJECT_USERS (a static operator mapping), both defaulting to
+# "no link" so an unconfigured deployment is unaffected.
+class TestOAuthIdentityResolution:
+    def test_no_config_resolves_to_no_identity(self):
+        """Byte-for-byte today's (pre-follow-up) behaviour: with neither
+        setting configured, resolved_user_id is None."""
+        from src.services.auth import OAuthClaims, resolve_oauth_user
+
+        claims = OAuthClaims(subject="oauth-user-123", scopes=frozenset({"kb:read"}), raw={})
+        assert resolve_oauth_user(claims) is None
+
+    def test_user_id_claim_resolves_directly(self, monkeypatch):
+        from src.services.auth import OAuthClaims, resolve_oauth_user
+
+        monkeypatch.setattr(settings, "oauth_user_id_claim", "inherent_user_id")
+        claims = OAuthClaims(
+            subject="oauth-user-123",
+            scopes=frozenset({"kb:read"}),
+            raw={"inherent_user_id": "user-42"},
+        )
+        assert resolve_oauth_user(claims) == "user-42"
+
+    def test_user_id_claim_absent_from_token_falls_through(self, monkeypatch):
+        """OAUTH_USER_ID_CLAIM is set but THIS token doesn't carry it --
+        falls through to OAUTH_SUBJECT_USERS, not an error."""
+        from src.services.auth import OAuthClaims, resolve_oauth_user
+
+        monkeypatch.setattr(settings, "oauth_user_id_claim", "inherent_user_id")
+        monkeypatch.setattr(settings, "_oauth_subject_users", {"oauth-user-123": "user-fallback"})
+        claims = OAuthClaims(subject="oauth-user-123", scopes=frozenset(), raw={})
+        assert resolve_oauth_user(claims) == "user-fallback"
+
+    def test_subject_users_mapping_resolves(self, monkeypatch):
+        from src.services.auth import OAuthClaims, resolve_oauth_user
+
+        monkeypatch.setattr(settings, "_oauth_subject_users", {"oauth-user-123": "user-99"})
+        claims = OAuthClaims(subject="oauth-user-123", scopes=frozenset(), raw={})
+        assert resolve_oauth_user(claims) == "user-99"
+
+    def test_unmapped_subject_resolves_to_none(self, monkeypatch):
+        from src.services.auth import OAuthClaims, resolve_oauth_user
+
+        monkeypatch.setattr(settings, "_oauth_subject_users", {"someone-else": "user-99"})
+        claims = OAuthClaims(subject="oauth-user-123", scopes=frozenset(), raw={})
+        assert resolve_oauth_user(claims) is None
+
+    def test_claim_wins_over_mapping_when_both_configured(self, monkeypatch):
+        from src.services.auth import OAuthClaims, resolve_oauth_user
+
+        monkeypatch.setattr(settings, "oauth_user_id_claim", "inherent_user_id")
+        monkeypatch.setattr(
+            settings, "_oauth_subject_users", {"oauth-user-123": "user-from-mapping"}
+        )
+        claims = OAuthClaims(
+            subject="oauth-user-123",
+            scopes=frozenset(),
+            raw={"inherent_user_id": "user-from-claim"},
+        )
+        assert resolve_oauth_user(claims) == "user-from-claim"
+
+    def test_principal_from_oauth_claims_carries_resolved_user_id(self, monkeypatch):
+        from src.services.auth import OAuthClaims
+
+        monkeypatch.setattr(settings, "_oauth_subject_users", {"oauth-user-123": "user-99"})
+        claims = OAuthClaims(subject="oauth-user-123", scopes=frozenset({"kb:read"}), raw={})
+        principal = Principal.from_oauth_claims(claims)
+        assert principal.resolved_user_id == "user-99"
+
+    def test_principal_from_api_key_resolved_user_id_is_its_own_user_id(self):
+        """The API-key path needs no lookup at all -- identity IS the key's
+        own user_id."""
+        key_info = APIKeyInfo(
+            key_id="key-1",
+            user_id="user-1",
+            workspace_id="ws-1",
+            permissions=["read"],
+            rate_limit=100,
+        )
+        assert Principal.from_api_key(key_info).resolved_user_id == "user-1"
+
+
+class TestPermissionsFromScopes:
+    def test_full_scopes_yield_full_permissions(self):
+        from src.services.auth import permissions_from_scopes
+
+        assert permissions_from_scopes(frozenset({"kb:read", "kb:search", "kb:write"})) == [
+            "read",
+            "search",
+            "write",
+        ]
+
+    def test_read_only_scope_excludes_write(self):
+        """The exact defense the coordinator's review asked to pin: a
+        read-only token's derived permissions never include 'write'."""
+        from src.services.auth import permissions_from_scopes
+
+        perms = permissions_from_scopes(frozenset({"kb:read"}))
+        assert "write" not in perms
+        assert perms == ["read"]
+
+    def test_no_scopes_yield_no_permissions(self):
+        from src.services.auth import permissions_from_scopes
+
+        assert permissions_from_scopes(frozenset()) == []
+
+
+# --------------------------------------------------------------------------- #
+# OAuth caller executing a tool end to end (inherent#392 follow-up)
+# --------------------------------------------------------------------------- #
+class TestOAuthToolExecution:
+    @pytest.fixture(autouse=True)
+    def _identity_link(self, monkeypatch):
+        """Every test in this class runs with a configured, matching
+        OAUTH_SUBJECT_USERS entry -- the claim path is covered separately
+        above and, end to end, by TestOAuthIdentityResolution."""
+        monkeypatch.setattr(settings, "_oauth_subject_users", {"oauth-user-123": "user-42"})
+        yield
+
+    def test_resolved_identity_can_call_a_read_tool(self, client: TestClient):
+        """A token with 'search' scope and a resolved identity can now
+        actually run search_documents -- previously always
+        'not yet available' regardless of scope."""
+        import src.mcp_server.server as mcp_server_mod
+
+        token = make_token(scope="kb:read kb:search")
+        db = AsyncMock()
+        db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
+        db.get_documents_multi_workspace = AsyncMock(return_value=([], 0))
+        with patch.object(mcp_server_mod, "get_database", AsyncMock(return_value=db)):
+            r = client.post(
+                "/mcp",
+                headers={**_HTTP_MCP_HEADERS, "Authorization": f"Bearer {token}"},
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {"name": "list_documents", "arguments": {}},
+                },
+            )
+        assert r.status_code == 200
+        result = r.json()["result"]
+        assert result["isError"] is False
+        assert "user-42" not in result["content"][0]["text"]  # never leaks the raw identity link
+
+    def test_read_only_token_cannot_call_a_write_tool(self, client: TestClient):
+        """Scope gate still runs first: a token with no 'kb:write' scope is
+        rejected as insufficient_scope, identity resolution notwithstanding."""
+        token = make_token(scope="kb:read kb:search")  # no kb:write
+        r = client.post(
+            "/mcp",
+            headers={**_HTTP_MCP_HEADERS, "Authorization": f"Bearer {token}"},
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "delete_document", "arguments": {"document_id": "doc-1"}},
+            },
+        )
+        assert r.status_code == 200
+        result = r.json()["result"]
+        assert result["isError"] is True
+        assert result["structuredContent"]["error"] == "insufficient_scope"
+
+    def test_unmapped_subject_still_gets_a_clear_identity_rejection(
+        self, monkeypatch, client: TestClient
+    ):
+        """No identity link matches this token's subject -- distinct from
+        insufficient_scope: the token IS authorized, there is simply no
+        Inherent user to run it against."""
+        monkeypatch.setattr(settings, "_oauth_subject_users", {})  # no mapping at all
+        token = make_token(scope="kb:read kb:search")
+        r = client.post(
+            "/mcp",
+            headers={**_HTTP_MCP_HEADERS, "Authorization": f"Bearer {token}"},
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "list_documents", "arguments": {}},
+            },
+        )
+        assert r.status_code == 200
+        result = r.json()["result"]
+        assert result["isError"] is True
+        assert result["structuredContent"].get("error") != "insufficient_scope"
+        assert "no Inherent identity is linked" in result["content"][0]["text"]
+
+    def test_tools_list_over_oauth_is_unaffected_by_this_change_when_unmapped(
+        self, monkeypatch, client: TestClient
+    ):
+        monkeypatch.setattr(settings, "_oauth_subject_users", {})
+        token = make_token()
+        r = client.post(
+            "/mcp",
+            headers={**_HTTP_MCP_HEADERS, "Authorization": f"Bearer {token}"},
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+        )
+        assert r.status_code == 200

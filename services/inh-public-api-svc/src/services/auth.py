@@ -1,8 +1,8 @@
 """Authentication service for API key validation."""
 
 import asyncio
-from dataclasses import dataclass
-from typing import Annotated, Literal
+from dataclasses import dataclass, field
+from typing import Annotated, Any, Literal
 
 import jwt
 from fastapi import Depends, Header, HTTPException, status
@@ -403,13 +403,75 @@ class TokenValidationError(Exception):
 @dataclass(frozen=True)
 class OAuthClaims:
     """The subset of a verified bearer token's claims this resource server
-    needs. Deliberately narrow -- everything else in the token (arbitrary
-    IdP-specific claims) is dropped here rather than carried forward, so
-    nothing downstream can come to depend on a claim shape only one IdP
-    happens to emit."""
+    needs. ``subject``/``scopes`` are the two fields most of this module
+    reads; ``raw`` (inherent#392 follow-up) keeps the full decoded payload
+    ONLY so `resolve_oauth_user` can look up an operator-configured claim
+    name without a second JWT decode -- nothing here carries the raw TOKEN
+    STRING itself (see `verify_oauth_token`'s "never logs the token"
+    contract), and nothing in ``raw`` is ever logged or echoed to a client.
+    """
 
     subject: str
     scopes: frozenset[str]
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+def resolve_oauth_user(claims: OAuthClaims) -> str | None:
+    """Resolve a verified OAuth token's ``claims`` to an Inherent ``user_id``
+    (inherent#392 follow-up).
+
+    #295 deferred this identity link to "the commercial platform" entirely --
+    that shipped an OAuth caller that could authenticate but never execute a
+    tool (a permanent "not yet available" on every `tools/call`), which is
+    unusable for #392's actual point: a claude.ai connector, and claude.ai
+    always connects via OAuth. This adds a minimal, GENERIC, CONFIG-FIRST
+    version in the engine -- the same shape as `WORKSPACE_VERTICAL_PACKS`
+    (#390) for a hand-onboarded pilot -- with a clean seam for the platform
+    to take over later without any further engine change:
+
+    1. ``OAUTH_USER_ID_CLAIM`` (e.g. ``"inherent_user_id"``): if set AND the
+       verified token itself carries a non-empty string under that claim
+       name, use it directly. THIS is the seam -- the day the platform's
+       authorization server is configured to mint tokens carrying the
+       platform's own user id under this claim, resolution needs no further
+       engine change at all; only the operator setting is added.
+    2. ``OAUTH_SUBJECT_USERS`` (``"sub_1=user_1,sub_2=user_2"``): a static,
+       operator-maintained mapping, for a hand-onboarded pilot with no such
+       claim minted yet. Checked only when (1) didn't resolve.
+    3. Neither resolves -> ``None`` -- today's honest "no identity link"
+       outcome, unchanged.
+
+    Both settings default empty, so with no configuration this is a pure
+    no-op: every OAuth caller resolves to ``None``, byte-for-byte the
+    pre-#392-follow-up "unresolvable" behaviour.
+    """
+    if settings.oauth_user_id_claim:
+        claim_value = claims.raw.get(settings.oauth_user_id_claim)
+        if isinstance(claim_value, str) and claim_value:
+            return claim_value
+    return settings.oauth_subject_users.get(claims.subject)
+
+
+def permissions_from_scopes(scopes: frozenset[str]) -> list[Literal["read", "search", "write"]]:
+    """The ``APIKeyInfo.permissions``-shaped list a verified OAuth token's
+    GRANTED scopes translate to (inherent#392 follow-up) -- the inverse of
+    ``PERMISSION_SCOPE_MAP``, read off that SAME mapping so the two can never
+    disagree. Used to synthesize the identity a handler runs an OAuth-backed
+    tool call under: a token that never requested/was granted ``kb:write``
+    produces a permissions list with no ``"write"`` in it, so a subsequent
+    ``key_info.has_permission("write")`` check inside a handler is denied
+    exactly like it would be for an API key without that permission --
+    matching the ``insufficient_scope`` gate that already runs before
+    dispatch, not a second, independently-maintained rule.
+    """
+    permissions: list[Literal["read", "search", "write"]] = []
+    if PERMISSION_SCOPE_MAP["read"] in scopes:
+        permissions.append("read")
+    if PERMISSION_SCOPE_MAP["search"] in scopes:
+        permissions.append("search")
+    if PERMISSION_SCOPE_MAP["write"] in scopes:
+        permissions.append("write")
+    return permissions
 
 
 @dataclass(frozen=True)
@@ -434,11 +496,21 @@ class Principal:
     same construction works for both identity sources today, ready for a
     later PR to route the API-key path through ``Principal`` too without
     this dataclass's shape needing to change.
+
+    ``resolved_user_id`` (inherent#392 follow-up): the Inherent ``user_id``
+    this principal maps to, when one is resolvable -- always set for an
+    API-key principal (identity IS the key's own ``user_id``, no lookup
+    needed); for an OAuth principal, set only when ``resolve_oauth_user``
+    matched the token's subject via ``OAUTH_USER_ID_CLAIM`` or
+    ``OAUTH_SUBJECT_USERS`` (see that function's docstring), ``None``
+    otherwise -- the same honest "no identity link" outcome #295 shipped,
+    now escapable by configuration instead of permanent.
     """
 
     principal_id: str
     principal_type: Literal["api_key", "oauth"]
     scopes: frozenset[str]
+    resolved_user_id: str | None = None
 
     def has_scope(self, scope: str) -> bool:
         return scope in self.scopes
@@ -449,6 +521,7 @@ class Principal:
             principal_id=key_info.user_id,
             principal_type="api_key",
             scopes=frozenset(key_info.permissions),
+            resolved_user_id=key_info.user_id,
         )
 
     @classmethod
@@ -457,6 +530,7 @@ class Principal:
             principal_id=claims.subject,
             principal_type="oauth",
             scopes=claims.scopes,
+            resolved_user_id=resolve_oauth_user(claims),
         )
 
 
@@ -551,7 +625,7 @@ async def verify_oauth_token(token: str) -> OAuthClaims:
     if not subject:
         raise TokenValidationError("invalid_token")
 
-    return OAuthClaims(subject=subject, scopes=scopes)
+    return OAuthClaims(subject=subject, scopes=scopes, raw=claims)
 
 
 def build_bearer_challenge(resource_metadata_url: str, *, error: str | None = None) -> str:

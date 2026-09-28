@@ -215,3 +215,77 @@ Validation (before any Weaviate call):
 Each `SearchResult.tags: dict[str, str] | None` carries the chunk's own tags
 (parsed back from the `"field=value"` array), so a caller can show which tag
 values matched.
+
+## MCP tool profiles (inherent#392)
+
+A pack's `vertical.yaml` may declare one or more `tools:` — `ToolProfile`
+entries (`name`, `description`, `filters` ⊆ the pack's own tag schema fields,
+`default_limit`, `max_limit`) served over MCP as real, named tools, e.g.:
+
+```yaml
+# profiles/tools/search-sections.yaml
+name: search_sections
+description: >-
+  Search the handbook's numbered sections for policy text relevant to a
+  question. Returns matching section text with its section number and heading.
+filters: [section_type, product]
+default_limit: 3
+max_limit: 10
+```
+
+Each profile becomes an MCP tool named `search_sections` whose `inputSchema`
+is generated, not hand-written: a required `query`, an optional `limit`
+(bounded by `max_limit`, defaulting to `default_limit`), and one optional
+parameter per `filters` field — an `enum` tag field gets a JSON Schema
+`enum` of its declared `values`; any other field type gets a plain string.
+Calling it runs the same search path `search_documents` uses, pre-scoped to
+the profile's own `filters`, and returns the same structured-output shape
+(text, section heading when the chunking put one in `metadata`, tags,
+`source_url`, document id/title, and score).
+
+**Scope: Streamable HTTP only.** stdio's `tools/list` has no per-connection
+caller identity at all — every stdio call carries its own `api_key` as a
+plain tool argument, and `tools/list` itself is answered before any tool
+call, with nothing to authenticate against. HTTP, by contrast, authenticates
+the connection via the `X-API-Key`/`Authorization` header before either RPC
+runs, so `tools/list`/`tools/call` there can resolve a caller's own bound
+pack. A caller with no bound pack (the default, everyone until an operator
+maps a workspace) sees **exactly today's tool list on both transports**,
+byte for byte — nothing here is visible until a workspace is actually bound.
+
+**Workspace resolution — the simplest safe rule.** A caller may be
+authorized for zero, one, or several workspaces (#138), and different
+workspaces may carry different packs, the same pack, or none. Rather than
+namespacing every profile tool's name by workspace, profile tools are
+advertised **only when the caller's authorized workspace set has exactly one
+member**, and that one workspace is bound to a pack with at least one tool
+profile. Zero or several authorized workspaces (even several sharing the
+identical pack) get no profile tools at all — there is no single workspace a
+bare `search_sections(query=...)` call could unambiguously mean. A
+workspace-scoped API key (the common case for a pack-bound workspace) always
+resolves to exactly one, so this costs that caller nothing. See
+`src/mcp_server/tool_profiles.py`'s module docstring for the full reasoning.
+
+**Name collisions.** A profile tool name that matches one of core's own
+built-in tool names (`search_documents`, `whoami`, ...) is **skipped, with a
+logged warning** naming the pack and the tool — never registered, and never
+raised as a load-time error (a pack's *other* tool profiles still load
+normally). This is deliberately NOT enforced inside `inh_contracts`'
+`load_vertical` — the pack-loading contract must not know this service's own
+built-in tool names.
+
+**Friendly errors.** An invalid filter value, or a filter field the bound
+pack's tag schema doesn't declare (`TagFilterError`), comes back as a plain
+`"Error: ..."` tool result — on stdio, `search_documents`/`search_memory`
+(which now also accept the same `filters` shape as REST); on HTTP, both
+those and every profile tool — never a raw 500 or an unhandled-exception
+traceback.
+
+**OAuth callers.** Profile tools ARE advertised to an OAuth-authenticated
+caller (inherent#392 follow-up) once the token's subject resolves to an
+Inherent user — via `OAUTH_USER_ID_CLAIM` or `OAUTH_SUBJECT_USERS` — using
+the SAME single-authorized-workspace rule above, on that resolved user's own
+workspaces. An OAuth caller with no resolved identity (the default, until an
+operator configures one of those settings) sees no profile tools, same as
+any caller with no bound pack; see [`mcp-tools.md`](./mcp-tools.md)'s "OAuth
+callers can execute tools" section for the full identity-link contract.

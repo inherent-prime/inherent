@@ -80,6 +80,7 @@ from starlette.types import Receive, Scope, Send
 from src.config import settings
 from src.mcp_server.quotas import QuotaDenial, check_quota, publish_usage_event
 from src.mcp_server.server import _TOOLS, ToolDef, current_mcp_endpoint
+from src.mcp_server.tool_profiles import resolve_profile_tools
 from src.models.api_key import APIKeyInfo
 from src.services.auth import (
     PERMISSION_SCOPE_MAP,
@@ -88,6 +89,7 @@ from src.services.auth import (
     build_www_authenticate,
     get_api_key_info,
     get_authorized_workspace_ids,
+    permissions_from_scopes,
     verify_oauth_token,
 )
 from src.services.database import get_database
@@ -274,6 +276,63 @@ async def _workspace_ids_for_quota(key_info: APIKeyInfo) -> list[str]:
     return await get_authorized_workspace_ids(key_info, database)
 
 
+async def _resolve_profile_tools_safe(key_info: APIKeyInfo) -> dict[str, ToolDef]:
+    """``tool_profiles.resolve_profile_tools``, fail-open on ANY error
+    (inherent#392) -- one function, used by ``list_tools`` and BOTH
+    ``call_tool`` dispatchers (API-key and OAuth), so this posture cannot
+    drift between the three call sites. Fail-open mirrors
+    ``resolve_workspace_pack``'s own "one broken pack/lookup must not break
+    everyone else": this is also called INTERNALLY by the MCP SDK's own
+    ``call_tool`` wrapper (``Server._get_cached_tool_definition``, on every
+    cache miss for a tool name it hasn't seen yet) to fetch a schema for
+    pre-dispatch ``jsonschema`` validation, so a DB failure while resolving
+    profile tools must never bubble up and break a BUILT-IN tool call that
+    has nothing to do with vertical packs.
+    """
+    try:
+        database = await get_database()
+        return await resolve_profile_tools(key_info, database)
+    except Exception as exc:  # noqa: BLE001 - fail open, see docstring
+        logger.error("Failed to resolve vertical-pack tool profiles", error=str(exc))
+        return {}
+
+
+def _api_key_info_for_oauth(principal: Principal, user_id: str) -> APIKeyInfo:
+    """Synthesize the ``APIKeyInfo``-shaped identity every handler expects,
+    for an OAuth caller whose token's subject resolved to an Inherent user
+    (inherent#392 follow-up: ``principal.resolved_user_id``, from
+    ``src.services.auth.resolve_oauth_user``).
+
+    - ``workspace_id`` is always ``None`` (unscoped) -- the resolved user's
+      own authorized workspaces come from ``get_authorized_workspace_ids``
+      exactly as they would for any unscoped API key (#138); there is no
+      separate, OAuth-specific workspace-scoping concept to invent.
+    - ``permissions`` are derived from the token's OWN granted scopes
+      (``permissions_from_scopes`` -- the inverse of ``PERMISSION_SCOPE_MAP``),
+      never assumed: a read-only token cannot reach a write-permission tool
+      through this identity, the same rule ``insufficient_scope`` already
+      enforces before dispatch, expressed once instead of independently in
+      two places.
+    - ``key_id`` is prefixed ``"oauth:"`` -- a clear, greppable marker (per
+      the #392 follow-up's audit requirement, #393) that this identity's
+      calls came from an OAuth token, not an issued API key, wherever
+      ``key_id`` is logged/audited downstream.
+
+    Takes the resolved ``user_id`` as its OWN parameter (not read again off
+    ``principal.resolved_user_id``) so the caller's own ``if
+    principal.resolved_user_id:`` narrowing carries through to a plain
+    ``str`` here -- no ``# type: ignore`` needed for what would otherwise be
+    an ``str | None`` read on ``APIKeyInfo.user_id: str``.
+    """
+    return APIKeyInfo(
+        key_id=f"oauth:{principal.principal_id}",
+        user_id=user_id,
+        workspace_id=None,
+        permissions=permissions_from_scopes(principal.scopes),
+        status="active",
+    )
+
+
 def create_http_mcp_server() -> Server:
     """Build the Streamable HTTP MCP server (#220).
 
@@ -290,8 +349,27 @@ def create_http_mcp_server() -> Server:
     @server.list_tools()
     async def list_tools() -> list[Tool]:
         """Advertise exactly the ``http_exposed`` subset of ``_TOOLS``,
-        api_key-free (#220)."""
-        return [
+        api_key-free (#220), plus -- for a caller whose workspace
+        unambiguously resolves to a vertical pack -- that pack's own tool
+        profiles (inherent#392; see ``tool_profiles.py``'s module docstring
+        for why this is HTTP-only and for the workspace-resolution rule).
+
+        Reads ``_current_key_info`` / ``_current_oauth_principal`` directly,
+        the SAME contextvars ``call_tool`` below reads: the MCP SDK's
+        stateless session manager spawns a task per request, but asyncio
+        copies the current ``contextvars.Context`` into it, so a ``.set()``
+        from the awaiting ASGI callable (``mount_mcp_http``) is visible here
+        too (see those contextvars' own comments above). An OAuth caller
+        whose token resolved to an Inherent user (inherent#392 follow-up:
+        ``Principal.resolved_user_id``) is treated identically to an API-key
+        caller from this point on -- same synthesized identity
+        (``_api_key_info_for_oauth``), same workspace-resolution rule, same
+        profile-tool lookup. An OAuth caller with NO resolved identity, or
+        (defensively) no identity of any kind, gets exactly ``base``. A
+        caller with no bound pack sees `base` completely unchanged, byte for
+        byte, on every identity path.
+        """
+        base = [
             Tool(
                 name=name,
                 description=tool.description,
@@ -299,6 +377,21 @@ def create_http_mcp_server() -> Server:
             )
             for name, tool in _http_tools().items()
         ]
+        key_info = _current_key_info.get()
+        if key_info is None:
+            oauth_principal = _current_oauth_principal.get()
+            if oauth_principal is not None and oauth_principal.resolved_user_id:
+                key_info = _api_key_info_for_oauth(
+                    oauth_principal, oauth_principal.resolved_user_id
+                )
+        if key_info is None:
+            return base
+        profile_tools = await _resolve_profile_tools_safe(key_info)
+        base.extend(
+            Tool(name=name, description=tool.description, inputSchema=tool.input_schema)
+            for name, tool in profile_tools.items()
+        )
+        return base
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict) -> CallToolResult:
@@ -323,7 +416,7 @@ def create_http_mcp_server() -> Server:
             # it -- is untouched byte-for-byte.
             oauth_principal = _current_oauth_principal.get()
             if oauth_principal is not None:
-                return await _call_tool_oauth(name, oauth_principal)
+                return await _call_tool_oauth(name, arguments, oauth_principal)
 
             # pragma: no cover - defensive; the ASGI gate always sets one of
             # the two contextvars above before handle_request ever runs.
@@ -333,6 +426,15 @@ def create_http_mcp_server() -> Server:
             )
 
         tool = _http_tools().get(name)
+        if tool is None:
+            # Not a built-in tool -- check this caller's own vertical-pack
+            # tool profiles (inherent#392) before giving up. Re-resolved
+            # here rather than threaded through from `list_tools` (a
+            # separate JSON-RPC call, possibly against a since-changed
+            # binding) -- the same "re-check on every call" posture #180
+            # already applies to API-key validation itself on this
+            # stateless transport.
+            tool = (await _resolve_profile_tools_safe(key_info)).get(name)
         if tool is None:
             # Deliberately the SAME message whether the tool never existed or
             # exists but is HTTP-excluded -- distinguishing them would let a
@@ -381,8 +483,9 @@ def create_http_mcp_server() -> Server:
     return server
 
 
-async def _call_tool_oauth(name: str, principal: Principal) -> CallToolResult:
-    """OAuth-authenticated `call_tool` dispatch (#295).
+async def _call_tool_oauth(name: str, arguments: dict, principal: Principal) -> CallToolResult:
+    """OAuth-authenticated `call_tool` dispatch (#295, executed since
+    inherent#392 follow-up).
 
     Scope-checks the call against the token's granted scopes -- the same
     per-tool enforcement point the API-key path uses
@@ -420,23 +523,56 @@ async def _call_tool_oauth(name: str, principal: Principal) -> CallToolResult:
     fires; see `tests/security/test_oauth_token_validation.py::
     TestInsufficientScope` for the pinned status/body/headers.
 
-    Deliberately stops there rather than invoking `tool.handler`: every
-    handler in `server.py` takes an `APIKeyInfo` and, through it, a
-    `user_id`/`workspace_id` this repo has no way to derive from an OAuth
-    token yet -- mapping the token's `sub` (Clerk identity) to an Inherent
-    user/workspace needs the account link issue #295 explicitly scopes OUT
-    ("the resource-server half only"; identity/entitlement resolution is
-    #309's territory). Executing a tool against a fabricated or unscoped
-    identity would be the exact fail-OPEN issue #295's own comments warn
-    against, so a validated-but-unresolvable OAuth caller gets a clear,
-    honest rejection instead of a guessed workspace.
+    Executes the tool (inherent#392 follow-up)
+    -------------------------------------------
+    #295 shipped this function stopping BEFORE `tool.handler`, unconditionally,
+    because mapping an OAuth token's `sub` to an Inherent user/workspace was
+    explicitly out of #295's scope ("the resource-server half only"). That
+    made every OAuth caller -- which is how claude.ai's custom connectors
+    ALWAYS connect -- unable to execute a single tool, unusable for #392's
+    actual point. `src.services.auth.resolve_oauth_user` (called once, inside
+    `Principal.from_oauth_claims`, so `principal.resolved_user_id` is already
+    known by the time this function runs) closes that gap with a minimal,
+    generic, CONFIG-FIRST identity link (`OAUTH_USER_ID_CLAIM` /
+    `OAUTH_SUBJECT_USERS`) -- see that function's docstring.
+
+    - `principal.resolved_user_id` set -> `_api_key_info_for_oauth` builds
+      the SAME `APIKeyInfo` shape every handler already expects (unscoped
+      `workspace_id`, permissions derived from the token's OWN granted
+      scopes via `permissions_from_scopes`) and this function runs the tool
+      exactly like the API-key path does below it, INCLUDING vertical-pack
+      tool profiles (`_resolve_profile_tools_safe`, same rule: profile tools
+      only when this identity's authorized-workspace set has exactly one
+      member) and the SAME error-classification convention.
+    - `principal.resolved_user_id` is `None` (no `OAUTH_USER_ID_CLAIM` claim
+      on the token and no `OAUTH_SUBJECT_USERS` entry for its `sub` -- the
+      default, unconfigured case) -> a clear, honest, DISTINCT rejection
+      (see the dedicated error text below) once scope and quota checks have
+      already passed, never a fabricated or guessed identity -- executing a
+      tool against one would be the exact fail-OPEN issue #295's own
+      comments warn against.
     """
+    # Resolved once, up front: needed for BOTH the profile-tool lookup below
+    # (a profile tool's mere EXISTENCE for this caller depends on identity)
+    # and the eventual `tool.handler` dispatch, so there is exactly one
+    # `_api_key_info_for_oauth` call per request, not two independently
+    # (im)possible-to-drift ones.
+    key_info: APIKeyInfo | None = None
+    if principal.resolved_user_id:
+        key_info = _api_key_info_for_oauth(principal, principal.resolved_user_id)
+
     tool = _http_tools().get(name)
+    if tool is None and key_info is not None:
+        tool = (await _resolve_profile_tools_safe(key_info)).get(name)
     if tool is None:
         # Same undifferentiated message as the API-key path (see the
-        # comment on that branch above) -- whether the tool never existed or
-        # is HTTP-excluded is not something either caller should be able to
-        # probe for.
+        # comment on that branch above) -- whether the tool never existed,
+        # is HTTP-excluded, or is a profile tool this identity cannot resolve
+        # is not something a caller should be able to probe for. Note: an
+        # UNRESOLVED identity (key_info is None) can therefore never reach a
+        # profile tool by name here either -- it falls through to this same
+        # "unknown tool" branch for any non-built-in name, and to the
+        # dedicated "no identity link" rejection below for a BUILT-IN one.
         return _error_result(f"Error: Unknown tool '{name}'", FAILURE_CLASS_UNKNOWN_TOOL)
 
     required_scope = PERMISSION_SCOPE_MAP.get(tool.permission, tool.permission)
@@ -458,25 +594,55 @@ async def _call_tool_oauth(name: str, principal: Principal) -> CallToolResult:
 
     # Per-identity quota enforcement (#309) applies to the OAuth principal
     # exactly as it does to an API-key one -- both are the same `Principal`
-    # seam. No `workspace_ids_for_max_documents` provider is available here:
-    # OAuth callers have no workspace resolution yet (see this function's own
-    # docstring on why it stops before `tool.handler`), so a configured
-    # `max_documents` limit fails OPEN with a loud log for this path rather
-    # than silently never firing (see `quotas._check_max_documents`). The
-    # other three limits (calls_per_minute/calls_per_month/writes_per_day)
-    # need no workspace context and are fully enforced here, ready for the
-    # day OAuth execution itself lands without further changes to this call.
-    denial = await check_quota(principal, name, tool.permission)
+    # seam. `workspace_ids_for_max_documents` is now available whenever
+    # identity resolved (inherent#392 follow-up) -- the SAME
+    # `_workspace_ids_for_quota` helper the API-key path uses, since
+    # `key_info` is the same shape either way. An UNRESOLVED identity still
+    # gets the other three limits (calls_per_minute/calls_per_month/
+    # writes_per_day, which need no workspace context) fully enforced, and
+    # `max_documents` fails OPEN with a loud log for that caller only (see
+    # `quotas._check_max_documents`) -- unchanged from #295's shipped
+    # behaviour for the still-possible "no identity link configured" case.
+    denial = await check_quota(
+        principal,
+        name,
+        tool.permission,
+        workspace_ids_for_max_documents=(
+            (lambda: _workspace_ids_for_quota(key_info)) if key_info is not None else None
+        ),
+    )
     if denial is not None:
         publish_usage_event(principal, name, allowed=False)
         return _quota_exceeded_result(denial)
 
-    return _error_result(
-        "Error: OAuth-authenticated tool execution is not yet available -- "
-        "identity resolution for bearer tokens is tracked separately from "
-        "#295's resource-server auth contract",
-        FAILURE_CLASS_AUTHENTICATION,
-    )
+    if key_info is None:
+        # Scope-authorized but UNRESOLVABLE identity (inherent#392
+        # follow-up): distinct from `insufficient_scope` above -- the token
+        # IS authorized for this tool, there is simply no Inherent
+        # user/workspace configured to run it against yet. See
+        # `resolve_oauth_user`'s docstring (src/services/auth.py) for the
+        # two ways an operator closes this: `OAUTH_USER_ID_CLAIM` or
+        # `OAUTH_SUBJECT_USERS`.
+        return _error_result(
+            "Error: no Inherent identity is linked to this token's subject -- "
+            "set OAUTH_USER_ID_CLAIM or OAUTH_SUBJECT_USERS to link OAuth "
+            "callers to an Inherent user (see docs/reference/mcp-tools.md's "
+            "'Connecting claude.ai' section)",
+            FAILURE_CLASS_AUTHENTICATION,
+        )
+
+    try:
+        content = await tool.handler(key_info, arguments)
+    except Exception as exc:  # noqa: BLE001 - must not crash the transport
+        logger.error("MCP HTTP tool error (oauth)", tool=name, error=str(exc))
+        return _error_result(f"Error: {exc}", FAILURE_CLASS_INTERNAL)
+
+    publish_usage_event(principal, name, allowed=True)
+
+    if content and isinstance(content[0], TextContent) and content[0].text.startswith("Error:"):
+        return _error_result(content[0].text, _classify_handler_error(content[0].text))
+
+    return CallToolResult(content=content, isError=False)
 
 
 class _StreamableHTTPEndpoint:

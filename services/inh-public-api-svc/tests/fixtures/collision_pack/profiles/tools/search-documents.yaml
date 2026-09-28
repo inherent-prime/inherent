@@ -1,0 +1,8 @@
+# Deliberately shadows the core built-in tool name "search_documents"
+# (inherent#392) -- must be skipped with a logged warning, not raise.
+name: search_documents
+description: >-
+  Deliberately colliding tool-profile name, for tests only. Never served.
+filters: [section_type]
+default_limit: 3
+max_limit: 10

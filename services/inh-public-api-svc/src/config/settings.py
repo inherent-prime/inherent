@@ -23,6 +23,59 @@ except PackageNotFoundError:  # pragma: no cover - only when running uninstalled
     SERVICE_VERSION = "0.0.0+local"
 
 
+class KVMappingError(ValueError):
+    """A ``key=value,key2=value2`` setting is malformed; the message names
+    the offending entry and why."""
+
+
+def _parse_kv_mapping(raw: str, *, setting_name: str) -> dict[str, str]:
+    """Parse ``"k1=v1,k2=v2"`` into ``{k1: v1, k2: v2}`` (inherent#392
+    follow-up, for ``OAUTH_SUBJECT_USERS``).
+
+    Same rules as ``inh_contracts.workspace_packs.parse_workspace_vertical_packs``
+    (comma-separated, surrounding whitespace trimmed, a blank entry
+    skipped, exactly one ``=`` per entry, no empty key/value, no key bound
+    twice) -- deliberately NOT imported from there: that module is shared
+    with ``inh-ingestion-svc`` specifically because ``WORKSPACE_VERTICAL_PACKS``
+    must parse identically on both services, and its error messages are
+    hardcoded to that one setting's name. ``OAUTH_SUBJECT_USERS`` is a
+    ``inh-public-api-svc``-only setting with no cross-service sharing need,
+    so a tiny local, setting-name-parameterized parser here is simpler than
+    generalizing a shared one for a single caller. ``None``/empty/whitespace
+    -> ``{}`` (the deliberate "unset" case, not an error).
+    """
+    if not raw or not raw.strip():
+        return {}
+
+    mapping: dict[str, str] = {}
+    for raw_entry in raw.split(","):
+        entry = raw_entry.strip()
+        if not entry:
+            continue  # a stray/trailing comma, not a real entry
+
+        if "=" not in entry:
+            raise KVMappingError(
+                f"{setting_name} entry {entry!r} is missing '=' (expected key=value)"
+            )
+        key, _, value = entry.partition("=")
+        key = key.strip()
+        value = value.strip()
+
+        if not key or not value:
+            raise KVMappingError(f"{setting_name} entry {entry!r} has an empty key or value")
+        if "=" in value:
+            raise KVMappingError(
+                f"{setting_name} entry {entry!r} has more than one '=' (values cannot contain '=')"
+            )
+        if key in mapping:
+            raise KVMappingError(
+                f"{setting_name}: key {key!r} is bound twice ({mapping[key]!r} and {value!r})"
+            )
+        mapping[key] = value
+
+    return mapping
+
+
 class Settings(BaseSettings):
     """Application configuration from environment variables."""
 
@@ -572,6 +625,52 @@ class Settings(BaseSettings):
         alias="OAUTH_JWKS_CACHE_SECONDS",
         description="How long a fetched JWKS key set is cached before being refetched.",
     )
+
+    # OAuth caller -> Inherent user identity link (inherent#392 follow-up).
+    # #295 shipped OAuth authentication with NO way to actually execute a
+    # tool -- "identity resolution for bearer tokens... needs the identity
+    # link the commercial platform owns, not this repo". That made an OAuth
+    # caller (which is how claude.ai's custom connectors ALWAYS connect)
+    # unable to do anything but list tools, unusable for #392's actual
+    # point. These two settings add a minimal, generic, config-first link in
+    # the engine -- the same shape as WORKSPACE_VERTICAL_PACKS (#390) for a
+    # hand-onboarded pilot -- with a seam for the platform to take over
+    # later with no engine change (see src.services.auth.resolve_oauth_user).
+    # Both default empty/unset -- every OAuth caller resolves to no identity,
+    # byte-for-byte the pre-#392-follow-up behaviour, until an operator
+    # configures one of these.
+    oauth_user_id_claim: str | None = Field(
+        default=None,
+        alias="OAUTH_USER_ID_CLAIM",
+        description=(
+            "Name of a claim on the verified access token that carries this "
+            "resource's OWN Inherent user_id directly (e.g. "
+            "'inherent_user_id'). Checked BEFORE OAUTH_SUBJECT_USERS. This "
+            "is the seam for the platform's authorization server to mint "
+            "tokens carrying the platform's own user id, needing no further "
+            "change here -- unset by default (no such claim assumed)."
+        ),
+    )
+    oauth_subject_users_raw: str = Field("", alias="OAUTH_SUBJECT_USERS")
+    _oauth_subject_users: dict[str, str] = PrivateAttr(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _parse_oauth_subject_users(self) -> "Settings":
+        """Eagerly parse+validate at construction time (== service startup)
+        so a malformed OAUTH_SUBJECT_USERS raises here, not later when an
+        OAuth call first tries to resolve its caller's identity."""
+        self._oauth_subject_users = _parse_kv_mapping(
+            self.oauth_subject_users_raw, setting_name="OAUTH_SUBJECT_USERS"
+        )
+        return self
+
+    @property
+    def oauth_subject_users(self) -> dict[str, str]:
+        """The parsed {token `sub` claim: Inherent user_id} mapping -- a
+        static, operator-maintained fallback for a hand-onboarded OAuth
+        pilot with no OAUTH_USER_ID_CLAIM minted yet (see field docstring
+        above)."""
+        return self._oauth_subject_users
 
     @property
     def effective_oauth_jwks_url(self) -> str | None:

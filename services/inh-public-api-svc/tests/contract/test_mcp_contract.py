@@ -1335,3 +1335,74 @@ class TestUploadDocumentTool:
         assert content[0].text.startswith("Error:")
         assert "don't have access" in content[0].text
         db.create_or_reset_pending_document.assert_not_called()
+
+
+# =========================================================================== #
+# search_documents accepting `filters` (inherent#392) -- friendly TagFilterError
+# =========================================================================== #
+class TestSearchDocumentsFilters:
+    """search_documents/search_memory now accept the same `filters` shape
+    REST's SearchRequest has had since #390 (previously silently dropped by
+    `build_search_request` -- `filters` was not in `_SEARCH_REQUEST_FIELDS`).
+    A `TagFilterError` from the search path must come back as a plain
+    "Error: ..." TextContent, never an unhandled exception."""
+
+    def _key(self) -> APIKeyInfo:
+        return APIKeyInfo(
+            key_id="key-1",
+            user_id="user-1",
+            workspace_id=None,
+            permissions=["read", "search"],
+            rate_limit=100,
+        )
+
+    async def test_filters_argument_is_forwarded_to_the_search_request(self):
+        from src.models.search import SearchResponse
+
+        db = AsyncMock()
+        db.validate_api_key = AsyncMock(return_value=self._key())
+        db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
+        search = AsyncMock()
+        search.search = AsyncMock(
+            return_value=SearchResponse(
+                results=[],
+                query="q",
+                total_results=0,
+                processing_time_ms=1.0,
+                search_mode="semantic",
+            )
+        )
+        with (
+            patch.object(mcp_server, "get_database", AsyncMock(return_value=db)),
+            patch.object(mcp_server, "get_search_service", AsyncMock(return_value=search)),
+        ):
+            await _call_tool(
+                "search_documents",
+                {"api_key": "x", "query": "pricing", "filters": {"section_type": "pricing"}},
+            )
+        called_request = search.search.await_args.args[2]
+        assert called_request.filters == {"section_type": "pricing"}
+
+    async def test_tag_filter_error_is_a_friendly_message_not_a_traceback(self):
+        from src.services.search import TagFilterError
+
+        db = AsyncMock()
+        db.validate_api_key = AsyncMock(return_value=self._key())
+        db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
+        search = AsyncMock()
+        search.search = AsyncMock(
+            side_effect=TagFilterError(
+                "search filters require the workspace to be bound to a vertical pack; "
+                "this workspace has none"
+            )
+        )
+        with (
+            patch.object(mcp_server, "get_database", AsyncMock(return_value=db)),
+            patch.object(mcp_server, "get_search_service", AsyncMock(return_value=search)),
+        ):
+            content = await _call_tool(
+                "search_documents",
+                {"api_key": "x", "query": "pricing", "filters": {"section_type": "pricing"}},
+            )
+        assert content[0].text.startswith("Error: ")
+        assert "bound to a vertical pack" in content[0].text

@@ -1,0 +1,15 @@
+# Numbered-section boundary rules (inherent#390). First match wins.
+# Group 1 of each regex captures the section number.
+strategy: numbered_sections
+split_at_level: 2        # 1 and 1.1 start a chunk; (a) and (i) stay inside it
+keep_parent_heading: true
+max_tokens: 200           # small on purpose so tests can hit the oversize fallback
+heading_patterns:
+  - level: 3
+    regex: '^(\d+\.\d+\.\d+)\.?\s+\S'
+  - level: 2
+    regex: '^(\d+\.\d+)\.?\s+\S'
+  - level: 1
+    regex: '^(?:Section\s+)?(\d+)\.?\s+(?=[A-Z])'
+  - level: 4
+    regex: '^\(([a-z])\)\s+'

@@ -100,6 +100,32 @@ class TestProtectedResourceMetadataRoute:
             assert body["scopes_supported"] == ["kb:read", "kb:search"]
             assert body["bearer_methods_supported"] == ["header"]
 
+    def test_path_suffixed_variant_serves_the_same_document(self, monkeypatch):
+        """inherent#392 spec audit: RFC 9728 sec 3.1 / the MCP authorization
+        spec (2025-06-18) describe deriving the metadata URL by inserting the
+        resource's own path after the well-known prefix -- some clients
+        (including claude.ai's custom connectors) probe
+        `/.well-known/oauth-protected-resource/mcp` directly for a resource
+        whose path is `/mcp`, without being told to via the challenge. Must
+        serve the IDENTICAL document as the origin-root path -- gated the
+        same way (absent, not merely empty, when OAuth is disabled)."""
+        monkeypatch.setattr(settings, "oauth_enabled", True)
+        monkeypatch.setattr(settings, "oauth_authorization_server", "https://auth.inherent.sh")
+        monkeypatch.setattr(settings, "oauth_resource_identifier", "https://api.inherent.sh/mcp")
+        app = create_app()
+        for client in _client(app):
+            root = client.get("/.well-known/oauth-protected-resource")
+            suffixed = client.get("/.well-known/oauth-protected-resource/mcp")
+            assert suffixed.status_code == 200
+            assert suffixed.json() == root.json()
+
+    def test_path_suffixed_variant_absent_when_oauth_disabled(self, monkeypatch):
+        monkeypatch.setattr(settings, "oauth_enabled", False)
+        app = create_app()
+        for client in _client(app):
+            r = client.get("/.well-known/oauth-protected-resource/mcp")
+            assert r.status_code == 404
+
 
 # --------------------------------------------------------------------------- #
 # /mcp 401 -- byte-identical off, dual-scheme on

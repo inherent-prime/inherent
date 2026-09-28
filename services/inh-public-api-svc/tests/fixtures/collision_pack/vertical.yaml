@@ -1,0 +1,14 @@
+# Generic test fixture pack whose tool profile deliberately collides with a
+# core built-in tool name ("search_documents") -- used only to exercise the
+# skip-with-warning behaviour (inherent#392). Paths are relative to this file.
+name: collision-pack
+version: 0.1.0
+description: Generic fixture pack with a colliding tool-profile name, for tests only
+requires_core: ">=0.8.0"
+profiles:
+  chunking: profiles/chunking/handbook.yaml
+  tags: profiles/tags/handbook-tags.yaml
+  tagger_examples: profiles/tagger/examples.yaml
+  tools:
+    - profiles/tools/search-documents.yaml
+    - profiles/tools/search-sections.yaml

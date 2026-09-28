@@ -155,13 +155,120 @@ With `OAUTH_ENABLED=true`:
   field docs.
 - **Scope of #295**: this issue is the resource-server contract only
   (discovery + the 401 challenge shape + the insufficient-scope JSON-RPC
-  shape + token verification). A
-  verified OAuth caller with sufficient scope for a tool still gets a
-  clearly-labeled "not yet available" rejection on `tools/call` --
-  executing a tool needs mapping the token's `sub` to an Inherent
-  user/workspace, which needs the identity link the commercial platform
-  owns, not this repo (see issue #295's "Scope" section). `tools/list`
-  works today for an OAuth caller since it needs no workspace resolution.
+  shape + token verification) -- it deliberately shipped with NO way for a
+  verified OAuth caller to execute a tool, since mapping the token's `sub`
+  to an Inherent user/workspace was explicitly out of scope ("the identity
+  link the commercial platform owns, not this repo"). The inherent#392
+  follow-up below closes that gap with a minimal, generic, config-first
+  version in the engine, so read that section before assuming `tools/call`
+  is still a permanent "not yet available" for every OAuth caller -- it no
+  longer is, once an operator links an identity.
+
+### Per-workspace tool profiles (#392)
+
+A caller whose request resolves to EXACTLY ONE authorized workspace, and
+that workspace is bound to a vertical pack declaring `tools:` (see
+[vertical-packs.md](./vertical-packs.md#mcp-tool-profiles-inherent392)), gets
+those tool profiles listed and callable alongside the built-in surface above
+-- HTTP only, never on stdio (no per-connection caller identity there to
+resolve a workspace from). This applies to BOTH an API-key caller and an
+OAuth caller whose token resolved to an Inherent user (see "OAuth callers
+can execute tools" below) -- identical rule, identical workspace resolution,
+once identity is known. A caller with no bound pack, authorized for
+zero/several workspaces, or (for OAuth) with no resolved identity, sees the
+built-in list completely unchanged, byte for byte. See that page for the
+full workspace-resolution rule, the name-collision policy, and the
+friendly-error contract for an invalid filter.
+
+### OAuth callers can execute tools (inherent#392 follow-up)
+
+#295 left every OAuth-authenticated `tools/call` permanently rejected with
+"not yet available", since it deliberately deferred the identity link
+("mapping the token's `sub` to an Inherent user/workspace") to "the
+commercial platform". That made an OAuth caller -- which is how claude.ai's
+custom connectors ALWAYS connect -- unable to execute a single tool,
+unusable for #392's actual point. Two new, GENERIC, config-first settings
+close this in the engine, with a clean seam for the platform to take over
+later without any further engine change:
+
+| Setting | Env var | Checked | Value |
+| --- | --- | --- | --- |
+| Claim carrying the Inherent user id | `OAUTH_USER_ID_CLAIM` | first | e.g. `inherent_user_id` -- if the verified token itself carries a non-empty string under this claim name, it is used directly. This is the seam: the day the authorization server is configured to mint tokens carrying the platform's own user id under this claim, resolution needs no further engine change at all. |
+| Static subject -> user mapping | `OAUTH_SUBJECT_USERS` | if (1) didn't resolve | `"sub_1=user_1,sub_2=user_2"` -- a hand-onboarded pilot's operator-maintained mapping, the same shape as `WORKSPACE_VERTICAL_PACKS` (#390). Malformed values fail the service to start, like that setting. |
+
+> **Security:** `OAUTH_USER_ID_CLAIM` grants that user's full data access to
+> whoever holds the token. Only point it at a claim the authorization server
+> sets from **server-controlled** data (e.g. an admin-set user attribute). Never
+> use a claim the end user can edit themselves (e.g. self-service profile
+> metadata), or any user could impersonate any other.
+
+Both default empty, so an unconfigured deployment is completely unaffected
+-- every OAuth caller resolves to no identity, byte-for-byte the
+pre-follow-up "not yet available" behaviour.
+
+Once a token's subject resolves to an Inherent `user_id`, that caller runs
+through the exact same shape a request from an API key does:
+
+- **Workspace access**: unscoped (like a user-scoped API key) --
+  `get_authorized_workspace_ids` for the resolved user_id, never a
+  workspace baked into the token itself.
+- **Permissions**: derived from the token's OWN granted scopes
+  (`kb:read`/`kb:search`/`kb:write` -> `read`/`search`/`write`, the inverse
+  of the scope map above) -- a read-only token cannot reach a
+  write-permission tool through this identity, the exact same rule the
+  `insufficient_scope` gate already enforces before dispatch, never a
+  second, independently-maintained rule.
+- **Tool profiles**: the same single-authorized-workspace rule "Per-workspace
+  tool profiles" above describes, using the resolved user's authorized
+  workspaces.
+
+An authorized-but-unresolvable token (scope check passes, no
+`OAUTH_USER_ID_CLAIM`/`OAUTH_SUBJECT_USERS` match) still gets a clear,
+honest rejection -- distinct from `insufficient_scope` -- naming the two
+settings that would close the gap, never a fabricated or guessed identity.
+
+### Connecting claude.ai (remote MCP connector)
+
+A claude.ai custom connector speaks the MCP authorization spec
+(2025-06-18) end to end -- discovery via RFC 9728, then a browser
+OAuth 2.1 sign-in against the discovered authorization server. Everything
+below is configuration on THIS repo's side; the authorization server itself
+(Clerk, for the hosted deployment) is configured on the platform side and is
+out of scope here. To add `https://<your-deployment>/mcp` as a connector in
+claude.ai, the operator sets, before pointing claude.ai at it:
+
+| Setting | Env var | Value |
+| --- | --- | --- |
+| Turn OAuth on | `OAUTH_ENABLED` | `true` |
+| This resource's own identifier | `OAUTH_RESOURCE_IDENTIFIER` | `https://<your-deployment>/mcp` -- must equal what every issued token's `aud` claim carries (RFC 8707); checked with exact-match, never merely logged about on mismatch |
+| The trusted authorization server | `OAUTH_AUTHORIZATION_SERVER` | the AS's issuer URL (e.g. your Clerk instance) -- published verbatim in `authorization_servers` and checked against every token's `iss` |
+| Advertised scopes | `OAUTH_SCOPES_SUPPORTED` | default `["kb:read", "kb:search"]` is fine for most deployments; write access arrives via a per-tool `insufficient_scope` step-up, never advertised upfront |
+| JWKS override (optional) | `OAUTH_JWKS_URL` | only if the AS does not publish JWKS at `<OAUTH_AUTHORIZATION_SERVER>/.well-known/jwks.json` |
+| **Identity link** (required to execute tools) | `OAUTH_USER_ID_CLAIM` or `OAUTH_SUBJECT_USERS` | see "OAuth callers can execute tools" below -- without one of these, claude.ai can authenticate and list tools but every `tools/call` is rejected |
+
+With that set, claude.ai's discovery handshake finds:
+
+- `GET /.well-known/oauth-protected-resource` (and the path-suffixed
+  `GET /.well-known/oauth-protected-resource/mcp`, served identically --
+  some clients probe the resource-path-suffixed form directly per RFC 9728
+  sec 3.1 / the MCP spec, without waiting to be told) -- the RFC 9728
+  protected-resource metadata document naming the authorization server and
+  the minimal scope catalogue.
+- A `401` on `/mcp` with no credential carries
+  `WWW-Authenticate: ApiKey, Bearer resource_metadata="...", scope="..."` --
+  claude.ai's client follows the `Bearer` challenge's `resource_metadata`
+  URL to the document above, then runs its own OAuth 2.1 flow against
+  `OAUTH_AUTHORIZATION_SERVER`.
+- The resulting access token is verified against the AS's JWKS (signature,
+  `iss`, `exp`, and non-negotiably `aud == OAUTH_RESOURCE_IDENTIFIER` per RFC
+  8707) before any tool call is dispatched; an expired token comes back as
+  `401` (never `403`) so claude.ai's silent-refresh path works unmodified.
+
+`tools/list` needs no identity link at all. `tools/call` DOES -- see "OAuth
+callers can execute tools" above for `OAUTH_USER_ID_CLAIM` /
+`OAUTH_SUBJECT_USERS`; without one of those configured (and matching this
+caller's token), every `tools/call` still gets a clear, honest rejection
+naming the two settings, never a fabricated identity.
 
 ### stdio (self-hosters / internal development)
 
