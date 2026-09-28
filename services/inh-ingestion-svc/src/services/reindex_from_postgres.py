@@ -143,6 +143,9 @@ async def reindex_document_from_postgres(
 
     # Provenance (#41): same fallback order store_in_weaviate uses.
     source_uri = doc.get("storage_path") or doc.get("storage_url")
+    # Source link (inherent#391): no fallback -- unlike source_uri, there is
+    # no internal substitute for a connector-supplied original-file link.
+    source_url = doc.get("source_url")
 
     stored_count = await weaviate.store_chunks_with_tenant(
         chunks=chunks,
@@ -152,6 +155,7 @@ async def reindex_document_from_postgres(
         original_filename=doc.get("original_filename") or doc.get("filename") or document_id,
         content_type=doc.get("content_type") or "application/octet-stream",
         source_uri=source_uri,
+        source_url=source_url,
     )
 
     logger.info(

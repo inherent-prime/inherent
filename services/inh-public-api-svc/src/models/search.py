@@ -71,11 +71,19 @@ class SearchRequest(BaseModel):
         default="semantic",
         description="Retrieval strategy: semantic (nearText), hybrid (BM25+vector), or keyword (BM25)",
     )
-    alpha: float = Field(
-        default=0.7,
+    # alpha (inherent#391 follow-up): default is None, not a fixed float, so
+    # SearchService can tell "caller didn't set this" apart from "caller
+    # explicitly asked for 0.7" -- only the former falls back to a per-
+    # workspace configured default (WORKSPACE_HYBRID_ALPHA); an explicit
+    # request value always wins. See SearchService.search's alpha
+    # resolution and DEFAULT_HYBRID_ALPHA for the global fallback (0.7,
+    # unchanged from before this existed).
+    alpha: float | None = Field(
+        default=None,
         ge=0.0,
         le=1.0,
-        description="Hybrid fusion weight (1.0=vector-heavy, 0.0=keyword-heavy); ignored unless search_mode=hybrid",
+        description="Hybrid fusion weight (1.0=vector-heavy, 0.0=keyword-heavy); ignored unless "
+        "search_mode=hybrid. Omit to use the workspace's configured default (falls back to 0.7).",
     )
 
 
@@ -121,6 +129,13 @@ class SearchResult(BaseModel):
     #   source_uri   — where the chunk's source bytes live
     content_hash: str | None = None
     source_uri: str | None = None
+
+    # Source link (inherent#391) — optional, backward-compatible. The URL of
+    # the ORIGINAL file in whatever system uploaded it (e.g. a Drive
+    # webViewLink), supplied by the connector at upload time. Distinct from
+    # source_uri above, which is THIS engine's own stored copy. None for
+    # every upload with no connector-supplied link (the vast majority).
+    source_url: str | None = None
 
     # Freshness (#42) — optional, backward-compatible. Promoted from the chunk
     # so callers can age returned evidence:

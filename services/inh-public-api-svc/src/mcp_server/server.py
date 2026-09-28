@@ -574,6 +574,9 @@ async def _handle_search(key_info: APIKeyInfo, arguments: dict) -> list[TextCont
                 "score_source": result.score_source,
                 "is_stale": result.is_stale,
                 "source_uri": result.source_uri,
+                # Source link (inherent#391): the connector's link to the
+                # original file, distinct from source_uri above.
+                "source_url": result.source_url,
                 "content_hash": result.content_hash,
             }
         )
@@ -816,8 +819,9 @@ async def _handle_explain_lineage(key_info: APIKeyInfo, arguments: dict) -> list
     """Handle explain_lineage: return provenance + freshness for a doc/chunk (#40).
 
     Reuses already-ingested data only (no new business logic): the document row
-    and its chunks, with provenance fields (``source_uri``, ``content_hash``,
-    ``ingested_at``) read from chunk/document metadata. ``is_stale`` is computed
+    and its chunks, with provenance fields (``source_uri``, ``source_url``,
+    ``content_hash``, ``ingested_at``) read from chunk/document metadata.
+    ``is_stale`` is computed
     with the SAME freshness logic the search path uses
     (``SearchService._compute_is_stale``), so lineage and search agree.
     """
@@ -1662,8 +1666,8 @@ _TOOLS: dict[str, ToolDef] = {
     ),
     "explain_lineage": ToolDef(
         description="Memory primitive: explain a document's (or chunk's) provenance and "
-        "freshness — source_uri, content_hash, ingested_at, is_stale and document_name — "
-        "from already-ingested data. Requires 'read' permission.",
+        "freshness — source_uri, source_url, content_hash, ingested_at, is_stale and "
+        "document_name — from already-ingested data. Requires 'read' permission.",
         input_schema={
             "type": "object",
             "properties": {

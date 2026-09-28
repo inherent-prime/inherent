@@ -481,6 +481,32 @@ class TestIngestTrigger:
         workflow_input = args[1]
         assert workflow_input.vertical_pack is None
 
+    def test_source_url_reaches_workflow_input(self, client: TestClient):
+        """A valid source_url (inherent#391) is passed through unchanged."""
+        payload = {**_INGEST_PAYLOAD, "source_url": "https://drive.google.com/file/d/abc/view"}
+        client.post("/ingest", json=payload, headers={"X-API-Key": VALID_API_KEY})
+        args, _kwargs = client._mock_temporal_client.start_workflow.call_args
+        workflow_input = args[1]
+        assert workflow_input.source_url == "https://drive.google.com/file/d/abc/view"
+
+    def test_unsafe_source_url_sanitized_to_none_not_rejected(self, client: TestClient):
+        """An unsafe source_url degrades to None -- it never fails the upload
+        (inherent#391 policy: a citation field, not something ingestion
+        depends on)."""
+        payload = {**_INGEST_PAYLOAD, "source_url": "javascript:alert(1)"}
+        resp = client.post("/ingest", json=payload, headers={"X-API-Key": VALID_API_KEY})
+        assert resp.status_code == 202
+        args, _kwargs = client._mock_temporal_client.start_workflow.call_args
+        workflow_input = args[1]
+        assert workflow_input.source_url is None
+
+    def test_missing_source_url_defaults_to_none(self, client: TestClient):
+        """Every existing /ingest caller (no source_url at all) is unaffected."""
+        client.post("/ingest", json=_INGEST_PAYLOAD, headers={"X-API-Key": VALID_API_KEY})
+        args, _kwargs = client._mock_temporal_client.start_workflow.call_args
+        workflow_input = args[1]
+        assert workflow_input.source_url is None
+
     def test_403_detail_states_both_accepted_storage_path_forms(self, client: TestClient):
         """Attacker-persona review finding: naming the mismatch without
         stating what a CORRECT value looks like leaves an operator on a

@@ -77,6 +77,7 @@ and binds all datastore ports to `127.0.0.1`.
 | `DIVERSIFICATION_OVER_FETCH_MULTIPLIER` | `5` | When `ENABLE_DIVERSIFICATION` is on, fetch up to `min(100, limit * this)` candidates to diversify across; ignored when off |
 | `VERTICAL_PACKS_DIR` | unset | Vertical packs (#390): directory of mounted packs. Unset = pack discovery off; `SearchRequest.filters` is always rejected. Also read by `inh-ingestion-svc`. See [Vertical packs](vertical-packs.md) |
 | `WORKSPACE_VERTICAL_PACKS` | unset | Vertical packs (#390 follow-up): hand-onboarded pilot workspace→pack binding, `ws_abc=support,ws_def=handbook`. Unset = no bindings. Malformed value fails the service to start. Also read by `inh-ingestion-svc`, identically parsed. See [Vertical packs](vertical-packs.md) |
+| `WORKSPACE_HYBRID_ALPHA` | unset | Per-workspace hybrid fusion weight (#391): `ws_a=0.3,ws_b=0.5` (each value in `[0.0, 1.0]`). Unset = every workspace keeps the global default (0.7). A request's own `alpha` always overrides this. Malformed value fails the service to start. See [Retrieval evals](retrieval-evals.md#per-workspace-hybrid-alpha) |
 
 ### Evals
 

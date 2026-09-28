@@ -290,6 +290,11 @@ class WeaviateService:
             # Provenance (#41): auditable evidence trail for returned chunks.
             Property(name="content_hash", data_type=DataType.TEXT),
             Property(name="source_uri", data_type=DataType.TEXT),
+            # Source link (inherent#391): the connector's link back to the
+            # ORIGINAL file in its source system (e.g. a Drive webViewLink).
+            # Distinct from source_uri above, which is THIS engine's own
+            # stored copy. Already sanitized (http/https only) upstream.
+            Property(name="source_url", data_type=DataType.TEXT),
             # Freshness (#42): when the chunk was (re)ingested, so returned
             # evidence can be aged/flagged stale by the public API.
             Property(name="ingested_at", data_type=DataType.DATE),
@@ -633,6 +638,7 @@ class WeaviateService:
         original_filename: str,
         content_type: str,
         source_uri: str | None = None,
+        source_url: str | None = None,
     ) -> int:
         """Store document chunks in a workspace collection with user tenant.
 
@@ -645,6 +651,10 @@ class WeaviateService:
             content_type: MIME type
             source_uri: Provenance (#41) — where the source bytes live
                 (storage_path / storage_url). Optional/backward-compatible.
+            source_url: Source link (inherent#391) — the connector's link
+                back to the ORIGINAL file in its source system (e.g. a
+                Drive webViewLink). Distinct from source_uri above.
+                Optional/backward-compatible.
 
         Returns:
             Number of chunks stored
@@ -723,6 +733,9 @@ class WeaviateService:
                         # Provenance (#41): auditable evidence trail.
                         "content_hash": hashlib.sha256(chunk.content.encode("utf-8")).hexdigest(),
                         "source_uri": source_uri,
+                        # Source link (inherent#391): distinct from source_uri
+                        # above; None when the upload had no connector link.
+                        "source_url": source_url,
                         # Freshness (#42): stamp ingest time so the public API can
                         # age returned evidence. Matches the PG document_chunks
                         # ingested_at; a refresh re-stores chunks with a new value.
@@ -1102,6 +1115,7 @@ class WeaviateService:
         original_filename: str,
         content_type: str,
         source_uri: str | None = None,
+        source_url: str | None = None,
     ) -> int:
         """Store document chunks - routes to multi-tenant storage.
 
@@ -1115,6 +1129,7 @@ class WeaviateService:
             original_filename=original_filename,
             content_type=content_type,
             source_uri=source_uri,
+            source_url=source_url,
         )
 
     async def delete_document_chunks(self, document_id: str) -> int:

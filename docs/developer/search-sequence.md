@@ -142,7 +142,7 @@ sequenceDiagram
         SS->>SS: nearVector: {vector[384]}
     end
 
-    SS->>WV: POST /v1/graphql  Get { <Collection>(…, tenant: "<tenant>") {<br/>document_id, original_filename, content, chunk_index, start_char, end_char,<br/>content_hash, source_uri, ingested_at, content_risk, content_risk_reasons,<br/>_additional {id score certainty distance}}}
+    SS->>WV: POST /v1/graphql  Get { <Collection>(…, tenant: "<tenant>") {<br/>document_id, original_filename, content, chunk_index, start_char, end_char,<br/>content_hash, source_uri, source_url, ingested_at, content_risk, content_risk_reasons,<br/>_additional {id score certainty distance}}}
     alt HTTP 422
         WV-->>SS: class/tenant not created yet (ingest→search race)
         SS-->>SS: return [] — empty, not 500
@@ -164,7 +164,7 @@ sequenceDiagram
         SS->>SS: metadata passthrough (non-core fields kept)
         SS->>SS: freshness (#42): parse ingested_at →<br/>is_stale if older than freshness_max_age_days (flagged, never dropped)
         SS->>SS: poisoning risk (#44): content_risk ("none"→None) + reasons<br/>(flagged, never dropped)
-        SS->>SS: build Citation (#39) from the chunk's own fields<br/>(chunk_id, doc, content, start/end_char, score, source_uri, staleness)
+        SS->>SS: build Citation (#39) from the chunk's own fields<br/>(chunk_id, doc, content, start/end_char, score, source_uri, source_url, staleness)
     end
     SS->>SS: truncate to request.limit (undo the over-fetch)
     SS-->>SS: SearchResponse{results, total_results, processing_time_ms, search_mode}
@@ -202,7 +202,7 @@ sequenceDiagram
         end
     end
     T->>T: sort by (-score, chunk_id, document_id), truncate to limit (#28)
-    T-->>A: markdown summary + structured JSON<br/>{workspace_id, chunk_id, document_id, document_name, content, score,<br/>score_source, is_stale, source_uri, content_hash} plus<br/>{query, results, workspaces_searched, event_id} at the top level
+    T-->>A: markdown summary + structured JSON<br/>{workspace_id, chunk_id, document_id, document_name, content, score,<br/>score_source, is_stale, source_uri, source_url, content_hash} plus<br/>{query, results, workspaces_searched, event_id} at the top level
     Note over T: event_id is null for a multi-workspace search,<br/>disabled capture, or a failed write — same contract as REST
 ```
 
@@ -281,7 +281,7 @@ sequenceDiagram
     WF->>ST: stage chunk dicts (content, chunk_index,<br/>start/end_char, token_count, content_risk)
 
     par store_in_postgresql (temporal/activities/store.py)
-        WF->>PG: processed_documents row (owner user_id, workspace_id,<br/>filename, status) + document_chunks rows<br/>(FK, chunk_index, content, token_count,<br/>start/end_char, content_hash, source_uri, ingested_at)
+        WF->>PG: processed_documents row (owner user_id, workspace_id,<br/>filename, status) + document_chunks rows<br/>(FK, chunk_index, content, token_count,<br/>start/end_char, content_hash, source_uri, source_url, ingested_at)
         Note over PG: unique (processed_document_id, chunk_index) —<br/>chunk ORDER is a relational fact
     and store_in_weaviate (temporal/activities/store.py)
         WF->>TEI: embed_texts(all chunk texts) — ONE batch,<br/>asyncio.to_thread (#19)

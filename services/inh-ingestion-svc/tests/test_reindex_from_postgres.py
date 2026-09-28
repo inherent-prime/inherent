@@ -96,6 +96,23 @@ class TestReindexDocumentFromPostgres:
         assert [c.chunk_index for c in kwargs["chunks"]] == [0, 1]
         # source_uri falls back to storage_path exactly like store_in_weaviate.
         assert kwargs["source_uri"] == "ws-1/doc-orphaned/stored.pdf"
+        # No source_url on the doc row -> None, not a fallback (inherent#391:
+        # unlike source_uri there is no internal substitute for it).
+        assert kwargs["source_url"] is None
+
+    async def test_reindex_carries_document_row_source_url(self):
+        """A stored source_url (inherent#391) rides along on reindex, straight
+        from the processed_documents row -- no fallback, unlike source_uri."""
+        doc_with_source_url = {**DOC_STATUS_ROW, "source_url": "https://drive.google.com/x"}
+        db = _mock_database(doc=doc_with_source_url, chunk_pages=[[_chunk_row(0)]])
+        weaviate = _mock_weaviate()
+
+        await reindex_document_from_postgres(
+            database=db, weaviate=weaviate, document_id="doc-orphaned"
+        )
+
+        _, kwargs = weaviate.store_chunks_with_tenant.await_args
+        assert kwargs["source_url"] == "https://drive.google.com/x"
 
     async def test_clears_any_stale_vectors_before_writing_new_ones(self):
         db = _mock_database(doc=DOC_STATUS_ROW, chunk_pages=[[_chunk_row(0)]])

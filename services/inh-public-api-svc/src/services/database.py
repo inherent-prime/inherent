@@ -38,6 +38,10 @@ def _merge_chunk_provenance(row) -> dict:
         meta.setdefault("content_hash", row.content_hash)
     if getattr(row, "source_uri", None) is not None:
         meta.setdefault("source_uri", row.source_uri)
+    # Source link (inherent#391): same fold-into-metadata pattern as
+    # source_uri above, so explain_lineage sees it without a schema change.
+    if getattr(row, "source_url", None) is not None:
+        meta.setdefault("source_url", row.source_url)
     ingested = getattr(row, "ingested_at", None)
     if ingested is not None:
         meta.setdefault(
@@ -829,7 +833,7 @@ class DatabaseService:
                 text(
                     """
                     SELECT id, document_id, content, chunk_index, token_count, metadata,
-                           content_hash, source_uri, ingested_at
+                           content_hash, source_uri, source_url, ingested_at
                     FROM document_chunks
                     WHERE document_id = :document_id
                     ORDER BY chunk_index ASC
@@ -870,7 +874,7 @@ class DatabaseService:
                 text(
                     """
                     SELECT dc.id, dc.document_id, dc.content, dc.chunk_index, dc.token_count,
-                           dc.metadata, dc.content_hash, dc.source_uri, dc.ingested_at
+                           dc.metadata, dc.content_hash, dc.source_uri, dc.source_url, dc.ingested_at
                     FROM document_chunks dc
                     JOIN processed_documents pd ON pd.document_id = dc.document_id
                     WHERE dc.document_id = :document_id
@@ -908,7 +912,7 @@ class DatabaseService:
                 text(
                     """
                     SELECT dc.id, dc.document_id, dc.content, dc.chunk_index, dc.token_count,
-                           dc.metadata, dc.content_hash, dc.source_uri, dc.ingested_at
+                           dc.metadata, dc.content_hash, dc.source_uri, dc.source_url, dc.ingested_at
                     FROM document_chunks dc
                     JOIN processed_documents pd ON pd.document_id = dc.document_id
                     WHERE dc.document_id = :document_id
@@ -1005,7 +1009,7 @@ class DatabaseService:
                         :content_hash, :source_uri, :ingested_at, :created_at
                     )
                     RETURNING id, document_id, content, chunk_index, token_count, metadata,
-                              content_hash, source_uri, ingested_at
+                              content_hash, source_uri, source_url, ingested_at
                 """
                 ),
                 {
@@ -1111,7 +1115,7 @@ class DatabaseService:
                       )
                     RETURNING dc.id, dc.document_id, dc.content, dc.chunk_index,
                               dc.token_count, dc.metadata, dc.content_hash,
-                              dc.source_uri, dc.ingested_at
+                              dc.source_uri, dc.source_url, dc.ingested_at
                 """
                 ),
                 {
@@ -1162,7 +1166,7 @@ class DatabaseService:
                 text(
                     """
                     SELECT dc.id, dc.document_id, dc.content, dc.chunk_index, dc.token_count,
-                           dc.metadata, dc.content_hash, dc.source_uri, dc.ingested_at
+                           dc.metadata, dc.content_hash, dc.source_uri, dc.source_url, dc.ingested_at
                     FROM document_chunks dc
                     JOIN processed_documents pd ON pd.document_id = dc.document_id
                     WHERE dc.document_id = :document_id
@@ -1525,7 +1529,7 @@ class DatabaseService:
                 text(
                     """
                     SELECT id, document_id, content, chunk_index, token_count, metadata,
-                           content_hash, source_uri, ingested_at
+                           content_hash, source_uri, source_url, ingested_at
                     FROM document_chunks
                     WHERE document_id = :document_id
                     ORDER BY chunk_index ASC

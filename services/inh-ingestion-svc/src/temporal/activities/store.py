@@ -152,6 +152,9 @@ async def store_in_postgresql(input: StoreDocumentInput) -> StoreDocumentOutput:
             source=None,
             connection_id=None,
             sync_id=None,
+            # Source link (inherent#391): carried through from the workflow
+            # input so store_processed_document can persist it per chunk.
+            source_url=input.source_url,
         )
 
         # #364: out-parameter that store_processed_document fills in with
@@ -447,6 +450,9 @@ async def store_in_weaviate(input: StoreDocumentInput) -> StoreDocumentOutput:
             content_type=input.content_type,
             # Provenance (#41): record where the source bytes live.
             source_uri=input.storage_path,
+            # Source link (inherent#391): the connector's link back to the
+            # original file, distinct from source_uri above.
+            source_url=input.source_url,
         )
 
         duration_ms = int((time.monotonic() - start) * 1000)

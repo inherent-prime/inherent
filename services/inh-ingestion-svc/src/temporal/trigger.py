@@ -324,6 +324,9 @@ class TemporalWorkflowTrigger:
                 storage_path=upload_message.storage_path,
                 storage_bucket=upload_message.storage_bucket,
                 storage_url=upload_message.storage_url,
+                # Source link (inherent#391): already sanitized by
+                # DocumentUploadMessage's own validator.
+                source_url=upload_message.source_url,
                 timestamp=upload_message.timestamp,
                 # Vertical pack binding (inherent#390 follow-up): resolved
                 # HERE, in plain application code, from the operator-
@@ -499,6 +502,9 @@ class TemporalWorkflowTrigger:
             storage_path=upload_message.storage_path,
             storage_bucket=upload_message.storage_bucket,
             storage_url=upload_message.storage_url,
+            # Source link (inherent#391): already sanitized by
+            # DocumentUploadMessage's own validator.
+            source_url=upload_message.source_url,
             timestamp=upload_message.timestamp,
             # Vertical pack binding (inherent#390 follow-up) -- see the
             # other construction site's comment above for the rationale.

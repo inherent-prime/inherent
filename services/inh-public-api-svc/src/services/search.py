@@ -15,6 +15,7 @@ from inh_contracts.naming import (
     get_user_tenant_name,
     get_workspace_collection_name,
 )
+from inh_contracts.source_url import sanitize_source_url
 
 from src.config import settings
 from src.models.citation import Citation
@@ -24,6 +25,14 @@ from src.services.workspace_pack import resolve_workspace_pack
 from src.utils import get_logger
 
 logger = get_logger(__name__)
+
+
+# Global default hybrid fusion weight (inherent#391): unchanged from the
+# field's old fixed default of 0.7, used whenever a request omits alpha AND
+# its workspace has no WORKSPACE_HYBRID_ALPHA override configured. Keeping
+# this the same value that used to live directly on the field means a
+# deployment with no override configured is byte-for-byte unaffected.
+DEFAULT_HYBRID_ALPHA = 0.7
 
 
 class TagFilterError(ValueError):
@@ -566,6 +575,18 @@ class SearchService:
         # TagFilterError (-> HTTP 400 at the API layer) rather than silently
         # ignoring an unusable filter.
         self._validate_tag_filters(workspace_id, request.filters)
+        # Per-workspace hybrid alpha (inherent#391): a request's own explicit
+        # alpha always wins; only when the caller omitted it (alpha is None)
+        # do we fall back to this workspace's WORKSPACE_HYBRID_ALPHA entry,
+        # then the global default. Resolved once, here, so every downstream
+        # read of request.alpha (the GraphQL query builder, the provenance
+        # echoed on each result) sees the same value without needing its own
+        # fallback logic.
+        if request.alpha is None:
+            effective_alpha = settings.workspace_hybrid_alpha.get(
+                workspace_id, DEFAULT_HYBRID_ALPHA
+            )
+            request = request.model_copy(update={"alpha": effective_alpha})
         results = await self._search_weaviate(workspace_id, user_id, request, query_vector)
         # Advanced-methods dispatch point (#47). NO-OP by default — when the
         # experimental flags are off (the default) this returns results
@@ -887,6 +908,15 @@ class SearchService:
             source_uri = chunk.get("source_uri")
             source_uri = source_uri if isinstance(source_uri, str) else None
 
+            # Source link (inherent#391): promoted the same way as source_uri
+            # above, but re-sanitized here too -- defense in depth against a
+            # chunk written before this validation existed, or written
+            # directly (bypassing the upload boundary's own sanitizer).
+            raw_source_url = chunk.get("source_url")
+            source_url = sanitize_source_url(
+                raw_source_url if isinstance(raw_source_url, str) else None
+            )
+
             # Freshness (#42): promote ingested_at and compute staleness. Stale
             # results are flagged, not dropped (see _compute_is_stale).
             # `content_type` is selected purely to identify a conversation
@@ -960,6 +990,7 @@ class SearchService:
                 score=rounded_score,
                 score_source=score_source,
                 source_uri=source_uri,
+                source_url=source_url,
                 ingested_at=ingested_at,
                 is_stale=is_stale,
             )
@@ -980,6 +1011,7 @@ class SearchService:
                     alpha=result_alpha,
                     content_hash=content_hash if isinstance(content_hash, str) else None,
                     source_uri=source_uri,
+                    source_url=source_url,
                     ingested_at=ingested_at,
                     is_stale=is_stale,
                     content_risk=content_risk,
@@ -1131,6 +1163,7 @@ class SearchService:
                     end_char
                     content_hash
                     source_uri
+                    source_url
                     ingested_at
                     content_type
                     content_risk

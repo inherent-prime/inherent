@@ -441,7 +441,8 @@ this page does not redraw it. What matters for the end-to-end picture:
   expense. Set `ENABLE_DIVERSIFICATION=false` to restore the prior ranking.
 - A **citation** is built purely from the matched chunk's own returned
   fields — `chunk_id`, `document_id`, `content`, `start_char`/`end_char`,
-  `score`, `source_uri` (`services/inh-public-api-svc/src/services/search.py:602-616`)
+  `score`, `source_uri`, `source_url`
+  (`services/inh-public-api-svc/src/services/search.py:602-616`)
   — so evidence is verifiable without a second lookup. `start_char`/`end_char`
   are the same offsets the chunker computed at ingestion time (§6) against
   the *original extracted text* — they are what makes a citation an

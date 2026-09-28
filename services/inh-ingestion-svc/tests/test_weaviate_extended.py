@@ -66,6 +66,80 @@ class TestWeaviateServiceExtended:
         mock_batch.add_object.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_store_chunks_with_tenant_writes_source_url_property(self, weaviate_service):
+        """source_url (inherent#391) lands on the chunk's Weaviate properties,
+        distinct from and alongside source_uri."""
+        weaviate_service.ensure_workspace_collection = AsyncMock(return_value="Workspace_ws1")
+        weaviate_service.ensure_user_tenant = AsyncMock(return_value="User_u1")
+
+        mock_collection = MagicMock()
+        mock_tenant_collection = MagicMock()
+        mock_batch = MagicMock()
+
+        weaviate_service.client.collections.get.return_value = mock_collection
+        mock_collection.with_tenant.return_value = mock_tenant_collection
+        mock_tenant_collection.batch.dynamic.return_value.__enter__.return_value = mock_batch
+        mock_tenant_collection.batch.failed_objects = []
+
+        chunks = [
+            DocumentChunk(
+                document_id="doc1", content="text", chunk_index=0, start_char=0, end_char=4
+            )
+        ]
+
+        with patch(
+            "src.services.embedder.embed_texts_with_progress",
+            return_value=[[0.1] * 384 for _ in chunks],
+        ):
+            await weaviate_service.store_chunks_with_tenant(
+                chunks,
+                "doc1",
+                "ws1",
+                "u1",
+                "file.txt",
+                "text/plain",
+                source_uri="storage/doc1.txt",
+                source_url="https://drive.google.com/file/d/abc123/view",
+            )
+
+        properties = mock_batch.add_object.call_args.kwargs["properties"]
+        assert properties["source_uri"] == "storage/doc1.txt"
+        assert properties["source_url"] == "https://drive.google.com/file/d/abc123/view"
+
+    @pytest.mark.asyncio
+    async def test_store_chunks_with_tenant_source_url_defaults_to_none(self, weaviate_service):
+        """A store call with no source_url (the overwhelming majority, today
+        every upload) writes None, not an omitted/absent property."""
+        weaviate_service.ensure_workspace_collection = AsyncMock(return_value="Workspace_ws1")
+        weaviate_service.ensure_user_tenant = AsyncMock(return_value="User_u1")
+
+        mock_collection = MagicMock()
+        mock_tenant_collection = MagicMock()
+        mock_batch = MagicMock()
+
+        weaviate_service.client.collections.get.return_value = mock_collection
+        mock_collection.with_tenant.return_value = mock_tenant_collection
+        mock_tenant_collection.batch.dynamic.return_value.__enter__.return_value = mock_batch
+        mock_tenant_collection.batch.failed_objects = []
+
+        chunks = [
+            DocumentChunk(
+                document_id="doc1", content="text", chunk_index=0, start_char=0, end_char=4
+            )
+        ]
+
+        with patch(
+            "src.services.embedder.embed_texts_with_progress",
+            return_value=[[0.1] * 384 for _ in chunks],
+        ):
+            await weaviate_service.store_chunks_with_tenant(
+                chunks, "doc1", "ws1", "u1", "file.txt", "text/plain"
+            )
+
+        properties = mock_batch.add_object.call_args.kwargs["properties"]
+        assert properties["source_url"] is None
+
+    @pytest.mark.asyncio
     async def test_legacy_search_chunks(self, weaviate_service):
         """Test legacy search chunks."""
         mock_collection = MagicMock()

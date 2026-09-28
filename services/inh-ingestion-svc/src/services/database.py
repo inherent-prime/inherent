@@ -231,6 +231,11 @@ class DatabaseService:
             Column("storage_path", String(1000), nullable=False),
             Column("storage_bucket", String(255), nullable=True),
             Column("storage_url", String(2000), nullable=True),
+            # Source link (inherent#391, migration 021): the connector's link
+            # back to the ORIGINAL file in its source system (e.g. a Drive
+            # webViewLink). Distinct from storage_url above, which points at
+            # THIS engine's own stored copy. Nullable/additive.
+            Column("source_url", String(2000), nullable=True),
             Column("status", String(20), nullable=False, default="pending"),
             Column("error_message", Text, nullable=True),
             Column("chunk_count", Integer, default=0),
@@ -316,6 +321,10 @@ class DatabaseService:
             # Provenance (#41): nullable, additive. See migration 008.
             Column("content_hash", String(64), nullable=True),
             Column("source_uri", String(2000), nullable=True),
+            # Source link (inherent#391, migration 021): same shape/rationale
+            # as processed_documents.source_url above, denormalized onto each
+            # chunk so search results can carry it without a document join.
+            Column("source_url", String(2000), nullable=True),
             Column(
                 "created_at",
                 DateTime(timezone=True),
@@ -1007,6 +1016,9 @@ class DatabaseService:
                     "storage_path": message.storage_path,
                     "storage_bucket": message.storage_bucket,
                     "storage_url": message.storage_url,
+                    # Source link (inherent#391): insert-only, same as
+                    # storage_url above -- not re-asserted in update_set.
+                    "source_url": message.source_url,
                     "status": DocumentStatus.PROCESSED.value,
                     # append (retry-idempotency follow-up): 0, not
                     # len(chunks)/text_length -- for append, the dedicated
@@ -1176,6 +1188,10 @@ class DatabaseService:
                     # source bytes live. Prefer the storage_path, fall back to a
                     # remote storage_url; NULL when neither is known.
                     source_uri = message.storage_path or message.storage_url
+                    # Source link (inherent#391): no fallback -- unlike
+                    # source_uri, there is no internal substitute for a
+                    # connector-supplied original-file link.
+                    source_url = message.source_url
 
                     # append (#306, retry-idempotency follow-up): `chunk.
                     # chunk_index` is used VERBATIM, never renumbered here --
@@ -1240,6 +1256,7 @@ class DatabaseService:
                                 chunk.content.encode("utf-8")
                             ).hexdigest(),
                             "source_uri": source_uri,
+                            "source_url": source_url,
                             "created_at": now,
                             # Freshness (#42): stamp ingest time so the API can age
                             # returned evidence. On re-ingestion (refresh path) the

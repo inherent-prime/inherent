@@ -33,6 +33,12 @@ class DocumentIngestionInput:
     storage_path: str
     storage_bucket: str | None = None
     storage_url: str | None = None
+    # Source link (inherent#391): the connector's link back to the ORIGINAL
+    # file (e.g. a Drive webViewLink) — distinct from storage_url above,
+    # which is THIS engine's own stored copy. Already sanitized by the
+    # caller (trigger.py / app.py) before this input is built, so it is
+    # trusted verbatim everywhere it is threaded from here.
+    source_url: str | None = None
     timestamp: str = ""
 
     # Optional per-document chunking overrides. When None, the workflow
@@ -327,6 +333,11 @@ class StoreDocumentInput:
     text_length: int
     processing_time_ms: int
     tenant_id: int | None = None
+    # Source link (inherent#391): threaded from DocumentIngestionInput so the
+    # store activities can persist it alongside source_uri (storage_path).
+    # Already sanitized upstream; None for a workflow/caller that never had
+    # one (unchanged default, backward-compatible).
+    source_url: str | None = None
     # --- Conversation ingestion extension (#306) -----------------------------
     # append/document_type/external_id/metadata are additive, defaulted so
     # DocumentIngestionWorkflow (which never sets them) is byte-identical to

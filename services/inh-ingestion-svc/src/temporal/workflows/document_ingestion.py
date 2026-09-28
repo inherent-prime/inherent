@@ -562,6 +562,9 @@ class DocumentIngestionWorkflow:
                 text_length=extract_output.text_length,
                 processing_time_ms=processing_time_ms,
                 tenant_id=self._tenant_id,
+                # Source link (inherent#391): carried through to the store
+                # activities unchanged.
+                source_url=input.source_url,
             )
 
             # Execute PostgreSQL and Weaviate storage in parallel

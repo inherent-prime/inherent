@@ -74,7 +74,7 @@ Both accept `page` (default 1) and `page_size` (default 20, capped at 100).
 
 | Method | Path | Permission | Purpose |
 | --- | --- | --- | --- |
-| POST | `/v1/search` | `search` | Semantic / hybrid / keyword search. Request: `query` (1–1000 chars), `limit` (1–100, default 10), `min_score`, `document_ids[]`, `include_context`, `context_window` (0–5), `search_mode` (`semantic`/`hybrid`/`keyword`), `alpha` (0–1). Response: `results[]` (score provenance, `citation`, `is_stale`, `content_risk`), `quality_verdict`, `performed_fallback`, `event_id` (for eval feedback) |
+| POST | `/v1/search` | `search` | Semantic / hybrid / keyword search. Request: `query` (1–1000 chars), `limit` (1–100, default 10), `min_score`, `document_ids[]`, `filters` (vertical-pack tag filters), `include_context`, `context_window` (0–5), `search_mode` (`semantic`/`hybrid`/`keyword`), `alpha` (0–1, omit to use the workspace's configured default — see `WORKSPACE_HYBRID_ALPHA`). Response: `results[]` (score provenance, `source_url` — the original file's link in its source system, e.g. a Drive `webViewLink`, `null` when the upload had none — `citation`, `is_stale`, `content_risk`), `quality_verdict`, `performed_fallback`, `event_id` (for eval feedback) |
 | POST | `/v1/verify-claim` | `read` | Offline lexical claim-vs-evidence check. Request: `claim` (1–2000 chars), `evidence[]`. Response: `support_level` (`strong`/`weak`/`none`), `score`, `reason` |
 
 ### Documents
@@ -85,7 +85,7 @@ Both accept `page` (default 1) and `page_size` (default 20, capped at 100).
 | GET | `/v1/documents` | `read` | List documents. Query: `page`, `page_size` (1–100, default 20) |
 | GET | `/v1/documents/{id}` | `read` | Document metadata (`status`, `chunk_count`, `mime_type`, timestamps). `404` if not found |
 | DELETE | `/v1/documents/{id}` | `write` | Delete document + vectors + chunks + stored bytes. `204`; `404` if already gone; `503` on vector-store outage (document left intact, retry safe) |
-| GET | `/v1/documents/{id}/lineage` | `read` | Provenance + freshness: `source_uri`, `content_hash`, `ingested_at`, `is_stale`. Optional `chunk_id` query param |
+| GET | `/v1/documents/{id}/lineage` | `read` | Provenance + freshness: `source_uri` (this engine's stored copy), `source_url` (the original file's link in its source system, `null` when none), `content_hash`, `ingested_at`, `is_stale`. Optional `chunk_id` query param |
 | POST | `/v1/documents/{id}/refresh` | `write` + `read` | Re-ingest an uploaded document to clear staleness. `404` if missing; `503` on DB/MQ failure. On MQ failure a retried compensation marks the document `failed`; if retries exhaust it can remain `pending` (CRITICAL log + `document_compensation_exhausted_total` metric) — check document status before retrying |
 
 Re-uploading the same filename into the same workspace reuses the existing

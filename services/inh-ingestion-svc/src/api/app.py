@@ -16,6 +16,7 @@ from typing import Literal
 import structlog
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
+from inh_contracts.source_url import sanitize_source_url
 from pydantic import BaseModel, Field
 from temporalio.client import Client, WorkflowFailureError
 from temporalio.exceptions import TerminatedError, WorkflowAlreadyStartedError
@@ -83,6 +84,14 @@ class IngestRequest(BaseModel):
     storage_path: str = Field(..., min_length=1, description="Path to file in storage")
     storage_bucket: str | None = Field(None, description="Storage bucket name")
     storage_url: str | None = Field(None, description="Direct URL to the file")
+    # Source link (inherent#391): the caller's link back to the ORIGINAL file
+    # in its source system (e.g. a Drive webViewLink) — distinct from
+    # storage_url above, which points at THIS engine's own stored copy.
+    # Sanitized (http/https only, see inh_contracts.source_url) at the route
+    # below before it ever reaches DocumentIngestionInput.
+    source_url: str | None = Field(
+        None, description="Link to the original file in its source system, if any"
+    )
 
     model_config = {
         "json_schema_extra": {
@@ -338,6 +347,9 @@ def create_app(settings: Settings) -> FastAPI:
             storage_path=body.storage_path,
             storage_bucket=body.storage_bucket,
             storage_url=body.storage_url,
+            # Source link (inherent#391): sanitized here, once, at the
+            # boundary — never an error, a bad value just becomes None.
+            source_url=sanitize_source_url(body.source_url),
             timestamp=datetime.now(UTC).isoformat(),
             # Vertical pack binding (inherent#390 follow-up): resolved HERE,
             # in plain application code, from the operator-configured

@@ -174,6 +174,7 @@ class TestSearchResponseShape:
         assert result.get("score_source") is None
         assert result.get("content_hash") is None
         assert result.get("source_uri") is None
+        assert result.get("source_url") is None
         assert result.get("citation") is None
         assert result.get("content_risk") is None
         assert result["is_stale"] is False
@@ -346,6 +347,7 @@ class TestLineageResponseShape:
             "workspace_id",
             "chunk_id",
             "source_uri",
+            "source_url",
             "content_hash",
             "ingested_at",
             "is_stale",

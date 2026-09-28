@@ -1159,6 +1159,50 @@ class TestStoreInWeaviateReindex:
     @patch("src.temporal.shared_services.get_weaviate_service")
     @patch("src.temporal.shared_services.get_staging_service")
     @pytest.mark.asyncio
+    async def test_source_url_is_threaded_to_weaviate(
+        self, mock_get_staging, mock_get_weaviate, mock_get_db
+    ):
+        """StoreDocumentInput.source_url (inherent#391) reaches
+        store_chunks_with_tenant unchanged, alongside source_uri."""
+        from src.temporal.activities.store import store_in_weaviate
+
+        mock_staging = MagicMock()
+        mock_staging.read_chunks.return_value = [
+            {
+                "document_id": "doc_1",
+                "content": "chunk text",
+                "chunk_index": 0,
+                "start_char": 0,
+                "end_char": 10,
+            }
+        ]
+        mock_get_staging.return_value = mock_staging
+
+        weaviate = MagicMock()
+        weaviate.is_connected.return_value = True
+        weaviate.delete_document_chunks_graceful = AsyncMock(return_value=(True, 0))
+        weaviate.store_chunks_with_tenant = AsyncMock(return_value=None)
+        mock_get_weaviate.return_value = weaviate
+
+        mock_db = MagicMock()
+        mock_db.record_ingestion_event = AsyncMock(return_value=None)
+        mock_db.is_active_run = AsyncMock(return_value=True)
+        mock_get_db.return_value = mock_db
+
+        store_input = self._store_input()
+        store_input.source_url = "https://drive.google.com/file/d/abc123/view"
+
+        result = await store_in_weaviate(store_input)
+
+        assert result.success is True
+        _, kwargs = weaviate.store_chunks_with_tenant.await_args
+        assert kwargs["source_url"] == "https://drive.google.com/file/d/abc123/view"
+        assert kwargs["source_uri"] == "storage/f.txt"
+
+    @patch("src.temporal.shared_services.get_db_service")
+    @patch("src.temporal.shared_services.get_weaviate_service")
+    @patch("src.temporal.shared_services.get_staging_service")
+    @pytest.mark.asyncio
     async def test_store_proceeds_when_delete_unavailable(
         self, mock_get_staging, mock_get_weaviate, mock_get_db
     ):
@@ -1487,6 +1531,32 @@ class TestStoreActivitiesSupersededHandling:
         # not an error condition, just a benign no-op.
         mock_db.record_ingestion_event.assert_awaited_once()
         assert mock_db.record_ingestion_event.await_args.kwargs["status"] == "superseded"
+
+    @patch("src.temporal.shared_services.get_db_service")
+    @patch("src.temporal.shared_services.get_staging_service")
+    @pytest.mark.asyncio
+    async def test_source_url_is_threaded_to_postgresql(self, mock_get_staging, mock_get_db):
+        """StoreDocumentInput.source_url (inherent#391) reaches the
+        DocumentUploadMessage passed to store_processed_document."""
+        from src.temporal.activities.store import store_in_postgresql
+
+        mock_staging = MagicMock()
+        mock_staging.read_chunks.return_value = self._one_chunk()
+        mock_get_staging.return_value = mock_staging
+
+        mock_db = MagicMock()
+        mock_db.store_processed_document = AsyncMock(return_value=1)
+        mock_db.record_ingestion_event = AsyncMock(return_value=None)
+        mock_get_db.return_value = mock_db
+
+        store_input = self._store_input()
+        store_input.source_url = "https://drive.google.com/file/d/abc123/view"
+
+        result = await store_in_postgresql(store_input)
+
+        assert result.success is True
+        message = mock_db.store_processed_document.await_args.kwargs["message"]
+        assert message.source_url == "https://drive.google.com/file/d/abc123/view"
 
     @patch("src.temporal.shared_services.get_db_service")
     @patch("src.temporal.shared_services.get_weaviate_service")

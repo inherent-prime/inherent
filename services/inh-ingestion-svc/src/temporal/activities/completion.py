@@ -72,13 +72,14 @@ async def publish_completion(input: PublishCompletionInput) -> bool:
         storage_bucket=input.storage_bucket,
         storage_url=input.storage_url,
         timestamp=input.timestamp or "1970-01-01T00:00:00Z",
-        # See store.py's identical construction for why these four
+        # See store.py's identical construction for why these five
         # default-valued/optional contract fields are passed explicitly
         # rather than omitted (no pydantic mypy plugin configured here).
         contract_version=CONTRACT_VERSION,
         source=None,
         connection_id=None,
         sync_id=None,
+        source_url=None,
     )
 
     message = build_completion_message(result, upload_message)

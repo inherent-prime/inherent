@@ -130,6 +130,37 @@ class TestLineageEndpoint:
         assert body["is_stale"] is False
         assert body["chunk_id"] == "chunk-1"
 
+    async def test_source_url_surfaces_distinct_from_source_uri(self, mock_db, client):
+        """source_url (inherent#391) rides along with no fallback -- unlike
+        source_uri, there is no internal substitute for it."""
+        mock_db.get_document_chunks = AsyncMock(
+            return_value=[
+                DocumentChunk(
+                    id="chunk-1",
+                    document_id="doc-1",
+                    content="text",
+                    chunk_index=0,
+                    metadata={
+                        "source_uri": "s3://bucket/report.pdf",
+                        "source_url": "https://drive.google.com/file/d/abc/view",
+                        "content_hash": "abc123",
+                        "ingested_at": FRESH_INGESTED_AT,
+                    },
+                )
+            ]
+        )
+        resp = await client.get("/v1/documents/doc-1/lineage", headers={"X-API-Key": "k"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["source_uri"] == "s3://bucket/report.pdf"
+        assert body["source_url"] == "https://drive.google.com/file/d/abc/view"
+
+    async def test_missing_source_url_is_none_not_a_fallback(self, client):
+        """No source_url on the chunk (the overwhelming majority) -> None."""
+        resp = await client.get("/v1/documents/doc-1/lineage", headers={"X-API-Key": "k"})
+        assert resp.status_code == 200
+        assert resp.json()["source_url"] is None
+
     async def test_evidence_older_than_the_threshold_is_flagged_stale(self, mock_db, client):
         """The mirror image of the fresh case (#332).
 

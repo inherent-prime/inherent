@@ -6,6 +6,7 @@ from importlib.metadata import version as _pkg_version
 from typing import Literal
 
 from inh_contracts.defaults import DEFAULT_MONGODB_URI, DEFAULT_S3_BUCKET, DEFAULT_S3_REGION
+from inh_contracts.workspace_hybrid_alpha import parse_workspace_hybrid_alpha
 from inh_contracts.workspace_packs import parse_workspace_vertical_packs
 from pydantic import AliasChoices, Field, PrivateAttr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -399,6 +400,30 @@ class Settings(BaseSettings):
     def workspace_vertical_packs(self) -> dict[str, str]:
         """The parsed {workspace_id: pack_name} mapping (see field above)."""
         return self._workspace_vertical_packs
+
+    # Per-workspace hybrid alpha (inherent#391): "ws_a=0.3,ws_b=0.5" -- a
+    # keyword-heavy workspace can favour BM25 without any per-request change.
+    # Same config-based shape as WORKSPACE_VERTICAL_PACKS above (see
+    # inh_contracts.workspace_hybrid_alpha's module docstring for why this,
+    # not a vertical.yaml field, is the simplest fix). Empty by default --
+    # every workspace keeps SearchService.search's global default (0.7)
+    # exactly as before this setting existed. A request's own explicit
+    # ``alpha`` always overrides this mapping.
+    workspace_hybrid_alpha_raw: str = Field("", alias="WORKSPACE_HYBRID_ALPHA")
+    _workspace_hybrid_alpha: dict[str, float] = PrivateAttr(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _parse_workspace_hybrid_alpha(self) -> "Settings":
+        """Eagerly parse+validate at construction time (== service startup)
+        so a malformed WORKSPACE_HYBRID_ALPHA raises here, not later when a
+        hybrid search first looks up a workspace's override."""
+        self._workspace_hybrid_alpha = parse_workspace_hybrid_alpha(self.workspace_hybrid_alpha_raw)
+        return self
+
+    @property
+    def workspace_hybrid_alpha(self) -> dict[str, float]:
+        """The parsed {workspace_id: alpha} mapping (see field above)."""
+        return self._workspace_hybrid_alpha
 
     # Evals v1 — traffic-mined retrieval evals (design spec: evals-v1).
     # Capture is ON by default (opt-out model): every search is recorded to

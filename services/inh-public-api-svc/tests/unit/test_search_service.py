@@ -483,8 +483,20 @@ class TestSearchMethod:
             # _search_weaviate now also receives an optional precomputed query
             # vector (None for a single-workspace call); assert the leading args
             # without coupling to the new trailing parameter.
+            #
+            # search() resolves alpha (inherent#391) before calling
+            # _search_weaviate, so the request it receives is a COPY with
+            # alpha filled in (DEFAULT_HYBRID_ALPHA, since no workspace
+            # override is configured here) rather than the original object
+            # with alpha still None -- compare everything else field-by-field
+            # instead of by identity/equality of the whole model.
             assert mock_weaviate.call_count == 1
-            assert mock_weaviate.call_args.args[:3] == ("ws1", "u1", request)
+            passed_workspace_id, passed_user_id, passed_request = mock_weaviate.call_args.args[:3]
+            assert (passed_workspace_id, passed_user_id) == ("ws1", "u1")
+            assert passed_request.model_dump(exclude={"alpha"}) == request.model_dump(
+                exclude={"alpha"}
+            )
+            assert passed_request.alpha == 0.7
 
 
 class TestSemanticScoreFallback:

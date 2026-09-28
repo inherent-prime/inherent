@@ -11,6 +11,7 @@ from typer.core import TyperGroup
 from inh_cli import __version__
 from inh_cli.commands.connect import connect
 from inh_cli.commands.documents import chunks, docs_app
+from inh_cli.commands.eval import eval_app
 from inh_cli.commands.identity import keys_app, whoami, workspaces_app
 from inh_cli.commands.search import search
 from inh_cli.stack import register as register_stack
@@ -83,4 +84,5 @@ app.command("search")(search)
 app.command("whoami")(whoami)
 app.add_typer(workspaces_app, name="workspaces")
 app.add_typer(keys_app, name="keys")
+app.add_typer(eval_app, name="eval")
 app.command("connect")(connect)

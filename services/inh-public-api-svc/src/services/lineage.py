@@ -33,6 +33,9 @@ class LineageResponse(BaseModel):
     workspace_id: str
     chunk_id: str | None = None
     source_uri: str | None = None
+    # Source link (inherent#391) — the original file's link in its source
+    # system, distinct from source_uri above (this engine's own copy).
+    source_url: str | None = None
     content_hash: str | None = None
     ingested_at: str | None = None
     is_stale: bool = False
@@ -78,6 +81,9 @@ def build_lineage(
         ),
     )
     source_uri = _meta_get("source_uri") or (document.metadata or {}).get("storage_url")
+    # Source link (inherent#391): no fallback -- unlike source_uri, there is
+    # no internal substitute for a connector-supplied original-file link.
+    source_url = _meta_get("source_url")
     content_hash = _meta_get("content_hash")
 
     return LineageResponse(
@@ -86,6 +92,7 @@ def build_lineage(
         workspace_id=document.workspace_id,
         chunk_id=selected.id if selected else None,
         source_uri=str(source_uri) if source_uri is not None else None,
+        source_url=str(source_url) if source_url is not None else None,
         content_hash=str(content_hash) if content_hash is not None else None,
         ingested_at=ingested_at.isoformat() if ingested_at else None,
         is_stale=is_stale,

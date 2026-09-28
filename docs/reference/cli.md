@@ -84,6 +84,18 @@ extensions are rejected locally from `inh_contracts.file_types`. A 400
 `config.toml`. Failed documents print the reason and
 `Run: inherent logs inh-ingestion-svc`.
 
+## Retrieval evals
+
+```bash
+inherent eval run --dataset evals/support.yaml --k 5 --min-hit-rate 0.7
+inherent --json eval run --dataset evals/support.yaml --workspace ws_abc
+```
+
+Runs a dataset of queries against `POST /v1/search` on the resolved stack
+and reports hit@k and mean reciprocal rank (MRR). CI-runnable and
+deployment-agnostic — see [Retrieval evals](retrieval-evals.md) for the
+dataset file format and how to wire it into a pipeline.
+
 ## Identity
 
 ```bash

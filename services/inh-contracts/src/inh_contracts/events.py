@@ -80,6 +80,29 @@ class DocumentUploadMessage(BaseModel):
         description="Connector sync run identifier (connector-sourced uploads only)",
     )
 
+    # Source link (inherent#391): the URL of the ORIGINAL file in whatever
+    # system uploaded it (e.g. a Drive `webViewLink`), supplied by the
+    # connector -- distinct from `storage_url` above, which points at this
+    # engine's OWN copy. Optional/defaulted to None so messages produced
+    # before this field existed, and manual/public-api uploads with nothing
+    # to supply, still validate unchanged.
+    source_url: str | None = Field(
+        None,
+        description="Link to the original file in its source system, if the "
+        "connector supplied one. Sanitized: only absolute http(s) URLs are "
+        "kept, everything else (a bad scheme, an oversized value, junk) "
+        "degrades to None rather than failing the upload.",
+    )
+
+    @field_validator("source_url", mode="before")
+    @classmethod
+    def _sanitize_source_url(cls, value: object) -> str | None:
+        """Degrade an unsafe/malformed value to None instead of rejecting the
+        whole upload over a cosmetic citation field (see field docstring)."""
+        from inh_contracts.source_url import sanitize_source_url
+
+        return sanitize_source_url(value) if isinstance(value, str) else None
+
     @field_validator(
         "storage_bucket", "storage_url", "source", "connection_id", "sync_id", mode="before"
     )

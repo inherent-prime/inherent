@@ -11,6 +11,8 @@ dependencies = [
     "rich>=13.9",
     "httpx>=0.27.2",
     "packaging>=24",
+    # `inherent eval run`'s dataset file format is YAML (inherent#391).
+    "pyyaml>=6.0",
 ]
 
 [project.scripts]
@@ -29,6 +31,7 @@ dev = [
     "mypy==1.19.1",
     "bandit[toml]==1.9.3",
     "types-redis>=4.6.0",
+    "types-PyYAML",
 ]
 
 [build-system]

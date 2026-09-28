@@ -30,6 +30,8 @@ CANONICAL_UPLOAD_KEYS_V1 = {
     "source",
     "connection_id",
     "sync_id",
+    # Source link (inherent#391) — additive, optional, backward compatible.
+    "source_url",
 }
 
 
@@ -52,6 +54,7 @@ def _canonical_upload_event() -> dict:
         "source": "connector:notion",
         "connection_id": "conn_123",
         "sync_id": "sync_456",
+        "source_url": "https://notion.so/workspace/doc-abc123",
     }
 
 
@@ -141,6 +144,32 @@ def test_oversized_source_fields_are_rejected(field: str) -> None:
 
     with pytest.raises(ValidationError, match=field):
         DocumentUploadMessage(**event)
+
+
+def test_upload_event_without_source_url_defaults_to_none() -> None:
+    """Messages produced before inherent#391 (and manual uploads with no
+    connector-supplied link) have no source_url at all — must still validate."""
+    event = _canonical_upload_event()
+    del event["source_url"]
+    msg = DocumentUploadMessage(**event)
+    assert msg.source_url is None
+
+
+def test_upload_event_valid_source_url_kept() -> None:
+    event = _canonical_upload_event()
+    event["source_url"] = "https://drive.google.com/file/d/abc123/view"
+    msg = DocumentUploadMessage(**event)
+    assert msg.source_url == "https://drive.google.com/file/d/abc123/view"
+
+
+def test_upload_event_unsafe_source_url_degrades_to_none_not_a_rejection() -> None:
+    """Unlike source/connection_id/sync_id (oversized -> hard rejection above),
+    source_url is a citation/display field: a bad value degrades to None so it
+    can never fail an otherwise-valid upload (inherent#391 policy)."""
+    event = _canonical_upload_event()
+    event["source_url"] = "javascript:alert(1)"
+    msg = DocumentUploadMessage(**event)
+    assert msg.source_url is None
 
 
 def test_completion_message_round_trip() -> None:

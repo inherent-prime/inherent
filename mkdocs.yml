@@ -91,6 +91,7 @@ nav:
       - Configuration: reference/configuration.md
       - Supported file types: reference/file-types.md
       - Vertical packs: reference/vertical-packs.md
+      - Retrieval evals: reference/retrieval-evals.md
   - Release Notes: release-notes.md
   - Architecture:
       - System overview: architecture/overview.md

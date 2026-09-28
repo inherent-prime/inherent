@@ -39,6 +39,9 @@ class Citation(BaseModel):
     score: float
     score_source: ScoreSource | None = None
     source_uri: str | None = None
+    # Source link (inherent#391) — the original file's link in its source
+    # system (e.g. a Drive webViewLink), distinct from source_uri above.
+    source_url: str | None = None
     ingested_at: datetime | None = None
     is_stale: bool = False
 

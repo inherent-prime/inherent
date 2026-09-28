@@ -62,6 +62,7 @@ def _search_result(doc_id: str = "doc-1") -> SearchResult:
         score=0.91,
         score_source="vector",
         source_uri="s3://bucket/report.pdf",
+        source_url="https://drive.google.com/file/d/abc/view",
         content_hash="abc123",
         citation=Citation(
             chunk_id="chunk-1",
@@ -70,6 +71,7 @@ def _search_result(doc_id: str = "doc-1") -> SearchResult:
             content="Paris is the capital of France.",
             score=0.91,
             score_source="vector",
+            source_url="https://drive.google.com/file/d/abc/view",
         ),
     )
 
@@ -251,6 +253,8 @@ class TestSearchParity:
         assert payload["results"][0]["document_id"] == "doc-1"
         assert payload["results"][0]["score"] == 0.91
         assert payload["results"][0]["source_uri"] == "s3://bucket/report.pdf"
+        # Source link (inherent#391): distinct from source_uri above.
+        assert payload["results"][0]["source_url"] == "https://drive.google.com/file/d/abc/view"
 
 
 # --------------------------------------------------------------------------
@@ -284,6 +288,8 @@ class TestMemoryPrimitives:
         assert cit["chunk_id"] == "chunk-1"
         assert cit["document_id"] == "doc-1"
         assert cit["workspace_id"] == "ws-1"
+        # Source link (inherent#391) rides along on the Citation object.
+        assert cit["source_url"] == "https://drive.google.com/file/d/abc/view"
 
     async def test_verify_claim_returns_verdict(self):
         mock_db = AsyncMock()
@@ -322,6 +328,7 @@ class TestMemoryPrimitives:
             chunk_index=0,
             metadata={
                 "source_uri": "s3://bucket/report.pdf",
+                "source_url": "https://drive.google.com/file/d/abc/view",
                 "content_hash": "abc123",
                 "ingested_at": FRESH_INGESTED_AT,
             },
@@ -338,6 +345,8 @@ class TestMemoryPrimitives:
         payload = _structured_payload(result)
         assert payload["document_name"] == "report.pdf"
         assert payload["source_uri"] == "s3://bucket/report.pdf"
+        # Source link (inherent#391): distinct from source_uri above.
+        assert payload["source_url"] == "https://drive.google.com/file/d/abc/view"
         assert payload["content_hash"] == "abc123"
         assert payload["ingested_at"] == FRESH_INGESTED_AT
         assert payload["is_stale"] is False

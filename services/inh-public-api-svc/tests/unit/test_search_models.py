@@ -14,7 +14,12 @@ class TestSearchRequestNewFields:
         assert req.include_context is False
         assert req.context_window == 2
         assert req.search_mode == "semantic"
-        assert req.alpha == 0.7
+        # alpha defaults to None (inherent#391), not a fixed 0.7 -- so
+        # SearchService.search can tell "omitted" apart from "explicitly
+        # 0.7" and fall back to a per-workspace configured default. See
+        # SearchService.search's alpha resolution / DEFAULT_HYBRID_ALPHA
+        # for where the 0.7 fallback now actually lives.
+        assert req.alpha is None
 
     def test_context_window_out_of_range_rejected(self) -> None:
         with pytest.raises(ValidationError):

@@ -44,6 +44,8 @@ CANONICAL_UPLOAD_KEYS_V1 = {
     "source",
     "connection_id",
     "sync_id",
+    # Source link (inherent#391) — additive, optional, backward compatible.
+    "source_url",
 }
 
 
@@ -66,6 +68,7 @@ def _canonical_upload_event() -> dict:
         "source": "connector:notion",
         "connection_id": "conn_123",
         "sync_id": "sync_456",
+        "source_url": "https://notion.so/workspace/doc-abc123",
     }
 
 
