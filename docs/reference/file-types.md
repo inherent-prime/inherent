@@ -61,6 +61,35 @@ only `image/png` has one (`ocr` — pytesseract + Pillow, plus the `tesseract`
 system binary): without it, OCR falls back to a placeholder string instead of
 failing the upload.
 
+## Structure-preserving DOCX/PDF extraction (#389)
+
+`docx` and `pdf` both stay in the `prose` chunking hint above, but their
+extractors (`services/inh-ingestion-svc/src/temporal/activities/extract.py`)
+no longer flatten the document into an unstructured blob of text:
+
+- **DOCX** walks the body in document order — paragraphs and tables
+  interleaved exactly as authored, not all paragraphs followed by all
+  tables. Built-in heading/title styles (`Heading 1`..`Heading 6`, `Title`)
+  render as markdown `#`..`######` prefixes. Automatic list/outline
+  numbering (`w:numPr`, set directly on a paragraph or inherited from its
+  style) is resolved through `numbering.xml` and rendered inline — e.g.
+  `1.1 The Seller shall...`, `(a) any breach...` — via
+  `src/temporal/activities/docx_numbering.py`, which supports the `decimal`,
+  `lowerLetter`, `upperLetter`, `lowerRoman`, `upperRoman`, and `bullet`
+  (rendered as `-`) number formats, falling back to `decimal` for anything
+  else. Tables render as GitHub-flavoured markdown tables, with `|`
+  escaped inside cells.
+- **PDF** keeps pypdf's own per-page line breaks intact — a numbered
+  heading line (`1.1 ...`) stays on its own line rather than running
+  together with the text before or after it — and conservatively rejoins
+  words split by a line-wrap hyphen (e.g. `informa-\ntion` ->
+  `information`), without collapsing genuine line/paragraph structure.
+
+Numbered-section documents (contracts, policies, specs, ...) are the
+motivating case, but neither change is contract-specific: any DOCX using
+built-in heading styles, automatic numbering, or tables, and any PDF with
+numbered or lettered lines, benefits the same way.
+
 ## Validation at upload
 
 An upload carries three independent signals: the declared `Content-Type`,

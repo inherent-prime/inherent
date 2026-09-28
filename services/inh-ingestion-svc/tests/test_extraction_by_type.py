@@ -1280,7 +1280,15 @@ class TestDocxFailurePaths:
     `non_retryable=True`, permanently dead-lettering a load-dependent
     failure that a retry (possibly on a less-contended worker) could
     plausibly resolve. Mirrors `TestPdfFailurePaths` above exactly (#195's
-    construction-only-wrap precedent, which this fix now matches)."""
+    construction-only-wrap precedent, which this fix now matches).
+
+    #389 replaced the paragraph-only walk with `_docx_body_to_text`'s
+    document-order walk over `doc.element.body` -- the lazy-iteration point
+    these tests exercise moved from `doc.paragraphs` to `doc.element.body`
+    accordingly, but the CONTRACT these tests pin (construction failures are
+    wrapped/non-retryable; iteration failures propagate unconverted) is
+    unchanged, so the fake `Document` classes below raise from an
+    `element.body` property instead."""
 
     def test_memory_error_during_construction_propagates_not_wrapped(self, monkeypatch):
         """MemoryError raised by `Document()` construction itself must
@@ -1296,48 +1304,47 @@ class TestDocxFailurePaths:
         with pytest.raises(MemoryError):
             _extract_docx_text(b"irrelevant, Document is mocked", "sample.docx")
 
-    def test_exception_during_paragraph_iteration_propagates_not_wrapped(self, monkeypatch):
-        """A failure discovered lazily during paragraph iteration (the `for
-        p in doc.paragraphs if p.text.strip()` comprehension) -- e.g. a
-        MemoryError from a pathological/huge document -- must NOT be swept
+    def test_exception_during_body_iteration_propagates_not_wrapped(self, monkeypatch):
+        """A failure discovered lazily while walking the body (#389:
+        `_docx_body_to_text`'s `for child in doc.element.body` loop) -- e.g.
+        a MemoryError from a pathological/huge document -- must NOT be swept
         into `non_retryable=True` by a broad except around the whole try
         block. The try/except is scoped to ONLY `Document()` construction,
-        mirroring `_extract_pdf_text`'s construction-only wrap; the
-        paragraph-iteration comprehension itself is left unwrapped below the
-        try block."""
+        mirroring `_extract_pdf_text`'s construction-only wrap; the body walk
+        itself is left unwrapped below the try block."""
         import docx
+
+        class _ExplodingElement:
+            @property
+            def body(self):
+                raise MemoryError("simulated: OOM iterating body elements")
 
         class _ExplodingDocument:
             def __init__(self, *args, **kwargs):
-                pass
-
-            @property
-            def paragraphs(self):
-                raise MemoryError("simulated: OOM iterating paragraphs")
+                self.element = _ExplodingElement()
 
         monkeypatch.setattr(docx, "Document", _ExplodingDocument)
 
         with pytest.raises(MemoryError):
             _extract_docx_text(b"irrelevant, Document is mocked", "sample.docx")
 
-    def test_non_memory_exception_during_paragraph_iteration_propagates_not_wrapped(
-        self, monkeypatch
-    ):
+    def test_non_memory_exception_during_body_iteration_propagates_not_wrapped(self, monkeypatch):
         """Same as above but for a non-MemoryError exception discovered
-        during paragraph iteration -- also must NOT become a non-retryable
-        ApplicationError, since the paragraph-iteration comprehension sits
-        entirely outside the try/except now (mirrors PDF's page-iteration
-        test: a per-paragraph failure a structurally-valid `Document()`
-        construction alone cannot detect stays retryable, not converted)."""
+        during the body walk -- also must NOT become a non-retryable
+        ApplicationError, since the body walk sits entirely outside the
+        try/except now (mirrors PDF's page-iteration test: a per-paragraph
+        failure a structurally-valid `Document()` construction alone cannot
+        detect stays retryable, not converted)."""
         import docx
+
+        class _ExplodingElement:
+            @property
+            def body(self):
+                raise RuntimeError("simulated: corrupt paragraph run on p.12")
 
         class _ExplodingDocument:
             def __init__(self, *args, **kwargs):
-                pass
-
-            @property
-            def paragraphs(self):
-                raise RuntimeError("simulated: corrupt paragraph run on p.12")
+                self.element = _ExplodingElement()
 
         monkeypatch.setattr(docx, "Document", _ExplodingDocument)
 

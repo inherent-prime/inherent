@@ -354,8 +354,52 @@ def _resolve_extractor(content_type: str, filename: str = "") -> Callable[[bytes
     return extractor
 
 
+# Rejoins a word split across a line-wrap hyphen (#389: "normalise
+# hyphenation ... conservatively"), e.g. "informa-\ntion" -> "information".
+# Deliberately narrow: both the character before the hyphen and the one
+# after the following newline must be lowercase LETTERS -- this is what
+# makes it "conservative" rather than a blanket dehyphenator:
+# - A numbered-section marker like "1.1" or "(a)" never matches (digits and
+#   punctuation aren't `[a-z]`), so #389's whole point -- keeping numbered
+#   heading lines legible and intact -- is never touched by this.
+# - An UPPERCASE word (an acronym, a defined term like "Force-Majeure"
+#   written in title case) is also left alone, since a genuine wrap-artifact
+#   hyphen in body prose is overwhelmingly lowercase-lowercase.
+# The accepted tradeoff, stated plainly: a genuine compound word that
+# happens to line-wrap right at its hyphen (e.g. "well-\nbeing") loses its
+# hyphen too ("wellbeing") -- indistinguishable from a wrap artifact without
+# a dictionary, and pypdf gives no other signal to tell the two apart.
+_PDF_HYPHEN_LINEBREAK_RE = re.compile(r"(?<=[a-z])-\n(?=[a-z])")
+
+
+def _normalize_pdf_page_text(text: str) -> str:
+    """Conservatively clean up one page's raw `extract_text()` output
+    (#389), without ever touching the LINE STRUCTURE pypdf already produced
+    -- newlines are exactly what keeps a numbered heading ("1.1 The Seller
+    shall...") on its own line rather than run together with the paragraph
+    before or after it, so this only:
+
+    1. Rejoins line-wrap-hyphenated words (`_PDF_HYPHEN_LINEBREAK_RE`).
+    2. Collapses runs of horizontal whitespace (spaces/tabs -- never `\\n`)
+       within a line, and strips trailing whitespace from each line -- pypdf
+       can emit multiple spaces where a PDF's content stream used explicit
+       positioning (`Tz`/`TJ` kerning arrays) instead of a literal space
+       character.
+    """
+    text = _PDF_HYPHEN_LINEBREAK_RE.sub("", text)
+    lines = [re.sub(r"[ \t]+", " ", line).rstrip() for line in text.split("\n")]
+    return "\n".join(lines)
+
+
 def _extract_pdf_text(content: bytes) -> str:
-    """Extract text from PDF content.
+    """Extract text from PDF content, preserving per-page line structure so
+    numbered heading lines (e.g. "1.1 The Seller shall...") stay on their
+    own line rather than running together with adjacent text (#389).
+    pypdf's own `extract_text()` already reconstructs line breaks from each
+    page's text-positioning operators (verified against hand-built PDFs with
+    both generous and tight line leading) -- #389's contribution is
+    `_normalize_pdf_page_text`'s conservative hyphenation/whitespace cleanup
+    layered on top, never a change to pypdf's own line-break placement.
 
     Deterministic given fixed `content` bytes -- retrying cannot change the
     outcome, so both failure modes below raise a non-retryable
@@ -436,12 +480,197 @@ def _extract_pdf_text(content: bytes) -> str:
     for page in reader.pages:
         text = page.extract_text()
         if text:
-            text_parts.append(text)
+            text_parts.append(_normalize_pdf_page_text(text))
     return "\n\n".join(text_parts)
 
 
+_DOCX_HEADING_STYLE_PREFIXES: dict[str, str] = {
+    "title": "#",
+    **{f"heading {n}": "#" * n for n in range(1, 7)},
+}
+
+
+def _docx_heading_prefix(style_name: str | None) -> str | None:
+    """Markdown heading prefix (``"#"``..``"######"``) for a DOCX built-in
+    heading/title style name, or ``None`` if `style_name` isn't one (#389).
+
+    Matched on Word's built-in style NAME ("Heading 1", "Title", ...) --
+    what ``paragraph.style.name`` gives -- not the internal style id, since
+    the name is the stable, human-facing string every DOCX author sees,
+    while the id can vary by locale/template.
+
+    This does NOT make DOCX's chunking behave like PPTX/JSON's ``##``
+    -section-based strategy: `chunk.py`'s ``_chunk_by_sections`` only runs
+    for the registry's ``structured`` chunking hint, and DOCX's hint stays
+    ``prose`` (sentence chunking, unchanged by #389) -- see
+    ``inh_contracts.file_types``'s docx entry. Emitting these markers only
+    gives the unchanged prose chunker (and any downstream reader) markdown
+    structure to work with.
+    """
+    if not style_name:
+        return None
+    return _DOCX_HEADING_STYLE_PREFIXES.get(style_name.strip().lower())
+
+
+def _docx_escape_table_cell(text: str) -> str:
+    """Escape one table cell's text for a GitHub-flavoured markdown table
+    row (#389): ``|`` is the column delimiter and must be escaped, and a
+    cell spanning multiple paragraphs (embedded newlines) would otherwise
+    break the single-line row syntax entirely -- collapsed to a space
+    instead of dropped."""
+    return text.replace("|", "\\|").replace("\n", " ").strip()
+
+
+def _docx_table_to_markdown(table: Any) -> str:
+    """Render a python-docx ``Table`` as a GitHub-flavoured markdown table
+    (#389 requirement: "Tables -> GitHub markdown tables"). `table` is typed
+    ``Any`` (not ``docx.table.Table``) so this module has no top-level
+    import of ``docx`` -- see `_extract_docx_text`'s docstring for why that
+    matters (the "python-docx not installed" degrade path).
+
+    The FIRST row is always treated as the header: markdown tables have no
+    other way to mark a row as a header, and a DOCX table used as data
+    overwhelmingly has its column labels in row one.
+
+    `table.rows` yields one ``Cell`` per GRID column for every row,
+    including a REPEATED ``Cell`` object across a horizontally merged cell
+    (python-docx's own behaviour) -- so a merged cell's text repeats across
+    its span rather than leaving blank columns. This is a smaller, simpler
+    contract than `_extract_xlsx_text`'s ``[merged A1:D1]`` marker
+    (deliberately out of scope here -- tables are a small fraction of the
+    "numbered sections" documents #389 targets) but it never drops a column
+    or crashes on a merged cell either.
+
+    Returns ``""`` for a table with zero rows (an edge case OOXML allows but
+    Word's own UI cannot produce) so the caller's ``if table_markdown:``
+    check skips it cleanly rather than emitting an empty table shell.
+    """
+    rows = list(table.rows)
+    if not rows:
+        return ""
+
+    lines = []
+    header_cells = [_docx_escape_table_cell(cell.text) for cell in rows[0].cells]
+    lines.append("| " + " | ".join(header_cells) + " |")
+    lines.append("| " + " | ".join("---" for _ in header_cells) + " |")
+    for row in rows[1:]:
+        cells = [_docx_escape_table_cell(cell.text) for cell in row.cells]
+        lines.append("| " + " | ".join(cells) + " |")
+    return "\n".join(lines)
+
+
+def _docx_paragraph_line(paragraph: Any, numbering_scheme: Any) -> str | None:
+    """One paragraph's rendered output line: its outline-numbering marker
+    (if any) and markdown heading prefix (if any), both prepended to its
+    text (#389). Returns ``None`` for a paragraph that renders to nothing at
+    all (blank text and no numbering marker) -- e.g. a purely presentational
+    empty paragraph used for vertical spacing.
+
+    `numbering_scheme.marker_for` is called whenever this paragraph resolves
+    to a `(numId, ilvl)` binding REGARDLESS of whether its text is blank --
+    numbering counters are document-order state (see
+    ``docx_numbering.NumberingScheme``'s docstring): a blank numbered
+    paragraph still occupies a slot in its list and must still advance (and
+    reset) counters exactly as Word would, even though this function then
+    discards its own empty line.
+    """
+    from src.temporal.activities.docx_numbering import resolve_paragraph_num_id_ilvl
+
+    text = paragraph.text.strip()
+
+    marker: str | None = None
+    num_id_ilvl = resolve_paragraph_num_id_ilvl(paragraph)
+    if num_id_ilvl is not None:
+        marker = numbering_scheme.marker_for(*num_id_ilvl)
+
+    if not text and not marker:
+        return None
+
+    rendered = f"{marker} {text}".strip() if marker else text
+
+    style = getattr(paragraph, "style", None)
+    heading_prefix = _docx_heading_prefix(getattr(style, "name", None))
+    if heading_prefix:
+        rendered = f"{heading_prefix} {rendered}".strip()
+
+    return rendered or None
+
+
+def _docx_body_to_text(doc: Any) -> str:
+    """Walk `doc`'s body in DOCUMENT ORDER -- paragraphs and tables
+    interleaved exactly as authored, via ``doc.element.body`` -- rather than
+    all paragraphs followed by all tables (#389: the pre-#389
+    ``doc.paragraphs`` walk silently dropped every table's text entirely,
+    since ``.paragraphs`` only ever returns TOP-LEVEL paragraphs).
+
+    Only ``w:p`` (paragraph) and ``w:tbl`` (table) body children carry
+    extractable text; every other body child (``w:sectPr`` section
+    properties, bookmarks, ...) is silently skipped, same as the pre-#389
+    walk implicitly did for everything that wasn't a top-level paragraph.
+
+    Numbering is resolved via a single `NumberingScheme` built once here and
+    threaded through the whole walk (never per-paragraph) -- its counters
+    are document-order state that must accumulate across the entire body,
+    exactly once, in exactly this order (see that class's docstring).
+    Building it is wrapped in a bare ``except Exception`` -- deliberately
+    broader than this module's usual narrow catches -- because a malformed
+    ``numbering.xml`` is a rendering NICETY layered on top of body text, not
+    a reason to fail extraction outright; it degrades to "no markers" the
+    same way `_xlsx_merge_anchors` degrades to "no merge markers" for a
+    similarly non-essential XLSX annotation.
+    """
+    from docx.oxml.ns import qn
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    from src.temporal.activities.docx_numbering import NumberingScheme
+
+    try:
+        numbering_scheme = NumberingScheme.from_document(doc)
+    except MemoryError:
+        # Same load-dependent carve-out as everywhere else in this module
+        # (#215) -- a genuine OOM parsing numbering.xml must stay retryable,
+        # never silently swallowed into "no numbering" by the broad except
+        # below.
+        raise
+    except Exception:
+        logger.warning("DOCX numbering.xml could not be parsed; extracting without list markers")
+        numbering_scheme = NumberingScheme()
+
+    p_tag = qn("w:p")
+    tbl_tag = qn("w:tbl")
+
+    parts: list[str] = []
+    for child in doc.element.body:
+        if child.tag == p_tag:
+            line = _docx_paragraph_line(Paragraph(child, doc), numbering_scheme)
+            if line:
+                parts.append(line)
+        elif child.tag == tbl_tag:
+            table_markdown = _docx_table_to_markdown(Table(child, doc))
+            if table_markdown:
+                parts.append(table_markdown)
+
+    return "\n\n".join(parts)
+
+
 def _extract_docx_text(content: bytes, filename: str = "") -> str:
-    """Extract text from DOCX content.
+    """Extract text from DOCX content, preserving document structure (#389):
+
+    - Body walked in DOCUMENT ORDER (paragraphs and tables interleaved) via
+      `_docx_body_to_text`, not paragraphs-then-tables.
+    - Heading/Title styles rendered as markdown ``#``..``######`` prefixes
+      (`_docx_heading_prefix`).
+    - Automatic list/outline numbering (``w:numPr``, direct or inherited via
+      style) resolved and rendered inline (e.g. ``1.1``, ``(a)``, ``-``) via
+      ``docx_numbering.NumberingScheme`` -- see that module for the format
+      support matrix and counter-reset rules.
+    - Tables rendered as GitHub-flavoured markdown tables
+      (`_docx_table_to_markdown`).
+
+    Before #389 this returned ``"\\n\\n".join(p.text for p in doc.paragraphs
+    if p.text.strip())`` -- table content, heading structure, and every
+    rendered list number were all silently absent from the extracted text.
 
     Wrapped (review follow-up on #118/#119) so a mismatched OOXML sibling --
     see inh_contracts.file_types's docx entry comment: the shared ZIP magic
@@ -484,6 +713,18 @@ def _extract_docx_text(content: bytes, filename: str = "") -> str:
     """
     try:
         from docx import Document
+
+        # Imported here (not module top-level) for the exact same reason as
+        # `Document` itself: this whole function must degrade to the
+        # `MissingExtractionDependency` ApplicationError below when
+        # python-docx isn't installed, never a bare `ModuleNotFoundError` at
+        # `extract.py` IMPORT time. `docx_numbering` itself only depends on
+        # `docx`, so it is safe to import in the same try -- if `docx` just
+        # imported successfully, so will this.
+        from src.temporal.activities.docx_numbering import (  # noqa: F401
+            NumberingScheme,
+            resolve_paragraph_num_id_ilvl,
+        )
     except ImportError:
         raise ApplicationError(
             "python-docx not available for DOCX extraction",
@@ -529,19 +770,18 @@ def _extract_docx_text(content: bytes, filename: str = "") -> str:
         ) from e
 
     # Scoped to ONLY `Document()` construction above (#215 review follow-up:
-    # a version of this fix that also wrapped the paragraph-iteration
-    # comprehension below would have turned a `MemoryError` from a large/
-    # pathological document into `non_retryable=True` -- permanently
-    # dead-lettering a load-dependent failure a retry, possibly on a
-    # less-contended worker, could plausibly resolve, instead of the
-    # transient failure it actually is). Mirrors `_extract_pdf_text`'s own
-    # page-iteration loop and `_extract_xlsx_text`'s row-iteration loop,
-    # neither of which is wrapped in a broad except either -- same accepted
-    # tradeoff: a corruption localized to one paragraph that python-docx only
-    # discovers lazily during iteration retries under the default policy
-    # rather than failing once.
-    paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
-    return "\n\n".join(paragraphs)
+    # a version of this fix that also wrapped the body walk below would have
+    # turned a `MemoryError` from a large/pathological document into
+    # `non_retryable=True` -- permanently dead-lettering a load-dependent
+    # failure a retry, possibly on a less-contended worker, could plausibly
+    # resolve, instead of the transient failure it actually is). Mirrors
+    # `_extract_pdf_text`'s own page-iteration loop and `_extract_xlsx_text`'s
+    # row-iteration loop, neither of which is wrapped in a broad except
+    # either -- same accepted tradeoff: a corruption localized to one
+    # paragraph/table that python-docx only discovers lazily while
+    # `_docx_body_to_text` walks `doc.element.body` retries under the
+    # default policy rather than failing once.
+    return _docx_body_to_text(doc)
 
 
 # Cost guards for XLSX extraction (#118 issue requirement: "cap evaluated

@@ -8,6 +8,7 @@ All notable changes to Inherent are documented here. The format follows
 ### Changed
 
 - `inherent` CLI version is `0.7.1rc1`, the first prerelease published to TestPyPI through the per-package Trusted Publisher environments. (#388, #386)
+- DOCX/PDF extraction now preserves document structure instead of flattening it: DOCX walks paragraphs and tables in document order, renders heading/title styles as markdown headings, resolves automatic outline/list numbering (decimal, letter, roman, bullet) inline, and renders tables as markdown tables; PDF extraction keeps per-page line breaks intact and conservatively rejoins line-wrap hyphenation. (#389)
 
 ## [0.7.1] — 2026-09-25
 
