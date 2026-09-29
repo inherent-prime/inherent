@@ -1,6 +1,6 @@
 [project]
 name = "inherent"
-version = "0.7.1rc1"
+version = "0.7.1"
 description = "Command-line client for the Inherent agent memory stack"
 readme = "Readme.md"
 requires-python = ">=3.11"
