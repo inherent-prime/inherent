@@ -386,6 +386,7 @@ class DocumentIngestionWorkflow:
                         workflow_start_time=workflow_start_time,
                         storage_bucket=input.storage_bucket,
                         storage_url=input.storage_url,
+                        uploaded_by=input.uploaded_by,
                     ),
                     start_to_close_timeout=timedelta(seconds=15),
                     retry_policy=RetryPolicy(
@@ -562,6 +563,7 @@ class DocumentIngestionWorkflow:
                 text_length=extract_output.text_length,
                 processing_time_ms=processing_time_ms,
                 tenant_id=self._tenant_id,
+                uploaded_by=input.uploaded_by,
                 # Source link (inherent#391): carried through to the store
                 # activities unchanged.
                 source_url=input.source_url,

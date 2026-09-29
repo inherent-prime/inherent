@@ -131,7 +131,7 @@ class TestVerifyOAuthToken:
 
 
 class TestPrincipal:
-    def test_from_api_key_and_from_oauth_claims_share_one_shape(self):
+    async def test_from_api_key_and_from_oauth_claims_share_one_shape(self):
         """The seam #309 hangs entitlement lookups off (#295 design
         constraint #5): both identity sources resolve into the SAME
         dataclass shape, distinguished only by principal_type."""
@@ -150,7 +150,7 @@ class TestPrincipal:
         claims = __import__("src.services.auth", fromlist=["OAuthClaims"]).OAuthClaims(
             subject="oauth-user-123", scopes=frozenset({"kb:read"})
         )
-        from_oauth = Principal.from_oauth_claims(claims)
+        from_oauth = await Principal.from_oauth_claims(claims)
         assert from_oauth.principal_type == "oauth"
         assert from_oauth.principal_id == "oauth-user-123"
         assert from_oauth.has_scope("kb:read")
@@ -400,15 +400,15 @@ class TestTokenNeverLogged:
 # before OAUTH_SUBJECT_USERS (a static operator mapping), both defaulting to
 # "no link" so an unconfigured deployment is unaffected.
 class TestOAuthIdentityResolution:
-    def test_no_config_resolves_to_no_identity(self):
+    async def test_no_config_resolves_to_no_identity(self):
         """Byte-for-byte today's (pre-follow-up) behaviour: with neither
         setting configured, resolved_user_id is None."""
         from src.services.auth import OAuthClaims, resolve_oauth_user
 
         claims = OAuthClaims(subject="oauth-user-123", scopes=frozenset({"kb:read"}), raw={})
-        assert resolve_oauth_user(claims) is None
+        assert await resolve_oauth_user(claims) is None
 
-    def test_user_id_claim_resolves_directly(self, monkeypatch):
+    async def test_user_id_claim_resolves_directly(self, monkeypatch):
         from src.services.auth import OAuthClaims, resolve_oauth_user
 
         monkeypatch.setattr(settings, "oauth_user_id_claim", "inherent_user_id")
@@ -417,9 +417,9 @@ class TestOAuthIdentityResolution:
             scopes=frozenset({"kb:read"}),
             raw={"inherent_user_id": "user-42"},
         )
-        assert resolve_oauth_user(claims) == "user-42"
+        assert await resolve_oauth_user(claims) == "user-42"
 
-    def test_user_id_claim_absent_from_token_falls_through(self, monkeypatch):
+    async def test_user_id_claim_absent_from_token_falls_through(self, monkeypatch):
         """OAUTH_USER_ID_CLAIM is set but THIS token doesn't carry it --
         falls through to OAUTH_SUBJECT_USERS, not an error."""
         from src.services.auth import OAuthClaims, resolve_oauth_user
@@ -427,23 +427,23 @@ class TestOAuthIdentityResolution:
         monkeypatch.setattr(settings, "oauth_user_id_claim", "inherent_user_id")
         monkeypatch.setattr(settings, "_oauth_subject_users", {"oauth-user-123": "user-fallback"})
         claims = OAuthClaims(subject="oauth-user-123", scopes=frozenset(), raw={})
-        assert resolve_oauth_user(claims) == "user-fallback"
+        assert await resolve_oauth_user(claims) == "user-fallback"
 
-    def test_subject_users_mapping_resolves(self, monkeypatch):
+    async def test_subject_users_mapping_resolves(self, monkeypatch):
         from src.services.auth import OAuthClaims, resolve_oauth_user
 
         monkeypatch.setattr(settings, "_oauth_subject_users", {"oauth-user-123": "user-99"})
         claims = OAuthClaims(subject="oauth-user-123", scopes=frozenset(), raw={})
-        assert resolve_oauth_user(claims) == "user-99"
+        assert await resolve_oauth_user(claims) == "user-99"
 
-    def test_unmapped_subject_resolves_to_none(self, monkeypatch):
+    async def test_unmapped_subject_resolves_to_none(self, monkeypatch):
         from src.services.auth import OAuthClaims, resolve_oauth_user
 
         monkeypatch.setattr(settings, "_oauth_subject_users", {"someone-else": "user-99"})
         claims = OAuthClaims(subject="oauth-user-123", scopes=frozenset(), raw={})
-        assert resolve_oauth_user(claims) is None
+        assert await resolve_oauth_user(claims) is None
 
-    def test_claim_wins_over_mapping_when_both_configured(self, monkeypatch):
+    async def test_claim_wins_over_mapping_when_both_configured(self, monkeypatch):
         from src.services.auth import OAuthClaims, resolve_oauth_user
 
         monkeypatch.setattr(settings, "oauth_user_id_claim", "inherent_user_id")
@@ -455,14 +455,14 @@ class TestOAuthIdentityResolution:
             scopes=frozenset(),
             raw={"inherent_user_id": "user-from-claim"},
         )
-        assert resolve_oauth_user(claims) == "user-from-claim"
+        assert await resolve_oauth_user(claims) == "user-from-claim"
 
-    def test_principal_from_oauth_claims_carries_resolved_user_id(self, monkeypatch):
+    async def test_principal_from_oauth_claims_carries_resolved_user_id(self, monkeypatch):
         from src.services.auth import OAuthClaims
 
         monkeypatch.setattr(settings, "_oauth_subject_users", {"oauth-user-123": "user-99"})
         claims = OAuthClaims(subject="oauth-user-123", scopes=frozenset({"kb:read"}), raw={})
-        principal = Principal.from_oauth_claims(claims)
+        principal = await Principal.from_oauth_claims(claims)
         assert principal.resolved_user_id == "user-99"
 
     def test_principal_from_api_key_resolved_user_id_is_its_own_user_id(self):

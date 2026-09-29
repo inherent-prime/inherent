@@ -326,3 +326,18 @@ class TestClaimOrderingIsMonotonic:
             "step by A's stale, late-arriving claim -- the exact inversion "
             "the follow-up review flagged"
         )
+
+
+@pytest.mark.asyncio
+async def test_activity_forwards_uploaded_by_next_to_the_owner_user_id():
+    """prime#331: user_id is the workspace owner's tenant; the actual uploader
+    travels separately so member uploads stay attributable."""
+    db = MagicMock()
+    db.create_pending_document = AsyncMock(return_value=True)
+    input_ = _input()
+    input_.uploaded_by = "member-1"
+    with patch("src.temporal.shared_services.get_db_service", return_value=db):
+        await create_pending_document(input_)
+    kwargs = db.create_pending_document.await_args.kwargs
+    assert kwargs["user_id"] == "u"
+    assert kwargs["uploaded_by"] == "member-1"

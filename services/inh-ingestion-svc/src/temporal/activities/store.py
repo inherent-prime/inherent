@@ -155,6 +155,7 @@ async def store_in_postgresql(input: StoreDocumentInput) -> StoreDocumentOutput:
             # Source link (inherent#391): carried through from the workflow
             # input so store_processed_document can persist it per chunk.
             source_url=input.source_url,
+            uploaded_by=input.uploaded_by,
         )
 
         # #364: out-parameter that store_processed_document fills in with

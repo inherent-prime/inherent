@@ -322,6 +322,11 @@ class Settings(BaseSettings):
     # so the path is not a second source of truth to keep in sync.
     mongodb_uri: str = Field(DEFAULT_MONGODB_URI, alias="MONGODB_URI")
     mongodb_db_name: str = Field("main", alias="MONGODB_DB_NAME")
+    # Team workspaces (prime#331): documents are stored under the workspace
+    # OWNER's tenant, looked up from Mongo `workspaces.user_id` on every
+    # ingest (see src/services/tenant_owner.py). Turn off only for a
+    # deployment that runs without Mongo, where the event's user_id is used.
+    workspace_owner_lookup_enabled: bool = Field(True, alias="WORKSPACE_OWNER_LOOKUP_ENABLED")
 
     # One-shot release-stack bootstrap. Required identity values stay optional
     # in the shared model because worker/migrate modes do not consume them;

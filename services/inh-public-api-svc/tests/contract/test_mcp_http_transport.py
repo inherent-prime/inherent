@@ -323,7 +323,7 @@ class TestHttpWorkspaceScoping:
         authorization_failed, never reaching get_documents for ws-b."""
         key = _key(["read"], workspace_id="ws-a")
         db = AsyncMock()
-        db.user_owns_workspace_in_mongo = AsyncMock(return_value=True)
+        db.user_can_access_workspace_in_mongo = AsyncMock(return_value=True)
         db.get_documents = AsyncMock()  # spy: must not be called for ws-b
 
         with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)):
@@ -337,7 +337,7 @@ class TestHttpWorkspaceScoping:
     async def test_scoped_key_can_list_its_own_workspace(self, sample_document):
         key = _key(["read"], workspace_id="ws-a")
         db = AsyncMock()
-        db.user_owns_workspace_in_mongo = AsyncMock(return_value=True)
+        db.user_can_access_workspace_in_mongo = AsyncMock(return_value=True)
         db.get_documents = AsyncMock(return_value=([sample_document], 1))
 
         with patch.object(mcp_server, "get_database", AsyncMock(return_value=db)):

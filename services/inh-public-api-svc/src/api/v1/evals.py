@@ -21,6 +21,7 @@ from src.models.evals import (
     StartRunRequest,
 )
 from src.services.auth import ResolvedAuth, resolve_workspace_search, resolve_workspace_write
+from src.services.data_plane import data_plane_user_id
 from src.services.database import DatabaseService, get_database
 from src.services.eval_feedback import EventNotFoundError, submit_feedback
 from src.services.eval_runner import execute_run, get_run_report, start_run
@@ -183,7 +184,9 @@ async def start_eval_run(
         search_service,
         run_id=run_id,
         workspace_id=workspace_id,
-        user_id=auth.key_info.user_id,
+        # The eval run only searches, so it needs the workspace OWNER's tenant
+        # (prime#331); the run itself is not attributed by this id.
+        user_id=await data_plane_user_id(database, workspace_id, auth.key_info.user_id),
         case_ids=case_ids,
         since=since,
     )

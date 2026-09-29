@@ -42,6 +42,7 @@ async def create_pending_document(input: CreatePendingDocumentInput) -> bool:
         workflow_start_time=input.workflow_start_time,
         storage_bucket=input.storage_bucket,
         storage_url=input.storage_url,
+        uploaded_by=input.uploaded_by,
     )
     logger.info(
         "Created pending document row and claimed fencing token",

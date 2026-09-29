@@ -11,7 +11,7 @@ import hashlib
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, AsyncGenerator
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Iterable
 
 from sqlalchemy import and_, bindparam, column, or_, select, table, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -20,6 +20,12 @@ from src.config import settings
 from src.models.api_key import APIKeyInfo
 from src.models.document import Document, DocumentChunk
 from src.services.metrics import record_workspace_ownership_lookup_degraded
+from src.services.workspace_roles import (
+    VALID_ROLES,
+    WRITE_ROLES,
+    WorkspaceRole,
+    role_in_workspace_doc,
+)
 from src.utils import get_logger
 
 if TYPE_CHECKING:
@@ -49,6 +55,48 @@ def _merge_chunk_provenance(row) -> dict:
             ingested.isoformat() if hasattr(ingested, "isoformat") else ingested,
         )
     return meta
+
+
+def _user_id_variants(user_id: str) -> list[Any]:
+    """``user_id`` as stored by either writer: Mongoose keeps ObjectId-typed
+    refs as ``bson.ObjectId``, other writers keep strings. Match both."""
+    from bson import ObjectId
+    from bson.errors import InvalidId
+
+    variants: list[Any] = [user_id]
+    try:
+        variants.append(ObjectId(user_id))
+    except (InvalidId, TypeError, ValueError):
+        pass  # not ObjectId-shaped; string match only
+    return variants
+
+
+def _id_variants(ids: Iterable[str]) -> list[Any]:
+    """Every id as both a string and (when ObjectId-shaped) an ObjectId."""
+    variants: list[Any] = []
+    for value in ids:
+        variants.extend(_user_id_variants(value))
+    return variants
+
+
+def _workspace_access_filter(user_id: str) -> dict[str, Any]:
+    """Mongo filter for workspaces ``user_id`` may act on: owner OR member
+    with a recognised role (prime#331). Documents without ``members`` only
+    ever match through ``user_id``, exactly as before."""
+    user_ids = _user_id_variants(user_id)
+    return {
+        "$or": [
+            {"user_id": {"$in": user_ids}},
+            {
+                "members": {
+                    "$elemMatch": {
+                        "user_id": {"$in": user_ids},
+                        "role": {"$in": sorted(VALID_ROLES)},
+                    }
+                }
+            },
+        ]
+    }
 
 
 class DatabaseService:
@@ -511,8 +559,14 @@ class DatabaseService:
         storage_url: str | None = None,
         content_hash: str | None = None,
         metadata: dict | None = None,
+        uploaded_by: str | None = None,
     ) -> None:
         """Persist (or reset) a 'pending' row in processed_documents.
+
+        ``user_id`` is the data-plane identity (the workspace owner, whose
+        Weaviate tenant holds the vectors); ``uploaded_by`` is the caller who
+        actually uploaded, kept for attribution. On re-upload/refresh a NULL
+        ``uploaded_by`` preserves the stored value (COALESCE).
 
         This is written at upload time — BEFORE the MQ publish — so that a
         GET /v1/documents/{id} immediately after upload returns the document
@@ -534,12 +588,12 @@ class DatabaseService:
                 text(
                     """
                     INSERT INTO processed_documents (
-                        document_id, workspace_id, user_id,
+                        document_id, workspace_id, user_id, uploaded_by,
                         filename, original_filename, content_type, size_bytes,
                         storage_backend, storage_path, storage_bucket, storage_url,
                         content_hash, status, error_message, chunk_count, metadata
                     ) VALUES (
-                        :document_id, :workspace_id, :user_id,
+                        :document_id, :workspace_id, :user_id, :uploaded_by,
                         :filename, :original_filename, :content_type, :size_bytes,
                         :storage_backend, :storage_path, :storage_bucket, :storage_url,
                         :content_hash, 'pending', NULL, 0, CAST(:metadata AS JSONB)
@@ -547,6 +601,9 @@ class DatabaseService:
                     ON CONFLICT (document_id) DO UPDATE SET
                         workspace_id = EXCLUDED.workspace_id,
                         user_id = EXCLUDED.user_id,
+                        uploaded_by = COALESCE(
+                            EXCLUDED.uploaded_by, processed_documents.uploaded_by
+                        ),
                         filename = EXCLUDED.filename,
                         original_filename = EXCLUDED.original_filename,
                         content_type = EXCLUDED.content_type,
@@ -569,6 +626,7 @@ class DatabaseService:
                     "document_id": document_id,
                     "workspace_id": workspace_id,
                     "user_id": user_id,
+                    "uploaded_by": uploaded_by,
                     "filename": filename,
                     "original_filename": original_filename,
                     "content_type": content_type,
@@ -722,7 +780,7 @@ class DatabaseService:
             result = await session.execute(
                 text(
                     """
-                    SELECT document_id, workspace_id, user_id,
+                    SELECT document_id, workspace_id, user_id, uploaded_by,
                            filename, original_filename, content_type, size_bytes,
                            storage_backend, storage_path, storage_bucket, storage_url
                     FROM processed_documents
@@ -1249,11 +1307,16 @@ class DatabaseService:
         """Get all workspace IDs the user has access to.
 
         Truth source is the MongoDB ``workspaces`` collection (control plane,
-        owned by intg-svc). The previous implementation queried PostgreSQL's
-        ``processed_documents`` table — but that only knows about workspaces
-        that already have at least one ingested document. A brand-new
-        workspace (zero docs) was invisible to this check, producing a 403
-        on the user's first upload — a chicken-and-egg auth bug.
+        owned by intg-svc): a workspace is listed when the user is its owner
+        (``user_id``) OR appears in its ``members`` (prime#331; any role -
+        read access is common to every role, see ``workspace_roles``).
+        Workspaces written before members existed have no ``members`` field
+        and behave exactly as before. The previous implementation queried
+        PostgreSQL's ``processed_documents`` table — but that only knows about
+        workspaces that already have at least one ingested document. A
+        brand-new workspace (zero docs) was invisible to this check,
+        producing a 403 on the user's first upload — a chicken-and-egg auth
+        bug.
 
         We also union with the PG-side workspaces (any workspace the user has
         ever ingested into) as a defensive fallback for legacy data created
@@ -1264,30 +1327,29 @@ class DatabaseService:
         validating a specific binding (#138 blocker-2: do not use this to
         check "does user X still own workspace Y" — a transferred workspace's
         old ``processed_documents`` rows are never deleted, so this method
-        would keep saying yes. Use ``user_owns_workspace_in_mongo`` for that).
+        would keep saying yes. Use ``user_can_access_workspace_in_mongo`` for
+        that).
+
+        The PG fallback is for OWNERS of legacy data only. A workspace whose
+        Mongo document HAS a ``members`` field is membership-managed, so a
+        user removed from it must not be re-admitted by the uploads they made
+        while they were a member (prime#331: removal revokes on the next
+        request) — those PG-only ids are dropped.
         """
         from src.services.mongo_client import get_mongo_client
 
-        ws_ids: set[str] = set()
+        mongo_ids: set[str] = set()
+        pg_ids: set[str] = set()
+        mongo_ok = False
 
-        # Primary: Mongo workspaces.user_id ownership (canonical).
-        # Mongoose stores ObjectId-typed refs as bson.ObjectId, not strings.
-        # We OR both shapes so the lookup is robust to either schema.
+        # Primary: Mongo workspaces (owner or member; canonical).
         try:
-            from bson import ObjectId
-            from bson.errors import InvalidId
-
-            user_id_filters: list[dict[str, Any]] = [{"user_id": user_id}]
-            try:
-                user_id_filters.append({"user_id": ObjectId(user_id)})
-            except (InvalidId, TypeError, ValueError):
-                pass  # caller passed a non-ObjectId-shaped string; string match only
-
             client = get_mongo_client()
             db = client[settings.mongodb_db_name]
-            cursor = db["workspaces"].find({"$or": user_id_filters}, {"_id": 1})
+            cursor = db["workspaces"].find(_workspace_access_filter(user_id), {"_id": 1})
             async for doc in cursor:
-                ws_ids.add(str(doc["_id"]))
+                mongo_ids.add(str(doc["_id"]))
+            mongo_ok = True
         except Exception as exc:
             logger.warning(
                 "mongo_workspace_lookup_failed",
@@ -1315,7 +1377,7 @@ class DatabaseService:
                     {"user_id": user_id},
                 )
                 for row in result.fetchall():
-                    ws_ids.add(str(row.workspace_id))
+                    pg_ids.add(str(row.workspace_id))
         except Exception as exc:
             logger.warning(
                 "pg_workspace_fallback_lookup_failed",
@@ -1325,11 +1387,69 @@ class DatabaseService:
             # Same observability gap as the Mongo branch above (#184).
             record_workspace_ownership_lookup_degraded(source="postgres_fallback")
 
-        return list(ws_ids)
+        pg_only = pg_ids - mongo_ids
+        if pg_only and mongo_ok:
+            pg_only -= await self._membership_managed_workspace_ids(pg_only)
 
-    async def user_owns_workspace_in_mongo(self, user_id: str, workspace_id: str) -> bool:
-        """Authoritative, MONGO-ONLY ownership check for ONE (user, workspace)
-        pair (#138 blocker-2 fix).
+        return list(mongo_ids | pg_only)
+
+    async def _membership_managed_workspace_ids(self, workspace_ids: set[str]) -> set[str]:
+        """The subset of ``workspace_ids`` whose Mongo document has a
+        ``members`` field, i.e. workspaces where Mongo (not legacy upload
+        history) decides who has access. Log-and-swallow like the listing it
+        serves: on failure nothing is dropped (today's behaviour)."""
+        from src.services.mongo_client import get_mongo_client
+
+        try:
+            collection = get_mongo_client()[settings.mongodb_db_name]["workspaces"]
+            cursor = collection.find(
+                {"_id": {"$in": _id_variants(workspace_ids)}, "members": {"$exists": True}},
+                {"_id": 1},
+            )
+            return {str(doc["_id"]) async for doc in cursor}
+        except Exception as exc:
+            logger.warning("mongo_membership_managed_lookup_failed", error=str(exc))
+            record_workspace_ownership_lookup_degraded(source="mongo")
+            return set()
+
+    async def get_workspace_owners_in_mongo(self, workspace_ids: Iterable[str]) -> dict[str, str]:
+        """``{workspace_id: owner user_id}`` from Mongo ``workspaces.user_id``,
+        for the workspaces Mongo knows about (absent ids are simply missing
+        from the result: legacy/standalone workspaces with no control plane
+        record).
+
+        Live (never cached) and RAISES on Mongo failure, like the other
+        authorization reads: it decides whose Weaviate tenant a request
+        touches, and a silent fallback to the caller's own tenant would put a
+        member's data into a private tenant nobody else can see.
+        """
+        from src.services.mongo_client import get_mongo_client
+
+        ids = list(workspace_ids)
+        if not ids:
+            return {}
+        collection = get_mongo_client()[settings.mongodb_db_name]["workspaces"]
+        try:
+            cursor = collection.find({"_id": {"$in": _id_variants(ids)}}, {"_id": 1, "user_id": 1})
+            owners: dict[str, str] = {}
+            async for doc in cursor:
+                if doc.get("user_id") is None:
+                    raise RuntimeError(f"workspace {doc['_id']} has no owner (user_id)")
+                owners[str(doc["_id"])] = str(doc["user_id"])
+            return owners
+        except Exception:
+            record_workspace_ownership_lookup_degraded(source="mongo_ownership_check")
+            raise
+
+    async def get_workspace_role_in_mongo(
+        self, user_id: str, workspace_id: str
+    ) -> WorkspaceRole | None:
+        """The role ``user_id`` holds in ONE workspace, from Mongo only.
+
+        ``"owner"`` for ``workspaces.user_id``, the ``members`` entry's role
+        otherwise, ``None`` for a stranger or an unknown workspace. This is
+        the authoritative, MONGO-ONLY check for a specific (user, workspace)
+        pair (#138 blocker-2 fix, extended for members in prime#331).
 
         This is deliberately NOT ``workspace_id in await
         self.get_user_workspace_ids(user_id)``. ``get_user_workspace_ids``
@@ -1337,13 +1457,16 @@ class DatabaseService:
         workspace the user has EVER ingested into) for listing convenience —
         useful for "which workspaces can I browse", wrong for "does this key's
         binding still hold". A workspace transferred away from a user in
-        Mongo does not delete that user's old ``processed_documents`` rows,
-        so the union would keep re-granting a workspace-scoped key access to
-        a workspace its owner no longer owns — exactly the hole this method
-        exists to close. If a workspace is worth protecting it has content,
-        so the union's blind spot (workspaces with zero ingested documents)
-        is irrelevant here and its false-positive risk (stale rows for
-        transferred workspaces) is the case that matters most.
+        Mongo (or a member removed from it) does not delete that user's old
+        ``processed_documents`` rows, so the union would keep re-granting a
+        workspace-scoped key access to a workspace the user no longer has —
+        exactly the hole this method exists to close. If a workspace is worth
+        protecting it has content, so the union's blind spot (workspaces with
+        zero ingested documents) is irrelevant here and its false-positive
+        risk (stale rows) is the case that matters most.
+
+        Nothing is cached: removing a member in Mongo revokes access on the
+        very next request, the same posture as ownership always had.
 
         Any Mongo failure RAISES — this method does NOT log-and-swallow like
         ``get_user_workspace_ids`` does. A workspace-scoped key's binding is
@@ -1355,34 +1478,15 @@ class DatabaseService:
         MCP `Error: ...`) instead of granting or denying access on stale
         information.
         """
-        from bson import ObjectId
-        from bson.errors import InvalidId
-
         from src.services.mongo_client import get_mongo_client
-
-        # Mongoose stores ObjectId-typed refs as bson.ObjectId, not strings,
-        # for BOTH the document's own _id and the user_id field — OR both
-        # shapes for each so the check is robust to either schema (mirrors
-        # get_user_workspace_ids's handling of user_id above).
-        user_id_filters: list[Any] = [user_id]
-        try:
-            user_id_filters.append(ObjectId(user_id))
-        except (InvalidId, TypeError, ValueError):
-            pass
-
-        workspace_id_filters: list[Any] = [workspace_id]
-        try:
-            workspace_id_filters.append(ObjectId(workspace_id))
-        except (InvalidId, TypeError, ValueError):
-            pass
 
         client = get_mongo_client()
         db = client[settings.mongodb_db_name]
         try:
             doc = await db["workspaces"].find_one(
                 {
-                    "_id": {"$in": workspace_id_filters},
-                    "user_id": {"$in": user_id_filters},
+                    "_id": {"$in": _id_variants([workspace_id])},
+                    **_workspace_access_filter(user_id),
                 }
             )
         except Exception:
@@ -1394,7 +1498,82 @@ class DatabaseService:
             # before this metric existed.
             record_workspace_ownership_lookup_degraded(source="mongo_ownership_check")
             raise
-        return doc is not None
+        # Re-derive the role from the returned document instead of trusting
+        # the filter alone: it also drops members with an unknown role.
+        return role_in_workspace_doc(doc, user_id) if doc else None
+
+    async def user_can_access_workspace_in_mongo(
+        self, user_id: str, workspace_id: str, *, write: bool = False
+    ) -> bool:
+        """Authoritative, Mongo-only "may ``user_id`` act on ``workspace_id``?"
+
+        True for the owner and for any member (read/search). With
+        ``write=True`` a ``viewer`` is refused (see ``workspace_roles`` for
+        the matrix). Raises on Mongo failure — see
+        ``get_workspace_role_in_mongo``.
+        """
+        role = await self.get_workspace_role_in_mongo(user_id, workspace_id)
+        if role is None:
+            return False
+        return role in WRITE_ROLES if write else True
+
+    async def get_read_only_workspace_ids_in_mongo(self, user_id: str) -> set[str]:
+        """Workspaces where ``user_id`` is only a ``viewer`` (not the owner).
+
+        Used to take read-only workspaces out of a user-scoped key's WRITE
+        set. Raises on Mongo failure for the same reason
+        ``get_workspace_role_in_mongo`` does: a write decision must not be
+        made on a listing that silently lost the viewer information.
+        """
+        from src.services.mongo_client import get_mongo_client
+
+        collection = get_mongo_client()[settings.mongodb_db_name]["workspaces"]
+        try:
+            cursor = collection.find(
+                {"members": {"$elemMatch": {"user_id": {"$in": _user_id_variants(user_id)}}}},
+                {"_id": 1, "user_id": 1, "members": 1},
+            )
+            return {
+                str(doc["_id"])
+                async for doc in cursor
+                if role_in_workspace_doc(doc, user_id) == "viewer"
+            }
+        except Exception:
+            record_workspace_ownership_lookup_degraded(source="mongo_ownership_check")
+            raise
+
+    async def find_users_by_subject(self, subject: str) -> list[tuple[str, bool]]:
+        """Look up the user document(s) whose configured field equals an OAuth
+        ``subject`` (prime#329) -> ``[(inherent_user_id, is_deleted), ...]``.
+
+        Driven entirely by ``OAUTH_SUBJECT_LOOKUP_*`` settings. The lookup
+        field must be indexed by the collection's owner (prime keeps
+        ``users.clerk_id`` unique+sparse indexed), so this is one indexed
+        point read per OAuth request. NOT cached, and RAISES on Mongo
+        failure: a deleted user must stop resolving on the next request, and
+        an outage must not silently change who a token maps to.
+        """
+        from src.services.mongo_client import get_mongo_client
+
+        collection_name = settings.oauth_subject_lookup_collection
+        field = settings.oauth_subject_lookup_field
+        id_field = settings.oauth_subject_lookup_id_field
+        deleted_field = settings.oauth_subject_lookup_deleted_field
+        assert collection_name and field  # callers check oauth_subject_lookup_enabled
+
+        collection = get_mongo_client()[settings.mongodb_db_name][collection_name]
+        projection = {id_field: 1, **({deleted_field: 1} if deleted_field else {})}
+        # `subject` is a str (verified JWT claim), so it is matched as a
+        # literal value and can never be read as a query operator.
+        cursor = collection.find({field: subject}, projection).limit(10)
+        matches: list[tuple[str, bool]] = []
+        async for doc in cursor:
+            raw_id = doc.get(id_field)
+            if raw_id is None:
+                continue
+            is_deleted = bool(deleted_field) and doc.get(deleted_field) is not None
+            matches.append((str(raw_id), is_deleted))
+        return matches
 
     async def get_document_count_for_workspaces(self, workspace_ids: list[str]) -> int:
         """Total live document count across ``workspace_ids`` (#309).

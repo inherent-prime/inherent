@@ -190,14 +190,39 @@ friendly-error contract for an invalid filter.
 ("mapping the token's `sub` to an Inherent user/workspace") to "the
 commercial platform". That made an OAuth caller -- which is how claude.ai's
 custom connectors ALWAYS connect -- unable to execute a single tool,
-unusable for #392's actual point. Two new, GENERIC, config-first settings
-close this in the engine, with a clean seam for the platform to take over
+unusable for #392's actual point. Three GENERIC, config-first identity links
+(a claim, a Mongo lookup, a static map) close this in the engine, with a clean seam for the platform to take over
 later without any further engine change:
 
 | Setting | Env var | Checked | Value |
 | --- | --- | --- | --- |
 | Claim carrying the Inherent user id | `OAUTH_USER_ID_CLAIM` | first | e.g. `inherent_user_id` -- if the verified token itself carries a non-empty string under this claim name, it is used directly. This is the seam: the day the authorization server is configured to mint tokens carrying the platform's own user id under this claim, resolution needs no further engine change at all. |
-| Static subject -> user mapping | `OAUTH_SUBJECT_USERS` | if (1) didn't resolve | `"sub_1=user_1,sub_2=user_2"` -- a hand-onboarded pilot's operator-maintained mapping, the same shape as `WORKSPACE_VERTICAL_PACKS` (#390). Malformed values fail the service to start, like that setting. |
+| Mongo user lookup (prime#329) | `OAUTH_SUBJECT_LOOKUP_COLLECTION` + `OAUTH_SUBJECT_LOOKUP_FIELD` (+ `OAUTH_SUBJECT_LOOKUP_ID_FIELD`, default `_id`; `OAUTH_SUBJECT_LOOKUP_DELETED_FIELD`, default `deleted_at`) | if (1) didn't resolve | e.g. `users` / `clerk_id` / `_id`: finds the user document in the same Mongo database (`MONGODB_DB_NAME`) whose field equals the token's `sub` and uses its id (an ObjectId is stringified). See the rules below. All unset = step skipped. |
+| Static subject -> user mapping | `OAUTH_SUBJECT_USERS` | if (1) and (2) didn't decide | `"sub_1=user_1,sub_2=user_2"` -- a hand-onboarded pilot's operator-maintained mapping, the same shape as `WORKSPACE_VERTICAL_PACKS` (#390). Malformed values fail the service to start, like that setting. |
+
+Rules of the Mongo lookup (step 2):
+
+- **Exactly one live match resolves.** No match at all falls through to the
+  static map. More than one live match is ambiguous and does NOT resolve (and
+  the static map is not consulted -- an identity is never guessed).
+- **Soft-deleted users never resolve.** A user document whose
+  `OAUTH_SUBJECT_LOOKUP_DELETED_FIELD` (default `deleted_at`, matching the
+  platform's user model) is set to a non-null value is treated as deleted;
+  if that is the only match, the caller resolves to nothing and the static map
+  is not consulted, so a deleted account cannot come back through it. Set the
+  variable to an empty string to disable the check. A cancelled subscription
+  is not a deletion.
+- **No cache.** One indexed read per `/mcp` request, so a user deleted (or a
+  `clerk_id` changed) in Mongo stops resolving on the very next request. The
+  platform must keep the lookup field indexed (`users.clerk_id` is
+  `index: true, unique, sparse`).
+- **Fails closed.** If Mongo cannot be reached the request gets `503` (the
+  token is fine; retry) -- it does NOT fall through to the static map, because
+  during an outage the map could name a different user than the lookup would.
+  A token that carries `OAUTH_USER_ID_CLAIM` never needs Mongo.
+- **Names are validated at startup**: collection and field names must be
+  simple identifiers (letters, digits, `_`); the collection and field must be
+  set together.
 
 > **Security:** `OAUTH_USER_ID_CLAIM` grants that user's full data access to
 > whoever holds the token. Only point it at a claim the authorization server
@@ -214,7 +239,9 @@ through the exact same shape a request from an API key does:
 
 - **Workspace access**: unscoped (like a user-scoped API key) --
   `get_authorized_workspace_ids` for the resolved user_id, never a
-  workspace baked into the token itself.
+  workspace baked into the token itself. The user's workspace **role**
+  applies too: a viewer's token cannot reach a write tool on that
+  workspace even with `kb:write` (see `docs/access-control.md`).
 - **Permissions**: derived from the token's OWN granted scopes
   (`kb:read`/`kb:search`/`kb:write` -> `read`/`search`/`write`, the inverse
   of the scope map above) -- a read-only token cannot reach a
@@ -247,7 +274,7 @@ claude.ai, the operator sets, before pointing claude.ai at it:
 | The trusted authorization server | `OAUTH_AUTHORIZATION_SERVER` | the AS's issuer URL (e.g. your Clerk instance) -- published verbatim in `authorization_servers` and checked against every token's `iss` |
 | Advertised scopes | `OAUTH_SCOPES_SUPPORTED` | default `["kb:read", "kb:search"]` is fine for most deployments; write access arrives via a per-tool `insufficient_scope` step-up, never advertised upfront |
 | JWKS override (optional) | `OAUTH_JWKS_URL` | only if the AS does not publish JWKS at `<OAUTH_AUTHORIZATION_SERVER>/.well-known/jwks.json` |
-| **Identity link** (required to execute tools) | `OAUTH_USER_ID_CLAIM` or `OAUTH_SUBJECT_USERS` | see "OAuth callers can execute tools" below -- without one of these, claude.ai can authenticate and list tools but every `tools/call` is rejected |
+| **Identity link** (required to execute tools) | `OAUTH_USER_ID_CLAIM`, the `OAUTH_SUBJECT_LOOKUP_*` Mongo lookup (e.g. `users` / `clerk_id` for Clerk `sub`), or `OAUTH_SUBJECT_USERS` | see "OAuth callers can execute tools" above -- first one that resolves wins; without any, claude.ai can authenticate and list tools but every `tools/call` is rejected |
 
 With that set, claude.ai's discovery handshake finds:
 
@@ -269,7 +296,7 @@ With that set, claude.ai's discovery handshake finds:
 
 `tools/list` needs no identity link at all. `tools/call` DOES -- see "OAuth
 callers can execute tools" above for `OAUTH_USER_ID_CLAIM` /
-`OAUTH_SUBJECT_USERS`; without one of those configured (and matching this
+`OAUTH_SUBJECT_LOOKUP_*` / `OAUTH_SUBJECT_USERS`; without one of those configured (and matching this
 caller's token), every `tools/call` still gets a clear, honest rejection
 naming the two settings, never a fabricated identity.
 

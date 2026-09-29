@@ -108,13 +108,13 @@ async def test_list_workspaces_scoped_key_sees_only_bound_workspace() -> None:
     """Workspace-scoped key returns exactly its bound workspace, not the owner's full set.
 
     The authorization rule (#138): a workspace-scoped key is validated against
-    user_owns_workspace_in_mongo for its one workspace only.
+    user_can_access_workspace_in_mongo for its one workspace only.
     """
     workspace_id = "ws-bound"
     scoped_key = _scoped_key(workspace_id)
 
     mock_db = AsyncMock()
-    mock_db.user_owns_workspace_in_mongo = AsyncMock(return_value=True)
+    mock_db.user_can_access_workspace_in_mongo = AsyncMock(return_value=True)
 
     # Mock session
     mock_session = AsyncMock()

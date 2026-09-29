@@ -21,6 +21,7 @@ from src.services.audit_publisher import (
     publish_audit_event,
 )
 from src.services.auth import ResolvedAuth, resolve_workspace_search
+from src.services.data_plane import data_plane_user_id, data_plane_user_ids
 from src.services.database import get_database
 from src.services.eval_capture import (
     capture_enabled,
@@ -159,8 +160,10 @@ async def _expand_context_and_total_tokens(
     error is swallowed inside ContextWindowBuilder.expand(); total_tokens is
     still computed from whatever data is available.
 
-    Cross-tenant safety (#41): ``user_id`` is threaded into the context fetch so
-    neighbour chunks are scoped to the requesting user, not just the workspace.
+    Cross-tenant safety (#41): the tenant identity (the workspace owner,
+    resolved from the caller's ``user_id`` by ``data_plane_user_id``) is
+    threaded into the context fetch so neighbour chunks are scoped to the
+    workspace's tenant, not just the workspace.
     """
     if request.include_context and response.results and ctx_workspace_id:
         from src.services.context_window import ContextWindowBuilder
@@ -170,7 +173,7 @@ async def _expand_context_and_total_tokens(
         await builder.expand(
             matches=response.results,
             workspace_id=ctx_workspace_id,
-            user_id=user_id,
+            user_id=await data_plane_user_id(database, ctx_workspace_id, user_id),
             k=request.context_window,
         )
     response.total_tokens = _compute_total_tokens(response.results)
@@ -213,13 +216,16 @@ async def _search_workspaces_concurrently(
     query_vector = await asyncio.to_thread(search_service.embed_query_vector, request)
 
     semaphore = asyncio.Semaphore(settings.search_max_workspace_concurrency)
+    # Each workspace is searched in its OWNER's tenant (prime#331); `user_id`
+    # stays the caller and is only the fallback for legacy workspaces.
+    tenants = await data_plane_user_ids(await get_database(), workspace_ids, user_id)
 
     async def _search_one(ws_id: str) -> list[SearchResult]:
         async with semaphore:
             try:
                 resp = await search_service.search(
                     workspace_id=ws_id,
-                    user_id=user_id,
+                    user_id=tenants[ws_id],
                     request=request,
                     query_vector=query_vector,
                 )
@@ -385,9 +391,14 @@ async def search_documents(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     if workspace_id:
+        # Search in the workspace OWNER's tenant so a member sees the whole
+        # workspace (prime#331). Audit/capture below keep the real caller.
+        tenant_user_id = await data_plane_user_id(
+            await get_database(), workspace_id, auth.key_info.user_id
+        )
         response = await search_service.search(
             workspace_id=workspace_id,
-            user_id=auth.key_info.user_id,
+            user_id=tenant_user_id,
             request=request,
         )
 
@@ -395,7 +406,7 @@ async def search_documents(
         async def _retrieve_single(req: SearchRequest) -> tuple[list[SearchResult], float]:
             resp = await search_service.search(
                 workspace_id=workspace_id,
-                user_id=auth.key_info.user_id,
+                user_id=tenant_user_id,
                 request=req,
             )
             return resp.results, resp.processing_time_ms

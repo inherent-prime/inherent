@@ -11,7 +11,7 @@ mock the right one for what they're exercising:
   (Mongo UNION Postgres upload-history fallback) — mock via
   ``_patch_user_workspaces``.
 - A *workspace-scoped* key's binding is validated against
-  ``user_owns_workspace_in_mongo`` — a MONGO-ONLY membership check,
+  ``user_can_access_workspace_in_mongo`` — a MONGO-ONLY membership check,
   deliberately NOT the union above (see ``database.py`` for why: the union's
   Postgres fallback would keep re-granting a transferred workspace via its
   own stale upload-history rows) — mock via ``_patch_mongo_ownership``.
@@ -50,7 +50,7 @@ def _patch_user_workspaces(ws_ids: list[str], *, owns_binding: bool = True):
     """Patch the DB for a ``_resolve_workspace`` call.
 
     ``ws_ids`` backs ``get_user_workspace_ids`` (the user-scoped-key path).
-    ``owns_binding`` backs ``user_owns_workspace_in_mongo`` (the
+    ``owns_binding`` backs ``user_can_access_workspace_in_mongo`` (the
     workspace-scoped-key path) — defaults to True so tests that only care
     about a DIFFERENT branch (e.g. a header mismatch, which raises before the
     ownership check ever runs) don't need to think about it. Tests that
@@ -59,18 +59,18 @@ def _patch_user_workspaces(ws_ids: list[str], *, owns_binding: bool = True):
     """
     mock_db = AsyncMock()
     mock_db.get_user_workspace_ids = AsyncMock(return_value=ws_ids)
-    mock_db.user_owns_workspace_in_mongo = AsyncMock(return_value=owns_binding)
+    mock_db.user_can_access_workspace_in_mongo = AsyncMock(return_value=owns_binding)
     return patch("src.services.auth.get_database", AsyncMock(return_value=mock_db))
 
 
 def _patch_mongo_ownership(owns: bool):
-    """Patch the DB so ``user_owns_workspace_in_mongo`` returns *owns* — the
+    """Patch the DB so ``user_can_access_workspace_in_mongo`` returns *owns* — the
     workspace-scoped-key path's ONLY authorization input (#138 blocker-2).
     Does not configure ``get_user_workspace_ids`` at all, since a
     correctly-implemented scoped-key check must never call it.
     """
     mock_db = AsyncMock()
-    mock_db.user_owns_workspace_in_mongo = AsyncMock(return_value=owns)
+    mock_db.user_can_access_workspace_in_mongo = AsyncMock(return_value=owns)
     return patch("src.services.auth.get_database", AsyncMock(return_value=mock_db))
 
 
@@ -252,7 +252,7 @@ async def test_scoped_key_with_deleted_binding_fails_closed() -> None:
     """#138 blocker-2: a scoped key whose bound workspace the owner no longer
     owns (deleted/transferred in Mongo, the CANONICAL ownership source) must
     be rejected, not silently served. Mongo says the binding is NOT owned
-    (``user_owns_workspace_in_mongo`` returns False) — this is the ONLY input
+    (``user_can_access_workspace_in_mongo`` returns False) — this is the ONLY input
     the scoped-key check consults; trusting ``key_info.workspace_id``
     unconditionally would have let a stale binding through even with no
     header requesting anything different."""
@@ -295,13 +295,13 @@ async def test_scoped_key_with_no_owned_workspaces_fails_closed() -> None:
 @pytest.mark.asyncio
 async def test_scoped_key_binding_check_never_consults_the_union_helper() -> None:
     """#138 blocker-2 (the actual regression): a scoped key's binding
-    validation must call ``user_owns_workspace_in_mongo`` and must NEVER call
+    validation must call ``user_can_access_workspace_in_mongo`` and must NEVER call
     ``get_user_workspace_ids`` — the union helper that includes Postgres
     upload history. This is the mistake the previous round made: intersecting
     against the union re-admitted a workspace transferred away from its owner
     whenever the owner had ever uploaded to it (the realistic case, since a
     workspace worth protecting has content). Configuring ONLY
-    ``user_owns_workspace_in_mongo`` (no ``get_user_workspace_ids`` mock at
+    ``user_can_access_workspace_in_mongo`` (no ``get_user_workspace_ids`` mock at
     all) and asserting a successful resolution proves the union path is
     never touched — if it were, the unconfigured AsyncMock would still
     "work" (return a MagicMock, which is truthy in an `in` check only by
@@ -317,9 +317,11 @@ async def test_scoped_key_binding_check_never_consults_the_union_helper() -> Non
         status="active",
     )
     mock_db = AsyncMock()
-    mock_db.user_owns_workspace_in_mongo = AsyncMock(return_value=True)
+    mock_db.user_can_access_workspace_in_mongo = AsyncMock(return_value=True)
     with patch("src.services.auth.get_database", AsyncMock(return_value=mock_db)):
         resolved = await _resolve_workspace(key, None, required=False)
     assert resolved.workspace_id == "ws-a"
-    mock_db.user_owns_workspace_in_mongo.assert_awaited_once_with("user-1", "ws-a")
+    mock_db.user_can_access_workspace_in_mongo.assert_awaited_once_with(
+        "user-1", "ws-a", write=False
+    )
     mock_db.get_user_workspace_ids.assert_not_awaited()

@@ -66,6 +66,8 @@ def _make_mock_settings(**overrides):
         # Vertical pack binding (inherent#390 follow-up): a real dict, not a
         # MagicMock, so `.get(workspace_id)` returns real None by default.
         "workspace_vertical_packs": {},
+        # Team workspaces (prime#331): no Mongo in these tests.
+        "workspace_owner_lookup_enabled": False,
     }
     defaults.update(overrides)
     s = MagicMock()

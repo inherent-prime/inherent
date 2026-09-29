@@ -149,7 +149,7 @@ class TestQuotaExceededShape:
         set_entitlements_provider(_FixedProvider(Entitlements(max_documents=1)))
         key = _key(["read", "write"])
         db = AsyncMock()
-        db.user_owns_workspace_in_mongo = AsyncMock(return_value=True)
+        db.user_can_access_workspace_in_mongo = AsyncMock(return_value=True)
         db.get_document_count_for_workspaces = AsyncMock(return_value=1)
 
         with (
@@ -176,7 +176,7 @@ class TestQuotaDenialPrecedesHandler:
         set_entitlements_provider(_FixedProvider(Entitlements(max_documents=1)))
         key = _key(["read", "write"])
         db = AsyncMock()
-        db.user_owns_workspace_in_mongo = AsyncMock(return_value=True)
+        db.user_can_access_workspace_in_mongo = AsyncMock(return_value=True)
         db.get_document_count_for_workspaces = AsyncMock(return_value=1)
 
         with (
@@ -195,7 +195,7 @@ class TestQuotaDenialPrecedesHandler:
         set_entitlements_provider(_FixedProvider(Entitlements(max_documents=5)))
         key = _key(["read", "write"])
         db = AsyncMock()
-        db.user_owns_workspace_in_mongo = AsyncMock(return_value=True)
+        db.user_can_access_workspace_in_mongo = AsyncMock(return_value=True)
         db.get_document_count_for_workspaces = AsyncMock(return_value=1)
 
         with (
@@ -217,7 +217,7 @@ class TestWritesPerDayThroughDispatcher:
         set_entitlements_provider(_FixedProvider(Entitlements(writes_per_day=1)))
         key = _key(["read", "write"])
         db = AsyncMock()
-        db.user_owns_workspace_in_mongo = AsyncMock(return_value=True)
+        db.user_can_access_workspace_in_mongo = AsyncMock(return_value=True)
         db.get_document_by_id = AsyncMock(return_value=sample_document)
         db.get_user_workspace_ids = AsyncMock(return_value=["ws-1"])
 

@@ -16,6 +16,7 @@ from temporalio.common import WorkflowIDConflictPolicy
 
 from src.config.settings import Settings
 from src.models.document import DocumentUploadMessage, ProcessingResult
+from src.services.tenant_owner import resolve_tenant_user_id
 from src.temporal.models import DocumentIngestionInput, WorkflowResult
 from src.temporal.workflows import DocumentIngestionWorkflow
 
@@ -311,11 +312,18 @@ class TemporalWorkflowTrigger:
                 filename=upload_message.original_filename,
             )
 
+            # Tenant = the workspace owner; the event's actor is the uploader
+            # (prime#331, see src/services/tenant_owner.py).
+            tenant_user_id = await resolve_tenant_user_id(
+                self.settings, upload_message.workspace_id, upload_message.user_id
+            )
+
             # Create workflow input
             workflow_input = DocumentIngestionInput(
                 document_id=upload_message.document_id,
                 workspace_id=upload_message.workspace_id,
-                user_id=upload_message.user_id,
+                user_id=tenant_user_id,
+                uploaded_by=upload_message.uploaded_by or upload_message.user_id,
                 filename=upload_message.filename,
                 original_filename=upload_message.original_filename,
                 content_type=upload_message.content_type,
@@ -489,11 +497,18 @@ class TemporalWorkflowTrigger:
             )
             return ""
 
+        # Tenant = the workspace owner; the event's actor is the uploader
+        # (prime#331, see src/services/tenant_owner.py).
+        tenant_user_id = await resolve_tenant_user_id(
+            self.settings, upload_message.workspace_id, upload_message.user_id
+        )
+
         # Create workflow input
         workflow_input = DocumentIngestionInput(
             document_id=upload_message.document_id,
             workspace_id=upload_message.workspace_id,
-            user_id=upload_message.user_id,
+            user_id=tenant_user_id,
+            uploaded_by=upload_message.uploaded_by or upload_message.user_id,
             filename=upload_message.filename,
             original_filename=upload_message.original_filename,
             content_type=upload_message.content_type,

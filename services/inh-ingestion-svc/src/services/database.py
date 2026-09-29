@@ -224,6 +224,9 @@ class DatabaseService:
             Column("document_id", String(100), nullable=False, unique=True),
             Column("workspace_id", String(100), nullable=False),
             Column("user_id", String(100), nullable=False),
+            # Who actually uploaded (prime#331, migration 025); user_id is the
+            # workspace owner's tenant. Nullable: older rows have none.
+            Column("uploaded_by", String(100), nullable=True),
             Column("tenant_id", BigInteger, nullable=True),  # New: tenant reference
             Column("filename", String(500), nullable=False),
             Column("original_filename", String(500), nullable=False),
@@ -1102,6 +1105,7 @@ class DatabaseService:
                     "document_id": message.document_id,
                     "workspace_id": message.workspace_id,
                     "user_id": message.user_id,
+                    "uploaded_by": message.uploaded_by,
                     "tenant_id": tenant_id,
                     "filename": message.filename,
                     "original_filename": message.original_filename,
@@ -1541,6 +1545,7 @@ class DatabaseService:
         workflow_start_time: datetime,
         storage_bucket: str | None = None,
         storage_url: str | None = None,
+        uploaded_by: str | None = None,
     ) -> bool:
         """Create a minimal 'processing' processed_documents row up front (#10)
         AND claim the fencing token for this workflow run (#110).
@@ -1590,6 +1595,7 @@ class DatabaseService:
                     document_id=document_id,
                     workspace_id=workspace_id,
                     user_id=user_id,
+                    uploaded_by=uploaded_by,
                     filename=filename,
                     original_filename=original_filename,
                     content_type=content_type,

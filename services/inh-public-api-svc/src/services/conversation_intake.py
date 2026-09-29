@@ -26,6 +26,8 @@ from inh_contracts.events import CONTRACT_VERSION, ConversationTurnMessage
 from src.config import settings
 from src.core.exceptions import ServiceUnavailableError
 from src.models.conversation import ConversationTurnBatchResponse, ConversationTurnIn
+from src.services.data_plane import data_plane_user_id
+from src.services.database import get_database
 from src.services.mq import get_mq_service
 from src.utils import get_logger
 
@@ -54,6 +56,10 @@ async def intake_turns(
             batch (transient -- safe to retry the whole request).
     """
     now_iso = datetime.now(timezone.utc).isoformat()
+    # `user_id` is the CALLER; the conversation lives in the workspace OWNER's
+    # tenant so every member sees it (prime#331), and the caller is carried as
+    # `uploaded_by`.
+    tenant_user_id = await data_plane_user_id(await get_database(), workspace_id, user_id)
     mq = await get_mq_service()
 
     published = 0
@@ -61,7 +67,8 @@ async def intake_turns(
         message = ConversationTurnMessage(
             event_type="conversation.turn",
             workspace_id=workspace_id,
-            user_id=user_id,
+            user_id=tenant_user_id,
+            uploaded_by=user_id,
             external_id=external_id,
             turn_id=turn.turn_id,
             role=turn.role,

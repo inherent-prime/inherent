@@ -32,6 +32,7 @@ from src.api.ownership import (
 from src.config.settings import Settings
 from src.services.database import DatabaseService
 from src.services.metrics import get_metrics
+from src.services.tenant_owner import resolve_tenant_user_id
 from src.temporal.models import (
     ChunkEditInput,
     ChunkEditResult,
@@ -380,10 +381,13 @@ def create_app(settings: Settings) -> FastAPI:
         # this module already follow (see ownership.py).
         workspace_id = require_storage_path_workspace_prefix(body.storage_path, body.workspace_id)
 
+        # Tenant = the workspace owner; the body's user is the uploader
+        # (prime#331, see src/services/tenant_owner.py).
         workflow_input = DocumentIngestionInput(
             document_id=body.document_id,
             workspace_id=workspace_id,
-            user_id=body.user_id,
+            user_id=await resolve_tenant_user_id(settings, workspace_id, body.user_id),
+            uploaded_by=body.user_id,
             filename=body.filename,
             original_filename=body.original_filename,
             content_type=body.content_type,

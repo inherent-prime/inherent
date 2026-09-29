@@ -38,6 +38,7 @@ def _make_settings():
     # MagicMock, so `.get(workspace_id)` returns a real None by default
     # instead of another MagicMock leaking into DocumentIngestionInput.
     settings.workspace_vertical_packs = {}
+    settings.workspace_owner_lookup_enabled = False  # prime#331: no Mongo in these tests
     return settings
 
 

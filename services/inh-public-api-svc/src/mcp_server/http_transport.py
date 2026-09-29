@@ -89,6 +89,7 @@ from src.mcp_server.tool_profiles import resolve_profile_tools
 from src.models.api_key import APIKeyInfo
 from src.services.auth import (
     PERMISSION_SCOPE_MAP,
+    OAuthIdentityLookupError,
     Principal,
     TokenValidationError,
     build_www_authenticate,
@@ -545,7 +546,7 @@ async def _call_tool_oauth(name: str, arguments: dict, principal: Principal) -> 
     actual point. `src.services.auth.resolve_oauth_user` (called once, inside
     `Principal.from_oauth_claims`, so `principal.resolved_user_id` is already
     known by the time this function runs) closes that gap with a minimal,
-    generic, CONFIG-FIRST identity link (`OAUTH_USER_ID_CLAIM` /
+    generic, CONFIG-FIRST identity link (`OAUTH_USER_ID_CLAIM` / Mongo subject lookup /
     `OAUTH_SUBJECT_USERS`) -- see that function's docstring.
 
     - `principal.resolved_user_id` set -> `_api_key_info_for_oauth` builds
@@ -831,7 +832,16 @@ def mount_mcp_http(app: FastAPI) -> StreamableHTTPSessionManager:
                 # token or any exception message that might echo it.
                 logger.warning("oauth_token_rejected", reason=exc.reason)
                 raise _oauth_401(request, error="invalid_token") from None
-            oauth_principal = Principal.from_oauth_claims(claims)
+            try:
+                oauth_principal = await Principal.from_oauth_claims(claims)
+            except OAuthIdentityLookupError:
+                # Fail closed (prime#329): the identity store is down, so we
+                # cannot say who this token is. 503 (not 401): the token is
+                # fine and a retry will work once Mongo is back.
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Identity lookup is temporarily unavailable. Retry shortly.",
+                ) from None
         else:
             # Reuses REST's OWN dependency function directly (not "equivalent
             # logic re-implemented here") -- called as a plain coroutine with the

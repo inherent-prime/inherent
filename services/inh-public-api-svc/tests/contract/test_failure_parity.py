@@ -359,8 +359,8 @@ class TestWorkspaceScopeParity:
         # The key's binding (ws-a) is confirmed owned in Mongo; the request
         # names a DIFFERENT workspace (ws-b), rejected on the header-mismatch
         # check (#138 blocker-2: scoped-key validation consults ONLY
-        # user_owns_workspace_in_mongo, never get_user_workspace_ids).
-        mock_db.user_owns_workspace_in_mongo = AsyncMock(return_value=True)
+        # user_can_access_workspace_in_mongo, never get_user_workspace_ids).
+        mock_db.user_can_access_workspace_in_mongo = AsyncMock(return_value=True)
         with patch("src.services.auth.get_database", AsyncMock(return_value=mock_db)):
             with pytest.raises(HTTPException) as exc_info:
                 await _resolve_workspace(key, "ws-b", required=False)
@@ -383,8 +383,8 @@ class TestWorkspaceScopeParity:
         db = _mock_db()
         db.validate_api_key = AsyncMock(return_value=key)
         # #138 blocker-2: scoped-key validation consults ONLY
-        # user_owns_workspace_in_mongo, never get_user_workspace_ids.
-        db.user_owns_workspace_in_mongo = AsyncMock(return_value=True)
+        # user_can_access_workspace_in_mongo, never get_user_workspace_ids.
+        db.user_can_access_workspace_in_mongo = AsyncMock(return_value=True)
 
         result = await _call_mcp_tool(
             "list_documents", {"api_key": "ink_k", "workspace_id": "ws-b"}, db
@@ -407,8 +407,8 @@ class TestWorkspaceScopeParity:
         db = _mock_db()
         db.validate_api_key = AsyncMock(return_value=key)
         # #138 blocker-2: scoped-key validation consults ONLY
-        # user_owns_workspace_in_mongo, never get_user_workspace_ids.
-        db.user_owns_workspace_in_mongo = AsyncMock(return_value=True)
+        # user_can_access_workspace_in_mongo, never get_user_workspace_ids.
+        db.user_can_access_workspace_in_mongo = AsyncMock(return_value=True)
         db.get_documents_multi_workspace = AsyncMock(return_value=([], 0))
 
         await _call_mcp_tool("list_documents", {"api_key": "ink_k"}, db)
@@ -483,10 +483,10 @@ class TestDocumentNotFoundVsPermissionDeniedParity:
         db = _mock_db()
         db.validate_api_key = AsyncMock(return_value=key)
         # #138 blocker-2: scoped-key validation consults ONLY
-        # user_owns_workspace_in_mongo, never get_user_workspace_ids. The
+        # user_can_access_workspace_in_mongo, never get_user_workspace_ids. The
         # binding (ws-a) is owned; the document lives in WS ("ws-1") — a
         # DIFFERENT workspace — so it's rejected on the mismatch regardless.
-        db.user_owns_workspace_in_mongo = AsyncMock(return_value=True)
+        db.user_can_access_workspace_in_mongo = AsyncMock(return_value=True)
         db.get_document_by_id = AsyncMock(return_value=foreign_doc)
         foreign_result = await _call_mcp_tool(
             "get_document", {"api_key": "ink_k", "document_id": "doc-x"}, db

@@ -70,7 +70,7 @@ async def test_get_workspace_ids_allows_owned_workspace() -> None:
     """A workspace the user owns resolves to exactly that workspace.
 
     Unscoped key: authorization comes from get_user_workspace_ids (the
-    Mongo-union-Postgres listing helper), not user_owns_workspace_in_mongo
+    Mongo-union-Postgres listing helper), not user_can_access_workspace_in_mongo
     (which only applies to a workspace-scoped key's binding, #138 blocker-2).
     """
     mock_db = AsyncMock()
@@ -213,9 +213,9 @@ async def test_get_workspace_ids_scoped_key_cannot_cross_to_owned_workspace() ->
     # is for a DIFFERENT workspace (ws-b) the key was never scoped to — the
     # rejection must come from the mismatch, not from a stale/unowned binding.
     # Scoped-key validation (#138 blocker-2) consults ONLY
-    # user_owns_workspace_in_mongo, never get_user_workspace_ids — mock the
+    # user_can_access_workspace_in_mongo, never get_user_workspace_ids — mock the
     # former, not the latter, or this test would pass for the wrong reason.
-    mock_db.user_owns_workspace_in_mongo = AsyncMock(return_value=True)
+    mock_db.user_can_access_workspace_in_mongo = AsyncMock(return_value=True)
     with _patch_db(mock_db):
         ws_ids, error = await mcp_server._get_workspace_ids(_scoped_key("ws-a"), "ws-b")
     assert ws_ids == []
@@ -229,9 +229,9 @@ async def test_get_workspace_ids_scoped_key_matching_request_resolves() -> None:
     """A scoped key requesting its own bound workspace still resolves fine."""
     mock_db = AsyncMock()
     # Scoped-key validation (#138 blocker-2) consults ONLY
-    # user_owns_workspace_in_mongo, never get_user_workspace_ids — mock the
+    # user_can_access_workspace_in_mongo, never get_user_workspace_ids — mock the
     # former, not the latter, or this test would pass for the wrong reason.
-    mock_db.user_owns_workspace_in_mongo = AsyncMock(return_value=True)
+    mock_db.user_can_access_workspace_in_mongo = AsyncMock(return_value=True)
     with _patch_db(mock_db):
         ws_ids, error = await mcp_server._get_workspace_ids(_scoped_key("ws-a"), "ws-a")
     assert ws_ids == ["ws-a"]
@@ -245,9 +245,9 @@ async def test_get_workspace_ids_scoped_key_no_request_narrows_to_binding() -> N
     _resolve_workspace never expands a scoped key's access either)."""
     mock_db = AsyncMock()
     # Scoped-key validation (#138 blocker-2) consults ONLY
-    # user_owns_workspace_in_mongo, never get_user_workspace_ids — mock the
+    # user_can_access_workspace_in_mongo, never get_user_workspace_ids — mock the
     # former, not the latter, or this test would pass for the wrong reason.
-    mock_db.user_owns_workspace_in_mongo = AsyncMock(return_value=True)
+    mock_db.user_can_access_workspace_in_mongo = AsyncMock(return_value=True)
     with _patch_db(mock_db):
         ws_ids, error = await mcp_server._get_workspace_ids(_scoped_key("ws-a"), None)
     assert ws_ids == ["ws-a"]
@@ -261,9 +261,9 @@ async def test_search_blocks_scoped_key_from_other_owned_workspace() -> None:
     follow-up), and never invoke the search service for it."""
     mock_db = AsyncMock()
     # Scoped-key validation (#138 blocker-2) consults ONLY
-    # user_owns_workspace_in_mongo, never get_user_workspace_ids — mock the
+    # user_can_access_workspace_in_mongo, never get_user_workspace_ids — mock the
     # former, not the latter, or this test would pass for the wrong reason.
-    mock_db.user_owns_workspace_in_mongo = AsyncMock(return_value=True)
+    mock_db.user_can_access_workspace_in_mongo = AsyncMock(return_value=True)
     mock_search = AsyncMock()
 
     with (
@@ -300,9 +300,9 @@ async def test_resolve_document_for_user_scoped_key_cannot_cross_to_owned_worksp
     mock_db = AsyncMock()
     mock_db.get_document_by_id = AsyncMock(return_value=_foreign_doc("doc-x", "ws-b"))
     # Scoped-key validation (#138 blocker-2) consults ONLY
-    # user_owns_workspace_in_mongo, never get_user_workspace_ids — mock the
+    # user_can_access_workspace_in_mongo, never get_user_workspace_ids — mock the
     # former, not the latter, or this test would pass for the wrong reason.
-    mock_db.user_owns_workspace_in_mongo = AsyncMock(return_value=True)
+    mock_db.user_can_access_workspace_in_mongo = AsyncMock(return_value=True)
 
     with _patch_db(mock_db):
         document, workspace_ids, error = await mcp_server._resolve_document_for_user(
@@ -324,9 +324,9 @@ async def test_delete_document_scoped_key_cannot_cross_to_owned_workspace() -> N
     mock_db = AsyncMock()
     mock_db.get_document_by_id = AsyncMock(return_value=_foreign_doc("doc-x", "ws-b"))
     # Scoped-key validation (#138 blocker-2) consults ONLY
-    # user_owns_workspace_in_mongo, never get_user_workspace_ids — mock the
+    # user_can_access_workspace_in_mongo, never get_user_workspace_ids — mock the
     # former, not the latter, or this test would pass for the wrong reason.
-    mock_db.user_owns_workspace_in_mongo = AsyncMock(return_value=True)
+    mock_db.user_can_access_workspace_in_mongo = AsyncMock(return_value=True)
 
     with _patch_db(mock_db):
         result = await mcp_server._handle_delete_document(
@@ -345,9 +345,9 @@ async def test_refresh_stale_source_scoped_key_cannot_cross_to_owned_workspace()
     mock_db = AsyncMock()
     mock_db.get_document_by_id = AsyncMock(return_value=_foreign_doc("doc-x", "ws-b"))
     # Scoped-key validation (#138 blocker-2) consults ONLY
-    # user_owns_workspace_in_mongo, never get_user_workspace_ids — mock the
+    # user_can_access_workspace_in_mongo, never get_user_workspace_ids — mock the
     # former, not the latter, or this test would pass for the wrong reason.
-    mock_db.user_owns_workspace_in_mongo = AsyncMock(return_value=True)
+    mock_db.user_can_access_workspace_in_mongo = AsyncMock(return_value=True)
 
     with _patch_db(mock_db):
         result = await mcp_server._handle_refresh_stale_source(
@@ -367,9 +367,9 @@ async def test_get_context_blocks_scoped_key_from_document_in_other_owned_worksp
     mock_db = AsyncMock()
     mock_db.get_document_by_id = AsyncMock(return_value=_foreign_doc("doc-x", "ws-b"))
     # Scoped-key validation (#138 blocker-2) consults ONLY
-    # user_owns_workspace_in_mongo, never get_user_workspace_ids — mock the
+    # user_can_access_workspace_in_mongo, never get_user_workspace_ids — mock the
     # former, not the latter, or this test would pass for the wrong reason.
-    mock_db.user_owns_workspace_in_mongo = AsyncMock(return_value=True)
+    mock_db.user_can_access_workspace_in_mongo = AsyncMock(return_value=True)
     mock_db.get_document_chunks_by_doc_id = AsyncMock(return_value=[])
 
     with _patch_db(mock_db):
@@ -387,9 +387,9 @@ async def test_report_feedback_scoped_key_limits_lookup_to_bound_workspace() -> 
     workspace it isn't authorised for."""
     mock_db = AsyncMock()
     # Scoped-key validation (#138 blocker-2) consults ONLY
-    # user_owns_workspace_in_mongo, never get_user_workspace_ids — mock the
+    # user_can_access_workspace_in_mongo, never get_user_workspace_ids — mock the
     # former, not the latter, or this test would pass for the wrong reason.
-    mock_db.user_owns_workspace_in_mongo = AsyncMock(return_value=True)
+    mock_db.user_can_access_workspace_in_mongo = AsyncMock(return_value=True)
     mock_db.get_eval_event = AsyncMock(return_value=None)  # -> EventNotFoundError path
 
     with _patch_db(mock_db):
@@ -408,9 +408,9 @@ async def test_get_retrieval_health_blocks_scoped_key_from_other_owned_workspace
     binding per the fix-1 wording, and must never build the scorecard."""
     mock_db = AsyncMock()
     # Scoped-key validation (#138 blocker-2) consults ONLY
-    # user_owns_workspace_in_mongo, never get_user_workspace_ids — mock the
+    # user_can_access_workspace_in_mongo, never get_user_workspace_ids — mock the
     # former, not the latter, or this test would pass for the wrong reason.
-    mock_db.user_owns_workspace_in_mongo = AsyncMock(return_value=True)
+    mock_db.user_can_access_workspace_in_mongo = AsyncMock(return_value=True)
 
     with (
         _patch_db(mock_db),
@@ -432,9 +432,9 @@ async def test_upload_resolve_workspace_scoped_key_rejects_other_owned_workspace
     different owned workspace as the upload target (#138 blocker-3)."""
     mock_db = AsyncMock()
     # Scoped-key validation (#138 blocker-2) consults ONLY
-    # user_owns_workspace_in_mongo, never get_user_workspace_ids — mock the
+    # user_can_access_workspace_in_mongo, never get_user_workspace_ids — mock the
     # former, not the latter, or this test would pass for the wrong reason.
-    mock_db.user_owns_workspace_in_mongo = AsyncMock(return_value=True)
+    mock_db.user_can_access_workspace_in_mongo = AsyncMock(return_value=True)
 
     with _patch_db(mock_db):
         workspace_id, error = await mcp_server._resolve_single_workspace_for_upload(
@@ -455,9 +455,9 @@ async def test_upload_resolve_workspace_scoped_key_no_arg_narrows_to_binding() -
     workspaces would get (#138 blocker-3)."""
     mock_db = AsyncMock()
     # Scoped-key validation (#138 blocker-2) consults ONLY
-    # user_owns_workspace_in_mongo, never get_user_workspace_ids — mock the
+    # user_can_access_workspace_in_mongo, never get_user_workspace_ids — mock the
     # former, not the latter, or this test would pass for the wrong reason.
-    mock_db.user_owns_workspace_in_mongo = AsyncMock(return_value=True)
+    mock_db.user_can_access_workspace_in_mongo = AsyncMock(return_value=True)
 
     with _patch_db(mock_db):
         workspace_id, error = await mcp_server._resolve_single_workspace_for_upload(

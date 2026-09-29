@@ -28,6 +28,7 @@ from src.config.constants import ALLOWED_MIME_TYPES, MAX_UPLOAD_SIZE_BYTES
 from src.core.exceptions import BadRequestError, ServiceUnavailableError
 from src.models.document import DocumentUploadResponse
 from src.services.compensation import mark_document_failed_with_retry
+from src.services.data_plane import data_plane_user_id
 from src.services.database import DatabaseService
 from src.services.mq import get_mq_service
 from src.services.storage import get_storage_service
@@ -46,6 +47,11 @@ async def intake_document(
     content_type: str,
 ) -> DocumentUploadResponse:
     """Validate, dedup, store and enqueue a document for ingestion.
+
+    ``user_id`` is the CALLER. The document is stored in the workspace
+    OWNER's tenant (``data_plane_user_id``, prime#331) so every member sees
+    it, and the caller is recorded as ``uploaded_by`` on the row and the MQ
+    message so member uploads stay attributable.
 
     Mirrors (byte for byte) the former inline body of POST /v1/documents,
     plus the #117 validation steps that close real validation holes -- three
@@ -291,6 +297,9 @@ async def intake_document(
             filename=filename,
         )
 
+    # Whose tenant the vectors go to: the workspace owner's (prime#331).
+    tenant_user_id = await data_plane_user_id(database, workspace_id, user_id)
+
     # --- 6. Upload to S3 ----------------------------------------------------
     try:
         storage = get_storage_service()
@@ -313,7 +322,8 @@ async def intake_document(
         await database.create_or_reset_pending_document(
             document_id=document_id,
             workspace_id=workspace_id,
-            user_id=user_id,
+            user_id=tenant_user_id,
+            uploaded_by=user_id,
             filename=s3_key.rsplit("/", 1)[-1],
             original_filename=filename,
             content_type=content_type,
@@ -341,7 +351,8 @@ async def intake_document(
         "event_type": "document.uploaded",
         "document_id": document_id,
         "workspace_id": workspace_id,
-        "user_id": user_id,
+        "user_id": tenant_user_id,
+        "uploaded_by": user_id,
         "filename": s3_key.rsplit("/", 1)[-1],
         "original_filename": filename,
         "content_type": content_type,

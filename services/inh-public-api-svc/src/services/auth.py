@@ -147,17 +147,27 @@ async def get_write_permission(
 
 
 async def get_authorized_workspace_ids(
-    key_info: APIKeyInfo, database: DatabaseService
+    key_info: APIKeyInfo, database: DatabaseService, *, permission: str = "read"
 ) -> list[str]:
     """Return every workspace_id ``key_info`` is authorised to act on.
 
-    This is the SINGLE source of truth for the key-scoping rule (#138),
-    shared by REST (``_resolve_workspace`` below) and MCP
-    (``src/mcp_server/server.py``) so the two surfaces cannot drift.
+    This is the SINGLE source of truth for the key-scoping rule (#138) and the
+    workspace role rule (prime#331), shared by REST (``_resolve_workspace``
+    below) and MCP (``src/mcp_server/server.py``) so the two surfaces cannot
+    drift.
+
+    Membership (prime#331): the key's user may act on a workspace it OWNS
+    (``workspaces.user_id``) or is a MEMBER of (``workspaces.members``).
+    Nothing is cached, so removing a member in Mongo revokes access on the
+    next request. ``permission="write"`` additionally drops workspaces where
+    the user is only a ``viewer``: the effective write permission is the
+    key/token's ``write`` permission AND a role that may write (see
+    ``src.services.workspace_roles`` for the matrix). Every other permission
+    is unaffected by role — all roles may read and search.
 
     - A *workspace-scoped* key (``key_info.workspace_id`` set) is validated
-      against ``database.user_owns_workspace_in_mongo`` — a MONGO-ONLY
-      membership check (#138 blocker-2 fix) — NOT
+      against ``database.user_can_access_workspace_in_mongo`` — a MONGO-ONLY
+      check (#138 blocker-2 fix) — NOT
       ``database.get_user_workspace_ids``. The first #138 cut trusted
       ``key_info.workspace_id`` unconditionally; the immediate follow-up
       "fixed" that by intersecting it with ``get_user_workspace_ids``, but
@@ -167,28 +177,58 @@ async def get_authorized_workspace_ids(
       served whenever the owner had ever uploaded to it — the realistic
       case, since a workspace worth protecting has content. This costs one
       extra Mongo round-trip per scoped-key request, on top of REST/MCP's
-      existing DB call; see ``user_owns_workspace_in_mongo`` for why it must
+      existing DB call; see ``get_workspace_role_in_mongo`` for why it must
       NOT fall back to the union, and why a Mongo failure here RAISES rather
       than silently granting or denying (revocation must not silently stop
       being enforced during an outage — this call is NOT wrapped in
       try/except, so callers see the exception).
     - A *user-scoped* key (``workspace_id is None``) may act on every
-      workspace its owning user currently owns, via
-      ``database.get_user_workspace_ids`` (Mongo UNION Postgres fallback) —
-      unchanged from before this fix. This is a listing convenience, not a
-      binding validation: these keys have no narrower claim than the user's
-      full set to begin with, so the union's "which workspaces might this
-      user plausibly reach" answer is the right question here, unlike for a
-      scoped key's binding above.
+      workspace its owning user currently owns or belongs to, via
+      ``database.get_user_workspace_ids`` (Mongo UNION Postgres fallback for
+      legacy owners) — unchanged from before this fix. This is a listing
+      convenience, not a binding validation: these keys have no narrower
+      claim than the user's full set to begin with, so the union's "which
+      workspaces might this user plausibly reach" answer is the right
+      question here, unlike for a scoped key's binding above. For a WRITE
+      the viewer workspaces are subtracted using a Mongo lookup that raises
+      on failure, so an outage can never turn a read-only membership into
+      write access.
     """
+    write = permission == "write"
     if key_info.workspace_id:
         # Truthy, not `is not None`: an empty-string workspace_id (no
         # issuance path produces one today) is treated as unscoped rather
         # than as a binding to "", matching _resolve_workspace's truthiness
         # checks elsewhere in this module (#138 follow-up).
-        owns = await database.user_owns_workspace_in_mongo(key_info.user_id, key_info.workspace_id)
-        return [key_info.workspace_id] if owns else []
-    return await database.get_user_workspace_ids(key_info.user_id)
+        allowed = await database.user_can_access_workspace_in_mongo(
+            key_info.user_id, key_info.workspace_id, write=write
+        )
+        return [key_info.workspace_id] if allowed else []
+    workspace_ids = await database.get_user_workspace_ids(key_info.user_id)
+    if write:
+        read_only = await database.get_read_only_workspace_ids_in_mongo(key_info.user_id)
+        workspace_ids = [ws for ws in workspace_ids if ws not in read_only]
+    return workspace_ids
+
+
+async def viewer_write_denial(
+    key_info: APIKeyInfo, workspace_id: str, database: DatabaseService
+) -> str | None:
+    """The rejection message for a WRITE by a ``viewer``, or None when the
+    caller is not a viewer of ``workspace_id`` (so the caller keeps its usual
+    denial wording).
+
+    A viewer is told their role is the reason: they can already read the
+    workspace, so nothing is leaked and they can stop retrying. Only runs on
+    the denial path, so the extra Mongo read costs nothing on success.
+    """
+    role = await database.get_workspace_role_in_mongo(key_info.user_id, workspace_id)
+    if role != "viewer":
+        return None
+    return (
+        f"Your role in workspace '{workspace_id}' is 'viewer', which is read-only; "
+        "write operations require the owner, admin or member role"
+    )
 
 
 def describe_workspace_denial(key_info: APIKeyInfo, requested_workspace_id: str) -> str:
@@ -225,6 +265,7 @@ async def _resolve_workspace(
     header_workspace_id: str | None,
     *,
     required: bool = False,
+    permission: str = "read",
 ) -> ResolvedAuth:
     """Resolve workspace_id from header or API key, with access validation.
 
@@ -242,9 +283,14 @@ async def _resolve_workspace(
     the same scoping rule living inline here instead of in the shared
     function, and the two copies had already started to drift (#138
     blocker-2/item-6 follow-up): this collapses them into one.
+
+    ``permission="write"`` (see ``resolve_workspace_write``) makes that same
+    derivation role-aware (prime#331): a workspace where the caller is only a
+    viewer is not authorised, even when the key itself has ``write``. This is
+    the ONE place REST checks write access for a resolved workspace.
     """
     database = await get_database()
-    authorized = await get_authorized_workspace_ids(key_info, database)
+    authorized = await get_authorized_workspace_ids(key_info, database, permission=permission)
 
     # Workspace-scoped key: the binding wins, but only while it is still
     # owned — get_authorized_workspace_ids intersects the binding with
@@ -277,9 +323,15 @@ async def _resolve_workspace(
                 key_id=key_info.key_id,
                 key_workspace_id=key_info.workspace_id,
             )
+            viewer_detail = (
+                await viewer_write_denial(key_info, key_info.workspace_id, database)
+                if permission == "write"
+                else None
+            )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=(
+                detail=viewer_detail
+                or (
                     f"API key is scoped to workspace '{key_info.workspace_id}', "
                     "which is no longer accessible"
                 ),
@@ -304,7 +356,13 @@ async def _resolve_workspace(
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=describe_workspace_denial(key_info, workspace_id),
+            detail=(
+                (
+                    permission == "write"
+                    and await viewer_write_denial(key_info, workspace_id, database)
+                )
+                or describe_workspace_denial(key_info, workspace_id)
+            ),
         )
 
     # No workspace from header or key — try to resolve from the authorised set.
@@ -336,7 +394,7 @@ async def resolve_workspace_write(
     x_workspace_id: Annotated[str | None, Header(alias="X-Workspace-Id")] = None,
 ) -> ResolvedAuth:
     """Resolve workspace for write operations (workspace required)."""
-    return await _resolve_workspace(key_info, x_workspace_id, required=True)
+    return await _resolve_workspace(key_info, x_workspace_id, required=True, permission="write")
 
 
 async def resolve_workspace_read(
@@ -416,39 +474,79 @@ class OAuthClaims:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
-def resolve_oauth_user(claims: OAuthClaims) -> str | None:
+class OAuthIdentityLookupError(Exception):
+    """The Mongo subject lookup could not be completed (prime#329).
+
+    Distinct from "no such user": callers must FAIL CLOSED (the /mcp gate
+    answers 503), never treat it as "unresolved" and fall through to another
+    identity source — see ``resolve_oauth_user``.
+    """
+
+
+async def resolve_oauth_user(claims: OAuthClaims) -> str | None:
     """Resolve a verified OAuth token's ``claims`` to an Inherent ``user_id``
-    (inherent#392 follow-up).
+    (inherent#392 follow-up, prime#329).
 
     #295 deferred this identity link to "the commercial platform" entirely --
     that shipped an OAuth caller that could authenticate but never execute a
     tool (a permanent "not yet available" on every `tools/call`), which is
     unusable for #392's actual point: a claude.ai connector, and claude.ai
     always connects via OAuth. This adds a minimal, GENERIC, CONFIG-FIRST
-    version in the engine -- the same shape as `WORKSPACE_VERTICAL_PACKS`
-    (#390) for a hand-onboarded pilot -- with a clean seam for the platform
-    to take over later without any further engine change:
+    link in the engine -- the same shape as `WORKSPACE_VERTICAL_PACKS`
+    (#390) for a hand-onboarded pilot. First step that resolves wins:
 
     1. ``OAUTH_USER_ID_CLAIM`` (e.g. ``"inherent_user_id"``): if set AND the
        verified token itself carries a non-empty string under that claim
-       name, use it directly. THIS is the seam -- the day the platform's
-       authorization server is configured to mint tokens carrying the
-       platform's own user id under this claim, resolution needs no further
-       engine change at all; only the operator setting is added.
-    2. ``OAUTH_SUBJECT_USERS`` (``"sub_1=user_1,sub_2=user_2"``): a static,
-       operator-maintained mapping, for a hand-onboarded pilot with no such
-       claim minted yet. Checked only when (1) didn't resolve.
-    3. Neither resolves -> ``None`` -- today's honest "no identity link"
-       outcome, unchanged.
+       name, use it directly. THIS is the seam -- the day the authorization
+       server mints tokens carrying the platform's own user id under this
+       claim, resolution needs no further engine change.
+    2. Mongo lookup (``OAUTH_SUBJECT_LOOKUP_COLLECTION`` / ``_FIELD`` /
+       ``_ID_FIELD``, e.g. ``users`` / ``clerk_id`` / ``_id``): find the user
+       document whose field equals the token's ``sub``. Rules:
+       - exactly one live match -> its id (ObjectIds stringified);
+       - no match at all -> step skipped, continue to (3);
+       - a match that is soft-deleted (``OAUTH_SUBJECT_LOOKUP_DELETED_FIELD``,
+         default ``deleted_at``, non-null) and no live one -> NOT resolved,
+         and (3) is NOT consulted: a deleted account must not come back
+         through the static map;
+       - more than one live match -> NOT resolved (ambiguous identity is
+         never guessed), (3) not consulted either.
+       Never cached: a deleted user stops resolving on the next request. The
+       lookup is one indexed read (the collection's owner keeps the field
+       indexed). A Mongo failure raises ``OAuthIdentityLookupError`` and
+       fails CLOSED instead of falling through to (3): during an outage the
+       static map could name a different user than the lookup would, and an
+       identity decision must not depend on whether Mongo happened to be up.
+    3. ``OAUTH_SUBJECT_USERS`` (``"sub_1=user_1,sub_2=user_2"``): a static,
+       operator-maintained mapping, for a hand-onboarded pilot. Checked only
+       when (1) and (2) didn't decide.
+    4. Nothing resolves -> ``None`` -- the honest "no identity link" outcome.
 
-    Both settings default empty, so with no configuration this is a pure
-    no-op: every OAuth caller resolves to ``None``, byte-for-byte the
-    pre-#392-follow-up "unresolvable" behaviour.
+    All settings default empty, so with no configuration this is a pure
+    no-op: every OAuth caller resolves to ``None``.
     """
     if settings.oauth_user_id_claim:
         claim_value = claims.raw.get(settings.oauth_user_id_claim)
         if isinstance(claim_value, str) and claim_value:
             return claim_value
+
+    if settings.oauth_subject_lookup_enabled:
+        database = await get_database()
+        try:
+            matches = await database.find_users_by_subject(claims.subject)
+        except Exception as exc:
+            logger.error("oauth_identity_lookup_failed", error=str(exc))
+            raise OAuthIdentityLookupError("oauth_identity_lookup_failed") from None
+        live = [user_id for user_id, is_deleted in matches if not is_deleted]
+        if len(live) == 1:
+            return live[0]
+        if len(live) > 1:
+            logger.error("oauth_identity_ambiguous", matches=len(live))
+            return None
+        if matches:  # only soft-deleted accounts matched
+            logger.warning("oauth_identity_user_deleted")
+            return None
+
     return settings.oauth_subject_users.get(claims.subject)
 
 
@@ -525,12 +623,14 @@ class Principal:
         )
 
     @classmethod
-    def from_oauth_claims(cls, claims: OAuthClaims) -> "Principal":
+    async def from_oauth_claims(cls, claims: OAuthClaims) -> "Principal":
+        """Raises ``OAuthIdentityLookupError`` when the Mongo subject lookup
+        is configured but unavailable (callers fail closed)."""
         return cls(
             principal_id=claims.subject,
             principal_type="oauth",
             scopes=claims.scopes,
-            resolved_user_id=resolve_oauth_user(claims),
+            resolved_user_id=await resolve_oauth_user(claims),
         )
 
 

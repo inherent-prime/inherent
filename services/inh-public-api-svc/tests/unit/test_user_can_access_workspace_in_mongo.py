@@ -1,17 +1,17 @@
-"""Non-mocked proof for #138 blocker-2: DatabaseService.user_owns_workspace_in_mongo
+"""Non-mocked proof for #138 blocker-2 (and prime#331): DatabaseService.user_can_access_workspace_in_mongo
 must be Mongo-only, and get_authorized_workspace_ids must use it (not the
 Mongo-UNION-Postgres get_user_workspace_ids) to validate a workspace-scoped
 key's binding.
 
 Why this file exists (and why the previous round's tests didn't catch the
 bug): tests/security/test_workspace_isolation.py pins the intersection
-ARITHMETIC by mocking user_owns_workspace_in_mongo / get_user_workspace_ids
+ARITHMETIC by mocking user_can_access_workspace_in_mongo / get_user_workspace_ids
 directly — those tests are structurally incapable of catching a regression
 in the CHECK ITSELF (e.g. someone "helpfully" reintroducing the union inside
-user_owns_workspace_in_mongo, or a future refactor that calls the wrong DB
+user_can_access_workspace_in_mongo, or a future refactor that calls the wrong DB
 method). This file drives the REAL DatabaseService methods — only the
 Mongo/Postgres DRIVER internals are faked (a fake motor collection, a fake
-SQLAlchemy session), not get_user_workspace_ids or user_owns_workspace_in_mongo
+SQLAlchemy session), not get_user_workspace_ids or user_can_access_workspace_in_mongo
 themselves — so a regression in the check's own logic shows up here even
 though every input mock stays "correctly" configured.
 """
@@ -55,7 +55,7 @@ class _FakeCursor:
 class _FakeMongoCollection:
     """Fakes the ``workspaces`` collection's two read shapes used by
     DatabaseService: ``find`` (used by get_user_workspace_ids's listing) and
-    ``find_one`` (used by user_owns_workspace_in_mongo's targeted check).
+    ``find_one`` (used by user_can_access_workspace_in_mongo's targeted check).
     Configured independently so a test can assert Mongo has NO ownership
     record for a specific workspace while still returning a (possibly empty)
     general listing.
@@ -153,7 +153,7 @@ async def test_scoped_key_denied_despite_pg_upload_history_when_mongo_has_no_rec
        Postgres fallback — proving the fake wiring is realistic AND
        demonstrating why intersecting against this union (the previous
        round's fix) does not close the hole.
-    2. user_owns_workspace_in_mongo (the new, targeted check) correctly
+    2. user_can_access_workspace_in_mongo (the new, targeted check) correctly
        returns False — it must not consult Postgres at all.
     3. get_authorized_workspace_ids — the actual function REST and MCP both
        call — resolves a key scoped to ws-revoked to NO authorised
@@ -175,7 +175,7 @@ async def test_scoped_key_denied_despite_pg_upload_history_when_mongo_has_no_rec
         assert union_result == ["ws-revoked"]
 
         # 2. The targeted Mongo-only check is NOT fooled by the same data.
-        owns = await database.user_owns_workspace_in_mongo("user-1", "ws-revoked")
+        owns = await database.user_can_access_workspace_in_mongo("user-1", "ws-revoked")
         assert owns is False
 
         # 3. End-to-end: get_authorized_workspace_ids (called by both REST's
@@ -200,13 +200,13 @@ async def test_scoped_key_allowed_when_mongo_confirms_current_ownership():
     into always denying."""
     database = DatabaseService()
 
-    mongo = _FakeMongoCollection(find_docs=[], find_one_result={"_id": "ws-a"})
+    mongo = _FakeMongoCollection(find_docs=[], find_one_result={"_id": "ws-a", "user_id": "user-1"})
 
     with patch(
         "src.services.mongo_client.get_mongo_client",
         return_value=_FakeMongoClient(mongo),
     ):
-        owns = await database.user_owns_workspace_in_mongo("user-1", "ws-a")
+        owns = await database.user_can_access_workspace_in_mongo("user-1", "ws-a")
         assert owns is True
 
         key = APIKeyInfo(
@@ -251,7 +251,7 @@ async def test_mongo_failure_during_ownership_check_raises_not_swallows():
         return_value=_ExplodingClient(),
     ):
         with pytest.raises(ConnectionError):
-            await database.user_owns_workspace_in_mongo("user-1", "ws-a")
+            await database.user_can_access_workspace_in_mongo("user-1", "ws-a")
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +266,7 @@ async def test_mongo_failure_during_ownership_check_raises_not_swallows():
 
 async def test_mongo_workspace_listing_failure_increments_degraded_metric():
     """get_user_workspace_ids's Mongo branch log-and-swallows a Mongo failure
-    (a listing convenience, unlike user_owns_workspace_in_mongo's raise) --
+    (a listing convenience, unlike user_can_access_workspace_in_mongo's raise) --
     but the swallow must be observable as a RATE, not just a warning log,
     mirroring AUDIT_MESSAGES_DROPPED_TOTAL (inh-ingestion-svc, #18)."""
     database = DatabaseService()
@@ -357,6 +357,6 @@ async def test_mongo_ownership_check_failure_increments_metric_before_raising():
         return_value=_ExplodingClient(),
     ):
         with pytest.raises(ConnectionError):
-            await database.user_owns_workspace_in_mongo("user-1", "ws-a")
+            await database.user_can_access_workspace_in_mongo("user-1", "ws-a")
 
     assert _degraded_count("mongo_ownership_check") == before + 1

@@ -104,6 +104,11 @@ and binds all datastore ports to `127.0.0.1`.
 | `DATABASE_HEALTH_CHECK_TIMEOUT_SECONDS` | `5.0` | Postgres health-check timeout, used by `GET /health/ready` (#203; replaces the dead `HEALTH_CHECK_TIMEOUT_SECONDS`) |
 | `WEAVIATE_HEALTH_CHECK_TIMEOUT_SECONDS` | `5.0` | Weaviate health-check timeout, used by `GET /health/ready` (#203; replaces the dead `HEALTH_CHECK_TIMEOUT_SECONDS`) |
 | `AUDIT_LOG_ENABLED` / `AUDIT_LOG_TOPIC` | `true` / `audit.log.write` | Audit logging + MQ topic |
+| `OAUTH_USER_ID_CLAIM` | unset | Token claim carrying the Inherent user id; resolves an OAuth caller directly (step 1 of the identity link, see `docs/reference/mcp-tools.md`) |
+| `OAUTH_SUBJECT_LOOKUP_COLLECTION` / `OAUTH_SUBJECT_LOOKUP_FIELD` | unset / unset | Mongo collection and field (e.g. `users` / `clerk_id`) matched against the token's `sub` (prime#329). Set together or not at all; simple identifiers only, validated at startup. Both unset = step skipped |
+| `OAUTH_SUBJECT_LOOKUP_ID_FIELD` | `_id` | Field of the matched document holding the Inherent user id (ObjectIds are stringified) |
+| `OAUTH_SUBJECT_LOOKUP_DELETED_FIELD` | `deleted_at` | Soft-delete marker: a non-null value means the user never resolves. Empty string disables the check |
+| `OAUTH_SUBJECT_USERS` | empty | Static `sub=user_id,...` fallback mapping, consulted last |
 
 ## inh-ingestion-svc
 
@@ -116,6 +121,7 @@ and binds all datastore ports to `127.0.0.1`.
 | `WEAVIATE_URL` | **required** | Weaviate URL. Boot fails if unset | no |
 | `WEAVIATE_API_KEY` | unset | Weaviate Bearer key | yes |
 | `MONGODB_URI` / `MONGODB_DB_NAME` | `mongodb://localhost:27017` / `main` | Mongo for audit-log writes | yes / no |
+| `WORKSPACE_OWNER_LOOKUP_ENABLED` | `true` | Store each document under the workspace owner's tenant, looked up from Mongo `workspaces.user_id` (prime#331). Set `false` only for a deployment that runs without Mongo; then the event's `user_id` is the tenant |
 | `LOG_LEVEL` | `INFO` | Logging verbosity | no |
 | `INGESTION_API_KEY` | unset | Auth secret for the standalone HTTP API (release stack requires it) | yes |
 | `API_HOST` / `API_PORT` | `0.0.0.0` / `8000` | Standalone HTTP API bind | no |

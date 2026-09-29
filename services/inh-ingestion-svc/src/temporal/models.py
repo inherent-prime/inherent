@@ -33,6 +33,10 @@ class DocumentIngestionInput:
     storage_path: str
     storage_bucket: str | None = None
     storage_url: str | None = None
+    # Who actually uploaded (prime#331). `user_id` above is the data-plane
+    # identity: the workspace OWNER whose tenant holds the vectors. None on
+    # a workflow started before this field existed.
+    uploaded_by: str | None = None
     # Source link (inherent#391): the connector's link back to the ORIGINAL
     # file (e.g. a Drive webViewLink) — distinct from storage_url above,
     # which is THIS engine's own stored copy. Already sanitized by the
@@ -333,6 +337,9 @@ class StoreDocumentInput:
     text_length: int
     processing_time_ms: int
     tenant_id: int | None = None
+    # The uploader (prime#331), threaded from DocumentIngestionInput so the
+    # processed_documents row keeps who uploaded next to the owner's user_id.
+    uploaded_by: str | None = None
     # Source link (inherent#391): threaded from DocumentIngestionInput so the
     # store activities can persist it alongside source_uri (storage_path).
     # Already sanitized upstream; None for a workflow/caller that never had
@@ -479,6 +486,7 @@ class CreatePendingDocumentInput:
     workflow_start_time: datetime
     storage_bucket: str | None = None
     storage_url: str | None = None
+    uploaded_by: str | None = None  # prime#331: the actual uploader
 
 
 # =============================================================================

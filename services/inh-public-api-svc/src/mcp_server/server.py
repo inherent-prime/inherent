@@ -127,8 +127,13 @@ from src.models.document import (
     windowed_document_context,
 )
 from src.models.evals import FeedbackRequest
-from src.services.auth import describe_workspace_denial, get_authorized_workspace_ids
+from src.services.auth import (
+    describe_workspace_denial,
+    get_authorized_workspace_ids,
+    viewer_write_denial,
+)
 from src.services.compensation import mark_document_failed_with_retry
+from src.services.data_plane import data_plane_user_id
 from src.services.database import get_database
 from src.services.document_intake import intake_document
 from src.services.eval_capture import capture_enabled, capture_search_event, purge_expired_events
@@ -402,7 +407,7 @@ def _structured(summary: str, payload: object) -> list[TextContent]:
 
 
 async def _get_workspace_ids(
-    key_info: APIKeyInfo, requested_workspace_id: str | None
+    key_info: APIKeyInfo, requested_workspace_id: str | None, *, permission: str = "read"
 ) -> tuple[list[str], str | None]:
     """
     Determine which workspace IDs to use for a query.
@@ -424,16 +429,28 @@ async def _get_workspace_ids(
     key's own bound workspace costs nothing (it's the caller's own grant) and
     lets the caller retry immediately with the right id.
 
+    ``permission="write"`` (prime#331) applies the workspace role rule: a
+    workspace where the caller is only a viewer is not authorised, and the
+    rejection says so. Write tools pass it; read/search tools keep the default.
+
     Returns:
         tuple of (workspace_ids list, error message or None)
     """
     database = await get_database()
-    authorized = await get_authorized_workspace_ids(key_info, database)
+    authorized = await get_authorized_workspace_ids(key_info, database, permission=permission)
 
     if requested_workspace_id:
         # User specified a workspace - verify it is in the key's authorised set.
         if requested_workspace_id not in authorized:
-            return [], f"Error: {describe_workspace_denial(key_info, requested_workspace_id)}"
+            viewer_detail = (
+                await viewer_write_denial(key_info, requested_workspace_id, database)
+                if permission == "write"
+                else None
+            )
+            return (
+                [],
+                f"Error: {viewer_detail or describe_workspace_denial(key_info, requested_workspace_id)}",
+            )
         return [requested_workspace_id], None
     else:
         # No workspace specified - use every workspace the key is authorised
@@ -511,7 +528,12 @@ async def _run_search(
         # classify it as a `tool_error`/`validation_error` instead of the
         # generic `internal_error` an uncaught exception gets there.
         try:
-            response = await search_service.search(workspace_id, key_info.user_id, request)
+            # Search the workspace OWNER's tenant so a member sees the whole
+            # workspace (prime#331); capture below keeps the real caller.
+            tenant_user_id = await data_plane_user_id(
+                await get_database(), workspace_id, key_info.user_id
+            )
+            response = await search_service.search(workspace_id, tenant_user_id, request)
         except TagFilterError as exc:
             return [], workspace_ids, f"Error: {exc}", None
         for result in response.results:
@@ -843,7 +865,9 @@ async def _handle_verify_claim(key_info: APIKeyInfo, arguments: dict) -> list[Te
     return _structured(summary, verdict.model_dump())
 
 
-async def _resolve_document_for_user(key_info: APIKeyInfo, document_id: str):
+async def _resolve_document_for_user(
+    key_info: APIKeyInfo, document_id: str, *, permission: str = "read"
+):
     """Fetch a document by id and verify the key is authorised for its workspace.
 
     Authorisation via ``get_authorized_workspace_ids`` (#138): a
@@ -862,6 +886,12 @@ async def _resolve_document_for_user(key_info: APIKeyInfo, document_id: str):
     REST's undifferentiated 404 exists to prevent. Do not reintroduce a
     distinguishable message for the unauthorized branch.
 
+    ``permission="write"`` (prime#331) is passed by every document-scoped
+    write tool: a viewer of the document's workspace is refused with a
+    role-specific message (safe: they can already read the document, so it
+    is not an existence oracle). Everyone else still gets the undifferentiated
+    "not found".
+
     Returns (document, workspace_ids, error_text). On any access failure the
     error_text is set and the document is None, so callers return without
     ever reading further data.
@@ -871,8 +901,12 @@ async def _resolve_document_for_user(key_info: APIKeyInfo, document_id: str):
     not_found = f"Error: Document '{document_id}' not found"
     if not document:
         return None, [], not_found
-    authorized = await get_authorized_workspace_ids(key_info, database)
+    authorized = await get_authorized_workspace_ids(key_info, database, permission=permission)
     if document.workspace_id not in authorized:
+        if permission == "write":
+            viewer_detail = await viewer_write_denial(key_info, document.workspace_id, database)
+            if viewer_detail:
+                return None, authorized, f"Error: {viewer_detail}"
         return None, authorized, not_found
     return document, authorized, None
 
@@ -929,7 +963,7 @@ async def _handle_refresh_stale_source(key_info: APIKeyInfo, arguments: dict) ->
     if not document_id:
         return [TextContent(type="text", text="Error: Document ID is required")]
 
-    document, _, error = await _resolve_document_for_user(key_info, document_id)
+    document, _, error = await _resolve_document_for_user(key_info, document_id, permission="write")
     if error:
         return [TextContent(type="text", text=error)]
 
@@ -948,6 +982,7 @@ async def _handle_refresh_stale_source(key_info: APIKeyInfo, arguments: dict) ->
         document_id=fields["document_id"],
         workspace_id=fields["workspace_id"],
         user_id=fields["user_id"],
+        uploaded_by=fields.get("uploaded_by"),  # preserved on refresh
         filename=fields["filename"],
         original_filename=fields["original_filename"],
         content_type=fields["content_type"],
@@ -964,6 +999,7 @@ async def _handle_refresh_stale_source(key_info: APIKeyInfo, arguments: dict) ->
         "document_id": fields["document_id"],
         "workspace_id": fields["workspace_id"],
         "user_id": fields["user_id"],
+        "uploaded_by": fields.get("uploaded_by"),
         "filename": fields["filename"],
         "original_filename": fields["original_filename"],
         "content_type": fields["content_type"],
@@ -1086,7 +1122,7 @@ async def _handle_delete_document(key_info: APIKeyInfo, arguments: dict) -> list
     if not document_id:
         return [TextContent(type="text", text="Error: Document ID is required")]
 
-    document, _, error = await _resolve_document_for_user(key_info, document_id)
+    document, _, error = await _resolve_document_for_user(key_info, document_id, permission="write")
     if error:
         return [TextContent(type="text", text=error)]
 
@@ -1164,7 +1200,7 @@ async def _handle_create_chunk(key_info: APIKeyInfo, arguments: dict) -> list[Te
     if content_err:
         return [TextContent(type="text", text=content_err)]
 
-    document, _, error = await _resolve_document_for_user(key_info, document_id)
+    document, _, error = await _resolve_document_for_user(key_info, document_id, permission="write")
     if error:
         return [TextContent(type="text", text=error)]
 
@@ -1214,7 +1250,7 @@ async def _handle_edit_chunk(key_info: APIKeyInfo, arguments: dict) -> list[Text
     except (TypeError, ValueError):
         return [TextContent(type="text", text="Error: chunk_index must be an integer")]
 
-    document, _, error = await _resolve_document_for_user(key_info, document_id)
+    document, _, error = await _resolve_document_for_user(key_info, document_id, permission="write")
     if error:
         return [TextContent(type="text", text=error)]
 
@@ -1261,7 +1297,7 @@ async def _handle_delete_chunk(key_info: APIKeyInfo, arguments: dict) -> list[Te
     except (TypeError, ValueError):
         return [TextContent(type="text", text="Error: chunk_index must be an integer")]
 
-    document, _, error = await _resolve_document_for_user(key_info, document_id)
+    document, _, error = await _resolve_document_for_user(key_info, document_id, permission="write")
     if error:
         return [TextContent(type="text", text=error)]
 
@@ -1320,7 +1356,9 @@ async def _resolve_single_workspace_for_upload(
     Returns (workspace_id, error_text); on error workspace_id is None.
     """
     if requested_workspace_id:
-        workspace_ids, error = await _get_workspace_ids(key_info, requested_workspace_id)
+        workspace_ids, error = await _get_workspace_ids(
+            key_info, requested_workspace_id, permission="write"
+        )
         if error:
             return None, error
         return workspace_ids[0], None
@@ -1329,7 +1367,7 @@ async def _resolve_single_workspace_for_upload(
     # narrows to its one workspace here too (len(owned) == 1), never forcing
     # disambiguation among workspaces the key isn't even bound to.
     database = await get_database()
-    owned = await get_authorized_workspace_ids(key_info, database)
+    owned = await get_authorized_workspace_ids(key_info, database, permission="write")
     if not owned:
         return None, "Error: No workspaces found. Upload documents to create a workspace."
     if len(owned) > 1:

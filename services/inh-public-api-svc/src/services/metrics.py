@@ -208,7 +208,7 @@ def record_workspace_ownership_lookup_degraded(source: str) -> None:
 
     Call this from the log-and-swallow sites in
     ``DatabaseService.get_user_workspace_ids`` (source="mongo" /
-    "postgres_fallback") and from ``user_owns_workspace_in_mongo``'s raise
+    "postgres_fallback") and from ``get_workspace_role_in_mongo``'s raise
     path (source="mongo_ownership_check") — the metric emission itself must
     never be allowed to break the caller; it is observability only.
     """

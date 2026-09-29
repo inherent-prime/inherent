@@ -330,6 +330,7 @@ async def refresh_document(
             document_id=fields["document_id"],
             workspace_id=fields["workspace_id"],
             user_id=fields["user_id"],
+            uploaded_by=fields.get("uploaded_by"),  # preserved on refresh
             filename=fields["filename"],
             original_filename=fields["original_filename"],
             content_type=fields["content_type"],
@@ -356,6 +357,7 @@ async def refresh_document(
         "document_id": fields["document_id"],
         "workspace_id": fields["workspace_id"],
         "user_id": fields["user_id"],
+        "uploaded_by": fields.get("uploaded_by"),
         "filename": fields["filename"],
         "original_filename": fields["original_filename"],
         "content_type": fields["content_type"],

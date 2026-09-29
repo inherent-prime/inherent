@@ -80,6 +80,7 @@ async def publish_completion(input: PublishCompletionInput) -> bool:
         connection_id=None,
         sync_id=None,
         source_url=None,
+        uploaded_by=None,
     )
 
     message = build_completion_message(result, upload_message)

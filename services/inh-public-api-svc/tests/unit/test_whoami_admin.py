@@ -28,7 +28,7 @@ async def test_whoami_mcp_uses_authoritative_workspace_scope():
         permissions=["read"],
     )
     database = AsyncMock()
-    database.user_owns_workspace_in_mongo.return_value = False
+    database.user_can_access_workspace_in_mongo.return_value = False
 
     with patch.object(mcp_server, "get_database", AsyncMock(return_value=database)):
         content = await mcp_server._TOOLS["whoami"].handler(key_info, {})

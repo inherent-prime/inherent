@@ -32,6 +32,7 @@ def _make_settings(workspace_vertical_packs: dict[str, str] | None = None):
     settings.temporal_namespace = "default"
     settings.temporal_task_queue = "ingestion"
     settings.workspace_vertical_packs = workspace_vertical_packs or {}
+    settings.workspace_owner_lookup_enabled = False  # prime#331: no Mongo in these tests
     return settings
 
 

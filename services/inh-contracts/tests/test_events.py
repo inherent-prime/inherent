@@ -32,6 +32,8 @@ CANONICAL_UPLOAD_KEYS_V1 = {
     "sync_id",
     # Source link (inherent#391) — additive, optional, backward compatible.
     "source_url",
+    # Uploader attribution (prime#331) — additive, optional, backward compatible.
+    "uploaded_by",
 }
 
 
@@ -55,6 +57,7 @@ def _canonical_upload_event() -> dict:
         "connection_id": "conn_123",
         "sync_id": "sync_456",
         "source_url": "https://notion.so/workspace/doc-abc123",
+        "uploaded_by": "507f1f77bcf86cd799439099",
     }
 
 
@@ -206,6 +209,8 @@ CANONICAL_CONVERSATION_TURN_KEYS_V1 = {
     "client",
     "timestamp",
     "contract_version",
+    # Uploader attribution (prime#331) — additive, optional.
+    "uploaded_by",
 }
 
 
@@ -222,6 +227,7 @@ def _canonical_conversation_turn_event() -> dict:
         "client": "agent-cli",
         "timestamp": "2026-08-31T10:30:05Z",
         "contract_version": CONTRACT_VERSION,
+        "uploaded_by": "507f1f77bcf86cd799439099",
     }
 
 
@@ -289,3 +295,18 @@ def test_conversation_turn_requires_identity_fields(field: str) -> None:
 
     with pytest.raises(ValidationError, match=field):
         ConversationTurnMessage(**event)
+
+
+def test_upload_event_without_uploaded_by_defaults_to_none() -> None:
+    """Messages produced before workspace members existed have no uploaded_by."""
+    event = _canonical_upload_event()
+    del event["uploaded_by"]
+
+    assert DocumentUploadMessage(**event).uploaded_by is None
+
+
+def test_upload_event_unwraps_avro_union_for_uploaded_by() -> None:
+    event = _canonical_upload_event()
+    event["uploaded_by"] = {"string": "user_member"}
+
+    assert DocumentUploadMessage(**event).uploaded_by == "user_member"

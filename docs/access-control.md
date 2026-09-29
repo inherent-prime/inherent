@@ -19,10 +19,10 @@ top of Inherent.
 
 | Layer | Mechanism | Where |
 | --- | --- | --- |
-| Key → workspace | A workspace-scoped key is bound to one workspace; a mismatching `X-Workspace-Id` (REST) or `workspace_id` argument (MCP) is rejected. A user-scoped key may name any workspace the user owns; anything else is rejected | `services/inh-public-api-svc/src/services/auth.py` (`get_authorized_workspace_ids`, consumed by `_resolve_workspace` for REST and `src/mcp_server/server.py` for MCP) |
+| Key → workspace | A workspace-scoped key is bound to one workspace; a mismatching `X-Workspace-Id` (REST) or `workspace_id` argument (MCP) is rejected. A user-scoped key may name any workspace the user owns or is a member of; anything else is rejected | `services/inh-public-api-svc/src/services/auth.py` (`get_authorized_workspace_ids`, consumed by `_resolve_workspace` for REST and `src/mcp_server/server.py` for MCP) |
 | Workspace → storage | One Weaviate collection per workspace (`Workspace_<encoded id>`), one tenant per user inside it (`User_<encoded id>`). Names are derived deterministically and injectively from the raw ids, so distinct ids can never collide onto one collection | `services/inh-contracts/src/inh_contracts/naming.py` |
 | Query → tenant | Every Weaviate query carries the caller's tenant and targets a single workspace collection. A single-workspace search cannot read another workspace's collection | `services/inh-public-api-svc/src/services/search.py` (`_search_weaviate`) |
-| Fan-out → authorized set | With no `X-Workspace-Id` / `workspace_id`, read/search fan out only over `get_authorized_workspace_ids(key_info, database)` — the caller's authorized set (the key's own workspace when scoped, otherwise every workspace the user owns) — so merged results cannot cross authorization | `services/inh-public-api-svc/src/api/v1/search.py` (REST), `services/inh-public-api-svc/src/mcp_server/server.py` (MCP) |
+| Fan-out → authorized set | With no `X-Workspace-Id` / `workspace_id`, read/search fan out only over `get_authorized_workspace_ids(key_info, database)` — the caller's authorized set (the key's own workspace when scoped, otherwise every workspace the user owns or belongs to) — so merged results cannot cross authorization | `services/inh-public-api-svc/src/api/v1/search.py` (REST), `services/inh-public-api-svc/src/mcp_server/server.py` (MCP) |
 
 The REST and MCP surfaces share one implementation of the key-scoping rule
 (`get_authorized_workspace_ids` in `src/services/auth.py`) — neither surface
@@ -43,6 +43,77 @@ the [REST API reference](reference/rest-api.md#workspace-scoping) for the
 exact status codes and [ADR 0002](adr/0002-weaviate-multi-tenancy-scale.md)
 for the tenancy model.
 
+## Workspace members and roles (prime#331)
+
+A workspace has one **owner** (`workspaces.user_id` in Mongo) and, optionally,
+**members**: `members: [{ user_id, role, added_at, added_by }]` on the same
+document. A user may act on a workspace when they are its owner OR appear in
+`members`. Workspace documents written before members existed have no
+`members` field and behave exactly as before (owner only).
+
+| Role | read | search | write (upload, delete/edit documents and chunks, conversation turns, eval writes) |
+| --- | --- | --- | --- |
+| `owner` | yes | yes | yes |
+| `admin` | yes | yes | yes |
+| `member` | yes | yes | yes |
+| `viewer` | yes | yes | **no** |
+| not a member | no | no | no |
+
+The role only ever *narrows* what the credential already allows: the
+effective permission is the API key's (or OAuth token's) permission AND the
+caller's role in that workspace. A `viewer` holding a key with `write` still
+gets `403` (REST) or an `Error: Your role in workspace '<id>' is 'viewer'...`
+result (MCP) on every write, but can read and search normally. A role the
+engine does not recognise grants nothing.
+
+- **Where it is checked.** Membership is resolved in
+  `get_authorized_workspace_ids(key_info, database, permission=...)`
+  (`src/services/auth.py`), the same function REST and MCP already share.
+  Write paths ask for `permission="write"`, which drops viewer workspaces:
+  REST does this once in `resolve_workspace_write` (every write route depends
+  on it), MCP passes it from the six write tools' workspace/document
+  resolution (a test fails if a new write tool is added without covering it).
+  The listing (`get_user_workspace_ids`) and the authoritative per-workspace
+  check (`user_can_access_workspace_in_mongo` / `get_workspace_role_in_mongo`)
+  read the membership from Mongo only.
+- **Revocation is immediate.** Nothing is cached: removing a member in Mongo
+  denies their very next request. The Postgres upload-history fallback that
+  still serves legacy owners never re-admits someone removed from a workspace
+  that has a `members` field.
+- **Mongo down.** A workspace-scoped key's binding check and every write
+  check raise (REST `5xx`, MCP `Error: ...`) rather than granting access on
+  incomplete information; only the read listing degrades as before.
+- **Scoped keys.** A key bound to a workspace works for a user who is only a
+  member of it, subject to the same role rule.
+
+### Data plane: the owner is the tenant, the caller is the attribution
+
+Weaviate keeps one tenant per user inside a workspace collection. For a team
+workspace every member must see the whole workspace, so the **workspace
+owner's** user id is the data-plane identity: uploads are stored under it, and
+search, context expansion and eval replays query it, whichever member makes
+the request. The owner comes from Mongo `workspaces.user_id`, looked up live
+on every request (`src/services/data_plane.py`; a Mongo failure raises rather
+than falling back to a private tenant). A workspace with no Mongo record
+(legacy or standalone) keeps the caller's own id, which is safe because
+membership comes from Mongo only.
+
+What a request *did* stays with the real caller: audit events, eval capture
+and feedback, quotas and entitlements, `whoami`, and the new
+`processed_documents.uploaded_by` column (migration 025) plus the `uploaded_by`
+field on the `document.uploaded` / `conversation.turn` events. `user_id` on
+those events is the tenant (owner).
+
+Every producer ends up in the owner's tenant. `inh-ingestion-svc` resolves the
+owner from Mongo when an event carries a `workspace_id` (so the platform's own
+events, which name the uploading member as `user_id`, are re-homed to the
+owner and the member is recorded as `uploaded_by`); if the workspace is not in
+Mongo the event's `user_id` is used as before. Set
+`WORKSPACE_OWNER_LOOKUP_ENABLED=false` for a deployment that runs without
+Mongo. Documents uploaded before this change stay in the tenant they were
+stored under; refresh, chunk edits and deletes use each stored row's own
+`user_id`.
+
 ## What tenant scoping does not do
 
 Tenant scoping isolates **workspaces from each other**. It does not partition
@@ -51,12 +122,11 @@ content **inside** a workspace:
 - **Every document in a workspace is reachable by every key authorized for
   that workspace.** There is no per-document, per-folder, per-label, or
   per-clearance restriction.
-- **The per-user Weaviate tenant is not a security boundary you should design
-  against.** Vector search is scoped to the caller's user tenant, but the
+- **The Weaviate tenant is not a security boundary you should design
+  against.** Vector search is scoped to the workspace owner's tenant, and the
   document and chunk read paths (`GET /v1/documents`,
-  `GET /v1/chunks/{document_id}`) are workspace-scoped only. In the common
-  deployment where one service identity uploads everything, every key for that
-  workspace retrieves the whole workspace corpus.
+  `GET /v1/chunks/{document_id}`) are workspace-scoped only, so every key for
+  that workspace retrieves the whole workspace corpus.
 - **`document_ids` on `POST /v1/search` is a caller-supplied narrowing, not an
   access control.** The caller chooses it and can omit it. Never treat it as
   enforcement.

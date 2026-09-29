@@ -79,6 +79,10 @@ def mock_db():
     db.get_document_id_by_content_hash = AsyncMock(return_value=None)
     db.get_document_id_by_filename = AsyncMock(return_value=None)
     db.create_or_reset_pending_document = AsyncMock(return_value=None)
+    # No control-plane record for the workspace: the caller's own id is the
+    # data-plane tenant (legacy behaviour). Team workspaces are covered in
+    # tests/security/test_workspace_tenant.py.
+    db.get_workspace_owners_in_mongo = AsyncMock(return_value={})
     db.mark_document_failed = AsyncMock(return_value=None)
     # Default off for the identical-content short-circuit: no existing row and
     # no stored upload fields, so an unrelated test can't trip the fast path via

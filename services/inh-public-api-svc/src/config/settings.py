@@ -1,5 +1,6 @@
 """Application settings using Pydantic Settings for environment variable management."""
 
+import re
 from functools import lru_cache
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
@@ -22,6 +23,12 @@ try:
     SERVICE_VERSION = _pkg_version("inh-public-api-svc")
 except PackageNotFoundError:  # pragma: no cover - only when running uninstalled
     SERVICE_VERSION = "0.0.0+local"
+
+
+# Collection/field names for the OAuth subject lookup are interpolated into a
+# Mongo query as NAMES (not values), so they are restricted to plain
+# identifiers -- no dots (nested paths), no leading "$" (operators).
+_SIMPLE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class KVMappingError(ValueError):
@@ -678,6 +685,35 @@ class Settings(BaseSettings):
             "change here -- unset by default (no such claim assumed)."
         ),
     )
+    # Mongo lookup step of the identity link (prime#329): map the token's
+    # `sub` to a user document in the SAME database the workspaces live in.
+    # All three unset = step skipped (claim -> static map, as before).
+    oauth_subject_lookup_collection: str | None = Field(
+        default=None,
+        alias="OAUTH_SUBJECT_LOOKUP_COLLECTION",
+        description="Mongo collection holding the users (e.g. 'users').",
+    )
+    oauth_subject_lookup_field: str | None = Field(
+        default=None,
+        alias="OAUTH_SUBJECT_LOOKUP_FIELD",
+        description=(
+            "Field in that collection equal to the token's `sub` (e.g. "
+            "'clerk_id'). Must be indexed by the collection's owner."
+        ),
+    )
+    oauth_subject_lookup_id_field: str = Field(
+        default="_id",
+        alias="OAUTH_SUBJECT_LOOKUP_ID_FIELD",
+        description="Field holding the Inherent user id (default '_id'; ObjectIds are stringified).",
+    )
+    oauth_subject_lookup_deleted_field: str = Field(
+        default="deleted_at",
+        alias="OAUTH_SUBJECT_LOOKUP_DELETED_FIELD",
+        description=(
+            "Soft-delete marker: a user whose document has a non-null value here "
+            "never resolves. Empty string disables the check."
+        ),
+    )
     oauth_subject_users_raw: str = Field("", alias="OAUTH_SUBJECT_USERS")
     _oauth_subject_users: dict[str, str] = PrivateAttr(default_factory=dict)
 
@@ -690,6 +726,39 @@ class Settings(BaseSettings):
             self.oauth_subject_users_raw, setting_name="OAUTH_SUBJECT_USERS"
         )
         return self
+
+    @model_validator(mode="after")
+    def _validate_oauth_subject_lookup(self) -> "Settings":
+        """Fail at startup on a half-configured or unsafe lookup, not on the
+        first OAuth call."""
+        collection = self.oauth_subject_lookup_collection
+        field = self.oauth_subject_lookup_field
+        if bool(collection) != bool(field):
+            raise ValueError(
+                "OAUTH_SUBJECT_LOOKUP_COLLECTION and OAUTH_SUBJECT_LOOKUP_FIELD "
+                "must be set together"
+            )
+        names = {
+            "OAUTH_SUBJECT_LOOKUP_COLLECTION": collection,
+            "OAUTH_SUBJECT_LOOKUP_FIELD": field,
+            "OAUTH_SUBJECT_LOOKUP_ID_FIELD": self.oauth_subject_lookup_id_field,
+            "OAUTH_SUBJECT_LOOKUP_DELETED_FIELD": self.oauth_subject_lookup_deleted_field,
+        }
+        for setting_name, value in names.items():
+            # None/"" = unset (for the deleted field: check disabled); only the
+            # id field must always be a real name.
+            if value is None or (value == "" and not setting_name.endswith("ID_FIELD")):
+                continue
+            if not _SIMPLE_IDENTIFIER.match(value):
+                raise ValueError(
+                    f"{setting_name} must be a simple identifier "
+                    f"(letters, digits, underscore), got {value!r}"
+                )
+        return self
+
+    @property
+    def oauth_subject_lookup_enabled(self) -> bool:
+        return bool(self.oauth_subject_lookup_collection and self.oauth_subject_lookup_field)
 
     @property
     def oauth_subject_users(self) -> dict[str, str]:

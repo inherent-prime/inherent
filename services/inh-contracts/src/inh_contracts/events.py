@@ -29,7 +29,19 @@ class DocumentUploadMessage(BaseModel):
     event_type: Literal["document.uploaded"] = Field(..., description="Event type identifier")
     document_id: str = Field(..., description="Unique document identifier")
     workspace_id: str = Field(..., description="Workspace identifier")
-    user_id: str = Field(..., description="User identifier who uploaded the document")
+    user_id: str = Field(
+        ...,
+        description="Data-plane user identifier: the Weaviate tenant the document is stored "
+        "in. For a workspace with members this is the workspace OWNER, whichever member "
+        "uploaded (ingestion resolves it from the control plane when it can).",
+    )
+    uploaded_by: str | None = Field(
+        None,
+        max_length=500,
+        description="User who actually performed the upload (the caller), for attribution. "
+        "Absent on messages produced before workspace members existed; consumers then "
+        "treat user_id as the uploader.",
+    )
     filename: str = Field(..., description="Storage filename")
     original_filename: str = Field(..., description="Original filename from upload")
     content_type: str = Field(..., description="MIME type of the document")
@@ -104,7 +116,13 @@ class DocumentUploadMessage(BaseModel):
         return sanitize_source_url(value) if isinstance(value, str) else None
 
     @field_validator(
-        "storage_bucket", "storage_url", "source", "connection_id", "sync_id", mode="before"
+        "storage_bucket",
+        "storage_url",
+        "source",
+        "connection_id",
+        "sync_id",
+        "uploaded_by",
+        mode="before",
     )
     @classmethod
     def unwrap_avro_union(cls, v: None | str | dict) -> str | None:
@@ -168,7 +186,14 @@ class ConversationTurnMessage(BaseModel):
 
     event_type: Literal["conversation.turn"] = Field(..., description="Event type identifier")
     workspace_id: str = Field(..., description="Workspace identifier")
-    user_id: str = Field(..., description="User identifier who sent/owns the turn")
+    user_id: str = Field(
+        ..., description="Data-plane user identifier (the workspace owner's tenant)"
+    )
+    uploaded_by: str | None = Field(
+        None,
+        max_length=500,
+        description="User who actually sent the turn (the caller). Absent on older messages.",
+    )
     external_id: str = Field(
         ..., description="Caller-supplied conversation identifier (path segment)"
     )

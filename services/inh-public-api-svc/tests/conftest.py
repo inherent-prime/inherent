@@ -28,6 +28,22 @@ def _reset_rate_limiter_singleton():
 
 
 @pytest.fixture(autouse=True)
+def _caller_is_tenant_by_default(request, monkeypatch):
+    """Most tests mock the database and have no workspace owner to look up, so
+    the owner-as-tenant resolver (src/services/data_plane.py, prime#331)
+    defaults to the legacy answer here: the caller's own id. Tests of the real
+    lookup opt out with ``@pytest.mark.real_data_plane``."""
+    if request.node.get_closest_marker("real_data_plane"):
+        return
+
+    async def caller_is_tenant(database, workspace_ids, caller_user_id):
+        return {ws: caller_user_id for ws in workspace_ids}
+
+    monkeypatch.setattr("src.services.data_plane.data_plane_user_ids", caller_is_tenant)
+    monkeypatch.setattr("src.api.v1.search.data_plane_user_ids", caller_is_tenant)
+
+
+@pytest.fixture(autouse=True)
 def _reset_entitlements_provider_singleton():
     """Isolate the global entitlements provider between tests (#309).
 

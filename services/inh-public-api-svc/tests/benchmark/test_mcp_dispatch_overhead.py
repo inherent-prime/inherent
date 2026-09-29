@@ -202,7 +202,7 @@ class TestToolProfileDispatchOverhead:
         # Workspace-scoped key (#138): resolved via the Mongo membership
         # check, not `get_user_workspace_ids` -- see auth.py's
         # `get_authorized_workspace_ids` docstring.
-        mock_db.user_owns_workspace_in_mongo = AsyncMock(return_value=True)
+        mock_db.user_can_access_workspace_in_mongo = AsyncMock(return_value=True)
 
         mock_search = AsyncMock()
         mock_search.search = AsyncMock(return_value=_mock_search_response())

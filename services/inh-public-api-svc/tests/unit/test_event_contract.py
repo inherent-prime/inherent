@@ -51,6 +51,9 @@ CANONICAL_V1_KEYS = {
     # and never sets connection_id/sync_id — those are connector-sourced-only
     # fields this service has no reason to populate.
     "source",
+    # Uploader attribution (prime#331): user_id is the workspace owner's tenant,
+    # uploaded_by the caller who actually uploaded.
+    "uploaded_by",
 }
 
 

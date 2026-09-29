@@ -74,6 +74,8 @@ from mcp.types import TextContent
 from src.mcp_server.audit import record_returned_chunk_ids, record_workspace_ids
 from src.models.api_key import APIKeyInfo
 from src.services.auth import get_authorized_workspace_ids
+from src.services.data_plane import data_plane_user_id
+from src.services.database import get_database
 from src.services.search import (
     TagFilterError,
     build_search_request,
@@ -173,7 +175,11 @@ def _make_profile_handler(profile: "ToolProfile", workspace_id: str):
 
         search_service = await get_search_service()
         try:
-            response = await search_service.search(workspace_id, key_info.user_id, request)
+            # The workspace OWNER's tenant, so a member sees the whole workspace (prime#331).
+            tenant_user_id = await data_plane_user_id(
+                await get_database(), workspace_id, key_info.user_id
+            )
+            response = await search_service.search(workspace_id, tenant_user_id, request)
         except TagFilterError as exc:
             # Friendly error (inherent#392): a caller passing a filter value
             # outside its enum, or (if the pack changed underneath a stale

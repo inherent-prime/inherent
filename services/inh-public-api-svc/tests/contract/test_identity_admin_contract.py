@@ -31,7 +31,7 @@ def key_info() -> APIKeyInfo:
 @pytest.fixture
 def database() -> AsyncMock:
     database = AsyncMock()
-    database.user_owns_workspace_in_mongo.return_value = True
+    database.user_can_access_workspace_in_mongo.return_value = True
     database.list_admin_workspaces.return_value = [
         {"workspace_id": "ws-b", "name": "B", "user_id": "user-b", "document_count": 2}
     ]
@@ -91,7 +91,9 @@ async def test_whoami_reports_only_the_authenticated_binding(client, database):
         "engine_version": settings.version,
         "endpoint": "https://engine.example",
     }
-    database.user_owns_workspace_in_mongo.assert_awaited_once_with("user-b", "ws-b")
+    database.user_can_access_workspace_in_mongo.assert_awaited_once_with(
+        "user-b", "ws-b", write=False
+    )
     serialized = response.text
     assert "ink_b-secret" not in serialized
     assert "key_hash" not in serialized
@@ -109,7 +111,7 @@ async def test_user_scoped_whoami_reports_full_owned_set(client, database, key_i
 
 
 async def test_stale_scoped_binding_does_not_fall_back_to_owned_set(client, database):
-    database.user_owns_workspace_in_mongo.return_value = False
+    database.user_can_access_workspace_in_mongo.return_value = False
 
     response = await client.get("/v1/whoami")
 
