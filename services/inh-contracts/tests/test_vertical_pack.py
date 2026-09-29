@@ -211,3 +211,14 @@ default_limit: {default_limit}
 max_limit: {max_limit}
 """
     )
+
+
+def test_rule_value_with_no_patterns_rejected():
+    with pytest.raises(ValueError, match="has no patterns"):
+        TagField(type="enum", values=["a"], rules={"a": []})
+
+
+def test_date_field_rejects_non_date_value():
+    field = TagField(type="date")
+    with pytest.raises(VerticalError, match="not a date"):
+        field.check("effective", "2026-01-01")

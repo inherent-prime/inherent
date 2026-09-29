@@ -64,3 +64,12 @@ def test_value_at_length_limit_kept():
     url = "https://example.com/" + padding
     assert len(url) == MAX_SOURCE_URL_LENGTH
     assert sanitize_source_url(url) == url
+
+
+def test_unparsable_url_becomes_none():
+    # urlsplit raises ValueError on a malformed bracketed IPv6 host.
+    assert sanitize_source_url("https://[::1/path") is None
+
+
+def test_triple_slash_without_host_rejected():
+    assert sanitize_source_url("https:///no-host") is None

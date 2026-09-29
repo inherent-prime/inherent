@@ -2246,8 +2246,10 @@ class DatabaseService:
         with self.get_session() as session:
             for table_name in self._EVAL_TABLES:
                 result = session.execute(
+                    # table_name comes only from the _EVAL_TABLES allowlist and
+                    # workspace_id is bound, so nothing untrusted is interpolated.
                     text(
-                        f"DELETE FROM {table_name} WHERE workspace_id = :workspace_id"
+                        f"DELETE FROM {table_name} WHERE workspace_id = :workspace_id"  # nosec B608
                     ),  # noqa: S608
                     {"workspace_id": workspace_id},
                 )
@@ -2325,8 +2327,9 @@ class DatabaseService:
             for table_name in self._EVAL_TABLES:
                 counts[table_name] = int(
                     session.execute(
+                        # Allowlisted table_name, bound workspace_id (see above).
                         text(
-                            f"SELECT COUNT(*) FROM {table_name} WHERE workspace_id = :workspace_id"
+                            f"SELECT COUNT(*) FROM {table_name} WHERE workspace_id = :workspace_id"  # nosec B608
                         ),  # noqa: S608
                         {"workspace_id": workspace_id},
                     ).scalar_one()

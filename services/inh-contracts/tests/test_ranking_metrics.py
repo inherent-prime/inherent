@@ -53,3 +53,42 @@ def test_hit_at_k_deduplicates_ranked_ids():
 
 def test_mrr_still_works_from_shared_module():
     assert mrr(["x", "a"], {"a"}) == 0.5
+
+
+# Edge cases for the metrics promoted from inh-public-api-svc: pinned here too so
+# this package's own coverage gate holds on the code it now owns.
+
+
+def test_recall_at_k_is_zero_without_relevant_ids_or_positive_k():
+    assert recall_at_k(["a"], set(), 3) == 0.0
+    assert recall_at_k(["a"], {"a"}, 0) == 0.0
+
+
+def test_mrr_is_zero_without_relevant_ids_or_any_hit():
+    assert mrr(["a", "b"], set()) == 0.0
+    assert mrr(["a", "b"], {"z"}) == 0.0
+
+
+def test_mrr_uses_rank_after_deduplication():
+    # Duplicate "a" collapses, so "b" is rank 2, not 3.
+    assert mrr(["a", "a", "b"], {"b"}) == 0.5
+
+
+def test_ndcg_at_k_perfect_ranking_is_one():
+    from inh_contracts.ranking_metrics import ndcg_at_k
+
+    assert ndcg_at_k(["a", "b"], {"a": 2, "b": 1}, 2) == 1.0
+
+
+def test_ndcg_at_k_penalises_a_worse_ordering():
+    from inh_contracts.ranking_metrics import ndcg_at_k
+
+    swapped = ndcg_at_k(["b", "a"], {"a": 2, "b": 1}, 2)
+    assert 0.0 < swapped < 1.0
+
+
+def test_ndcg_at_k_is_zero_for_non_positive_k_or_no_gain():
+    from inh_contracts.ranking_metrics import ndcg_at_k
+
+    assert ndcg_at_k(["a"], {"a": 1}, 0) == 0.0
+    assert ndcg_at_k(["a"], {"a": 0}, 1) == 0.0
