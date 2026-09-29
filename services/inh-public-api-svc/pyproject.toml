@@ -66,6 +66,9 @@ dev = [
     "mypy==1.19.1",
     "bandit[toml]==1.9.3",
     "types-redis>=4.6.0",
+    # Builds the synthetic .docx fixture for the pilot-flow compose test
+    # (tests/integration/test_compose_pilot_flow.py). Test-only.
+    "python-docx>=1.0.0",
 ]
 
 [build-system]

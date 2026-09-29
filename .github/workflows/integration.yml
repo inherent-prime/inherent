@@ -88,6 +88,11 @@ jobs:
       OAUTH_ENABLED: "true"
       OAUTH_AUTHORIZATION_SERVER: "https://oauth.inherent-test.example"
       OAUTH_RESOURCE_IDENTIFIER: "http://localhost:18000/mcp"
+      # Pilot-flow E2E (tests/integration/test_compose_pilot_flow.py): the
+      # generic fixture pack the test reads its manifest from, and which
+      # docker-compose.pilot-e2e.yml mounts + binds to the pilot workspace
+      # (both default to it; set explicitly so the test does not skip).
+      E2E_VERTICAL_PACK_DIR: ${{ github.workspace }}/services/inh-public-api-svc/tests/fixtures/handbook_pack
     # Expose whether the retrieval-eval hard gate specifically failed, so the
     # alert job can fire on a *retrieval* regression only -- not on any unrelated
     # compose failure (ingestion benchmark, latency SLO, ...).
@@ -117,7 +122,10 @@ jobs:
         # a live OAuth-enabled `/mcp` to hit.
         env:
           RATE_LIMIT_ENABLED: "false"
-        run: docker compose up -d --build --wait
+        # The pilot override mounts one generic vertical pack and binds ONE
+        # fixed workspace id to it (see docker-compose.pilot-e2e.yml); it is
+        # inert for every other test's workspace.
+        run: docker compose -f docker-compose.yml -f docker-compose.pilot-e2e.yml up -d --build --wait
 
       - name: Wait for the public API to be healthy
         run: |

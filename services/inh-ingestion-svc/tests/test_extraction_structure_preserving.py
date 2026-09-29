@@ -82,33 +82,35 @@ def _save(document: docx.Document) -> bytes:
 
 
 class TestDocxHeadings:
-    def test_heading_and_title_styles_render_as_markdown_prefixes(self):
+    def test_heading_styles_render_as_their_own_plain_lines(self):
+        """Headings (Title and Heading 1..6) keep their own line, without a
+        markdown "#" marker: DOCX is chunked as prose (which ignores "#"),
+        numbered_sections detects sections by numbering, and the marker
+        measurably lowered retrieval (retrieval-eval gate, recall@5 0.88 ->
+        0.84)."""
         document = docx.Document()
-        document.add_heading("Master Services Agreement", level=0)  # "Title" style
+        document.add_heading("Product Handbook", level=0)  # "Title" style
         document.add_heading("Definitions", level=1)
         document.add_heading("Payment Terms", level=2)
         document.add_paragraph("Plain body text, no heading style.")
 
         text = _extract_docx_text(_save(document), "sample.docx")
+        lines = text.splitlines()
 
-        assert "# Master Services Agreement" in text
-        assert "# Definitions" in text
-        assert "## Payment Terms" in text
+        for heading in ("Product Handbook", "Definitions", "Payment Terms"):
+            assert heading in lines, f"{heading!r} must be a line of its own"
+        assert not any(line.startswith("#") for line in lines)
         assert "Plain body text, no heading style." in text
-        # A plain paragraph must NOT pick up any "#" prefix.
-        for line in text.splitlines():
-            if "Plain body text" in line:
-                assert not line.startswith("#")
 
-    def test_all_six_heading_levels_map_to_matching_hash_counts(self):
+    def test_all_six_heading_levels_stay_plain_lines(self):
         document = docx.Document()
         for level in range(1, 7):
             document.add_heading(f"Heading level {level}", level=level)
 
-        text = _extract_docx_text(_save(document), "sample.docx")
+        lines = _extract_docx_text(_save(document), "sample.docx").splitlines()
 
         for level in range(1, 7):
-            assert f"{'#' * level} Heading level {level}" in text
+            assert f"Heading level {level}" in lines
 
 
 class TestDocxNumbering:
@@ -132,9 +134,9 @@ class TestDocxNumbering:
 
         texts_and_levels = [
             ("Definitions", 0),
-            ("The Seller shall deliver goods within 30 days", 1),
+            ("The team ships releases within 30 days", 1),
             ("any breach of this clause shall be notified", 2),
-            ("in writing to the Buyer", 3),
+            ("in writing to the owner", 3),
             ("Payment Terms", 0),
             ("Invoices are due net 30", 1),
         ]
@@ -145,9 +147,9 @@ class TestDocxNumbering:
         text = _extract_docx_text(_save(document), "sample.docx")
 
         assert "1 Definitions" in text
-        assert "1.1 The Seller shall deliver goods within 30 days" in text
+        assert "1.1 The team ships releases within 30 days" in text
         assert "(a) any breach of this clause shall be notified" in text
-        assert "(i) in writing to the Buyer" in text
+        assert "(i) in writing to the owner" in text
         # Counter reset: the second top-level item is "2", not "3", and its
         # own sub-level restarts at ".1", not continuing "1.2"/".2".
         assert "2 Payment Terms" in text
@@ -224,13 +226,13 @@ class TestDocxAcceptanceSyntheticDocument:
     survive extraction with every section boundary intact (target >= 19/20).
     """
 
-    def _build_synthetic_contract(self, section_count: int = 20) -> bytes:
+    def _build_synthetic_document(self, section_count: int = 20) -> bytes:
         document = docx.Document()
         numbering_element = document.part.numbering_part.element
         _add_abstract_num(numbering_element, "70", [("decimal", "%1.", "1")])
         _add_num(numbering_element, "70", "70")
 
-        document.add_heading("Synthetic Master Agreement", level=0)
+        document.add_heading("Synthetic Handbook", level=0)
         for n in range(1, section_count + 1):
             heading = document.add_paragraph(f"Section {n} Heading")
             _set_direct_num_pr(heading, "70", 0)
@@ -241,8 +243,8 @@ class TestDocxAcceptanceSyntheticDocument:
         return _save(document)
 
     def test_every_section_boundary_survives_extraction(self):
-        content = self._build_synthetic_contract(section_count=20)
-        text = _extract_docx_text(content, "synthetic-contract.docx")
+        content = self._build_synthetic_document(section_count=20)
+        text = _extract_docx_text(content, "synthetic-document.docx")
 
         intact = 0
         for n in range(1, 21):
@@ -311,9 +313,9 @@ class TestPdfLineStructure:
     def test_numbered_heading_lines_stay_on_their_own_line(self):
         lines = [
             "1. Definitions",
-            "1.1 The Seller shall deliver goods within 30 days.",
+            "1.1 The team ships releases within 30 days.",
             "(a) any breach of this clause shall be notified",
-            "(i) in writing to the Buyer",
+            "(i) in writing to the owner",
             "2. Payment Terms",
         ]
         text = _extract_pdf_text(_build_pdf(lines))
@@ -324,7 +326,7 @@ class TestPdfLineStructure:
             )
 
     def test_tight_line_leading_still_keeps_lines_separate(self):
-        """A dense contract layout (small leading) must not merge adjacent
+        """A dense document layout (small leading) must not merge adjacent
         numbered lines into one (#389: "line breaks are preserved")."""
         lines = ["3.1 First tightly-spaced clause.", "3.2 Second tightly-spaced clause."]
         text = _extract_pdf_text(_build_pdf(lines, leading=10))
@@ -338,8 +340,8 @@ class TestPdfHyphenationAndWhitespaceNormalization:
         # pypdf's own line-break detection already turns this into two
         # `extract_text()` lines joined by "\n" -- exactly the wrap-artifact
         # shape `_normalize_pdf_page_text` targets.
-        text = _extract_pdf_text(_build_pdf(["This is informa-", "tion about the contract."]))
-        assert "information about the contract." in text
+        text = _extract_pdf_text(_build_pdf(["This is informa-", "tion about the release."]))
+        assert "information about the release." in text
         assert "informa-\ntion" not in text
 
     def test_numbered_marker_is_never_dehyphenated(self):

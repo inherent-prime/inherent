@@ -670,6 +670,43 @@ tests, at two different layers:
     lifetime (`src/main.py` builds it once, not per request), so this cost is
     paid once per unique tool name for the life of the process, not per call.
 
+## Pilot-flow E2E (vertical pack, #390-#395)
+
+`services/inh-public-api-svc/tests/integration/test_compose_pilot_flow.py`
+(`compose`) proves the whole pilot path against a booted stack, one ordered step
+each: (a) a synthetic `.docx` (numbered sections, `1` / `1.1` / `(a)` outline
+numbering, a table) is ingested with a `source_url`; (b) chunks split at the
+numbered sections with the parent heading and the pack's rule tags; (c) over MCP
+Streamable HTTP `tools/list` shows the pack's profile tool and a filtered call
+returns text, tags, section heading and `source_url`; (d) that call is in Mongo
+`audit_logs` with principal, surface, tool name and returned chunk ids; (e) a
+second document repeating a section bumps the older chunk's `reuse_count`; (f) a
+`viewer` member can search the owner's documents but not upload, and loses access
+when removed; (g) `POST /admin/workspaces/{id}/purge` verifies zero residue.
+
+It reads the pack from `E2E_VERTICAL_PACK_DIR` (any directory with a top-level
+`vertical.yaml`) and derives tool, filter and tag triggers from the pack's own
+files, so it holds no domain terms; it skips when the variable is unset. The
+stack must be booted with that pack mounted and the workspace bound, which
+`docker-compose.pilot-e2e.yml` does (default pack: the generic
+`tests/fixtures/handbook_pack`):
+
+```bash
+export E2E_VERTICAL_PACK_DIR=$PWD/services/inh-public-api-svc/tests/fixtures/handbook_pack
+docker compose -f docker-compose.yml -f docker-compose.pilot-e2e.yml up -d --build --wait
+make bootstrap
+cd services/inh-public-api-svc
+uv run pytest tests/integration/test_compose_pilot_flow.py -m compose --no-cov
+```
+
+For another pack also export `E2E_VERTICAL_PACK_NAME=<name in its vertical.yaml>`
+before `docker compose up`. A purge is terminal for a workspace id (the engine
+then refuses new ingest), so the test lifts that marker on start and purges
+again at the end -- always run it against a throwaway stack, never a workspace
+you care about. Binding the same override to the benchmark workspace
+(`E2E_PILOT_WORKSPACE_ID=ws_local_001`) also enables the tool-profile case of
+the [MCP round-trip benchmark](#mcp-retrieval-latency-396).
+
 ## Coverage
 
 Coverage is enabled by default (`--cov=src --cov-report=term-missing`). To run

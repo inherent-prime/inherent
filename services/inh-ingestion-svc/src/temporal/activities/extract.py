@@ -484,32 +484,11 @@ def _extract_pdf_text(content: bytes) -> str:
     return "\n\n".join(text_parts)
 
 
-_DOCX_HEADING_STYLE_PREFIXES: dict[str, str] = {
-    "title": "#",
-    **{f"heading {n}": "#" * n for n in range(1, 7)},
-}
-
-
-def _docx_heading_prefix(style_name: str | None) -> str | None:
-    """Markdown heading prefix (``"#"``..``"######"``) for a DOCX built-in
-    heading/title style name, or ``None`` if `style_name` isn't one (#389).
-
-    Matched on Word's built-in style NAME ("Heading 1", "Title", ...) --
-    what ``paragraph.style.name`` gives -- not the internal style id, since
-    the name is the stable, human-facing string every DOCX author sees,
-    while the id can vary by locale/template.
-
-    This does NOT make DOCX's chunking behave like PPTX/JSON's ``##``
-    -section-based strategy: `chunk.py`'s ``_chunk_by_sections`` only runs
-    for the registry's ``structured`` chunking hint, and DOCX's hint stays
-    ``prose`` (sentence chunking, unchanged by #389) -- see
-    ``inh_contracts.file_types``'s docx entry. Emitting these markers only
-    gives the unchanged prose chunker (and any downstream reader) markdown
-    structure to work with.
-    """
-    if not style_name:
-        return None
-    return _DOCX_HEADING_STYLE_PREFIXES.get(style_name.strip().lower())
+# DOCX heading styles (Title, Heading 1..6) are emitted as plain lines of their
+# own, with no markdown "#" marker: DOCX is chunked as prose (which ignores "#"),
+# the numbered_sections strategy detects sections by numbering, and the marker
+# measurably lowered retrieval (the compose retrieval-eval gate's semantic
+# recall@5 fell 0.88 -> 0.84 when #389 first added it).
 
 
 def _docx_escape_table_cell(text: str) -> str:
@@ -588,11 +567,6 @@ def _docx_paragraph_line(paragraph: Any, numbering_scheme: Any) -> str | None:
 
     rendered = f"{marker} {text}".strip() if marker else text
 
-    style = getattr(paragraph, "style", None)
-    heading_prefix = _docx_heading_prefix(getattr(style, "name", None))
-    if heading_prefix:
-        rendered = f"{heading_prefix} {rendered}".strip()
-
     return rendered or None
 
 
@@ -659,8 +633,8 @@ def _extract_docx_text(content: bytes, filename: str = "") -> str:
 
     - Body walked in DOCUMENT ORDER (paragraphs and tables interleaved) via
       `_docx_body_to_text`, not paragraphs-then-tables.
-    - Heading/Title styles rendered as markdown ``#``..``######`` prefixes
-      (`_docx_heading_prefix`).
+    - Heading/Title styles kept as plain lines of their own (no markdown
+      ``#``; see the note above ``_docx_escape_table_cell``).
     - Automatic list/outline numbering (``w:numPr``, direct or inherited via
       style) resolved and rendered inline (e.g. ``1.1``, ``(a)``, ``-``) via
       ``docx_numbering.NumberingScheme`` -- see that module for the format

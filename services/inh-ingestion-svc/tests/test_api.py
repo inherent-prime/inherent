@@ -848,6 +848,60 @@ class TestAdminPurgeWorkspace:
         # DatabaseService.record_purge_receipt), never document text.
         assert body["receipt"]["operator"] == "op@example.com"
 
+    def test_get_status_completed_decodes_result_like_real_temporal(self, client: TestClient):
+        """A handle fetched WITHOUT ``result_type`` decodes the dataclass result to a plain dict.
+
+        The mocks above return a ``PurgeWorkspaceResult`` from ``handle.result()``
+        unconditionally, which real Temporal does not: ``get_workflow_handle(id)``
+        with no ``result_type`` returns the JSON as a ``dict``, and the route's
+        ``result.residue`` then raised ``AttributeError`` -> HTTP 500 on every
+        completed purge (found by the live pilot-flow E2E). This mock decodes
+        the way Temporal does, so the route must ask for the typed result.
+        """
+        from temporalio.client import WorkflowExecutionStatus
+
+        from src.temporal.models import PurgeWorkspaceResult
+
+        typed = PurgeWorkspaceResult(
+            workspace_id="ws_001",
+            purge_workflow_id="purge-ws_001",
+            residue={"processed_documents": 0},
+            verified=True,
+            revoked_api_keys=1,
+            cancelled_ingestion_workflows=0,
+            audit_logs_purged=True,
+        )
+        description = MagicMock()
+        description.status = WorkflowExecutionStatus.COMPLETED
+
+        def _get_workflow_handle(workflow_id, *, result_type=None, **_kwargs):
+            handle = AsyncMock()
+            handle.describe = AsyncMock(return_value=description)
+            handle.result = AsyncMock(
+                return_value=typed if result_type is PurgeWorkspaceResult else typed.__dict__
+            )
+            return handle
+
+        client._mock_temporal_client.get_workflow_handle = MagicMock(
+            side_effect=_get_workflow_handle
+        )
+
+        with patch("src.temporal.shared_services.get_db_service") as mock_get_db:
+            mock_db = MagicMock()
+            mock_db.get_purge_receipt_by_workflow_id = AsyncMock(return_value={"verified": True})
+            mock_get_db.return_value = mock_db
+
+            resp = client.get(
+                "/admin/workspaces/ws_001/purge/purge-ws_001",
+                headers={"X-API-Key": VALID_API_KEY},
+            )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["status"] == "completed"
+        assert body["verified"] is True
+        assert body["residue"] == {"processed_documents": 0}
+
     def test_get_status_unknown_workflow_returns_not_found(self, client: TestClient):
         from temporalio.service import RPCError
 

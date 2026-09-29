@@ -38,6 +38,7 @@ from src.temporal.models import (
     ChunkEditResult,
     DocumentIngestionInput,
     PurgeWorkspaceInput,
+    PurgeWorkspaceResult,
     WorkflowResult,
 )
 from src.temporal.trigger import build_ingestion_source_memo
@@ -1138,7 +1139,9 @@ def create_app(settings: Settings) -> FastAPI:
         client: Client = request.app.state.temporal_client
 
         try:
-            handle = client.get_workflow_handle(purge_workflow_id)
+            # result_type: without it Temporal decodes the dataclass result to a
+            # plain dict and `result.residue` below raises (HTTP 500).
+            handle = client.get_workflow_handle(purge_workflow_id, result_type=PurgeWorkspaceResult)
             description = await handle.describe()
         except RPCError:
             return PurgeWorkspaceReportResponse(

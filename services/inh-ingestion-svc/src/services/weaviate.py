@@ -329,6 +329,14 @@ class WeaviateService:
             # not prose meant to be keyword/BM25-matched (same reasoning as
             # chunking_strategy above).
             Property(name="tags", data_type=DataType.TEXT_ARRAY, index_searchable=False),
+            # Section heading (inherent#390): the chunk's OWN heading line
+            # ("1.1 Access control") from a pack's numbered_sections chunker,
+            # so search results and pack MCP tools can show it. Persisted to
+            # Postgres chunk metadata all along, but search reads Weaviate --
+            # without this property no result could ever carry one. Display
+            # only (the heading text is already inside `content`), hence not
+            # BM25-indexed. Empty string for every chunk with no heading.
+            Property(name="section_heading", data_type=DataType.TEXT, index_searchable=False),
             # Conversation turn attribution (#306): promoted from
             # chunk.metadata by store_chunks_with_tenant below, same
             # promote-from-metadata pattern as content_risk/chunking_strategy
@@ -900,6 +908,10 @@ class WeaviateService:
                         # (not omitted) so the property always reads as a
                         # real, filterable TEXT_ARRAY.
                         "tags": list(chunk_meta.get("tags_weaviate") or []),
+                        # Section heading (inherent#390): promoted from the
+                        # chunk metadata store.py already persists; "" (not
+                        # omitted) when the chunker recorded none.
+                        "section_heading": chunk_meta.get("section_heading") or "",
                         # Usage-based ranking boost (inherent#394): every
                         # (re)write of this chunk starts unreused. This is
                         # correct even on reprocessing -- the object was just

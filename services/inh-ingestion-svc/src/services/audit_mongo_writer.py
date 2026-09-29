@@ -104,6 +104,10 @@ async def upsert_audit_log(
         "query_filters": event.get("query_filters", {}),
         "result_count": event["result_count"],
         "result_snippets": event.get("result_snippets", []),
+        # Provenance (#41, extended to every MCP tool call by #393): the ids of
+        # the chunks actually returned, so an audit record ties back to exact
+        # evidence. Published by the public API on every retrieval event.
+        "returned_chunk_ids": event.get("returned_chunk_ids", []),
         "llm_response": event.get("llm_response"),
         "response_time_ms": event["response_time_ms"],
         "request_id": event.get("request_id"),

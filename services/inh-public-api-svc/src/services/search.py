@@ -1226,6 +1226,7 @@ class SearchService:
                     content_risk
                     content_risk_reasons
                     tags
+                    section_heading
                     reuse_count
                     _additional {{ id score certainty distance }}
                 }}

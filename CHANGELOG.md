@@ -18,7 +18,13 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Changed
 
-- DOCX/PDF extraction now preserves document structure instead of flattening it: DOCX walks paragraphs and tables in document order, renders heading/title styles as markdown headings, resolves automatic outline/list numbering (decimal, letter, roman, bullet) inline, and renders tables as markdown tables; PDF extraction keeps per-page line breaks intact and conservatively rejoins line-wrap hyphenation. (#389)
+- DOCX/PDF extraction now preserves document structure instead of flattening it: DOCX walks paragraphs and tables in document order, keeps each heading on its own line, resolves automatic outline/list numbering (decimal, letter, roman, bullet) inline, and renders tables as markdown tables; PDF extraction keeps per-page line breaks intact and conservatively rejoins line-wrap hyphenation. (#389)
+
+### Fixed
+
+- **`GET /admin/workspaces/{id}/purge/{job}` returned HTTP 500 for every completed purge (#395, #399).** The route read the workflow result through an untyped Temporal handle, which decodes the result to a plain dict, so `result.residue` raised; it now requests `PurgeWorkspaceResult`. Found by the pilot-flow compose E2E.
+- **Search results and pack MCP profile tools never carried a section heading (#390, #392, #399).** The chunker's per-chunk `section_heading` reached Postgres only; `inh-ingestion-svc` now also writes it to a new Weaviate `section_heading` property (added to existing collections by the existing reconcile step) and `inh-public-api-svc` selects it, so `metadata.section_heading` and the profile tool's `section_heading` are populated. Upgrade `inh-ingestion-svc` before `inh-public-api-svc`, as with every earlier chunk property.
+- **Audit events dropped `returned_chunk_ids` on the way into Mongo `audit_logs` (#41, #393, #399).** The public API publishes the ids on every retrieval event, but the ingestion-side writer never stored them; they are now persisted (empty list when absent).
 
 ## [0.7.1] — 2026-09-28
 

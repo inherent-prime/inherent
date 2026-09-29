@@ -69,11 +69,12 @@ no longer flatten the document into an unstructured blob of text:
 
 - **DOCX** walks the body in document order — paragraphs and tables
   interleaved exactly as authored, not all paragraphs followed by all
-  tables. Built-in heading/title styles (`Heading 1`..`Heading 6`, `Title`)
-  render as markdown `#`..`######` prefixes. Automatic list/outline
+  tables. Heading and Title styles stay plain lines of their own (no
+  markdown `#`: DOCX is chunked as prose, and the marker measurably
+  lowered retrieval recall). Automatic list/outline
   numbering (`w:numPr`, set directly on a paragraph or inherited from its
   style) is resolved through `numbering.xml` and rendered inline — e.g.
-  `1.1 The Seller shall...`, `(a) any breach...` — via
+  `1.1 Scope of the service...`, `(a) the first case...` — via
   `src/temporal/activities/docx_numbering.py`, which supports the `decimal`,
   `lowerLetter`, `upperLetter`, `lowerRoman`, `upperRoman`, and `bullet`
   (rendered as `-`) number formats, falling back to `decimal` for anything

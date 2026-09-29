@@ -1,0 +1,48 @@
+# Compose override that boots the stack with ONE vertical pack mounted and ONE
+# workspace bound to it, for the pilot-flow E2E
+# (services/inh-public-api-svc/tests/integration/test_compose_pilot_flow.py).
+#
+# Nothing here is on by default: `make dev` / plain `docker compose up` never
+# load this file, so a normal stack still has no pack, no workspace binding and
+# no reuse detection (every one of these knobs is off-by-default in the engine).
+#
+# Usage (from the repo root):
+#
+#   # generic fixture pack shipped with the tests (what CI uses):
+#   docker compose -f docker-compose.yml -f docker-compose.pilot-e2e.yml up -d --build --wait
+#
+#   # any other pack directory (a directory holding a top-level vertical.yaml);
+#   # E2E_VERTICAL_PACK_NAME must equal the `name:` in that pack's vertical.yaml:
+#   E2E_VERTICAL_PACK_DIR=/path/to/pack E2E_VERTICAL_PACK_NAME=<name> \
+#     docker compose -f docker-compose.yml -f docker-compose.pilot-e2e.yml up -d --build --wait
+#
+# Then run the test with the SAME E2E_VERTICAL_PACK_DIR exported (the test reads
+# the pack's manifest from that host path; it skips when the variable is unset):
+#
+#   cd services/inh-public-api-svc
+#   E2E_VERTICAL_PACK_DIR=... uv run pytest tests/integration/test_compose_pilot_flow.py -m compose --no-cov
+#
+# The pack is mounted read-only at /packs/pilot-pack inside both services;
+# VERTICAL_PACKS_DIR=/packs makes each one discover it by its manifest name.
+# E2E_PILOT_WORKSPACE_ID must match the workspace id the test binds (default
+# below is the test's own default).
+x-pilot-env: &pilot-env
+  VERTICAL_PACKS_DIR: /packs
+  WORKSPACE_VERTICAL_PACKS: "${E2E_PILOT_WORKSPACE_ID:-ws_pilot_e2e_001}=${E2E_VERTICAL_PACK_NAME:-handbook}"
+
+services:
+  inh-ingestion-svc:
+    volumes:
+      - ${E2E_VERTICAL_PACK_DIR:-./services/inh-public-api-svc/tests/fixtures/handbook_pack}:/packs/pilot-pack:ro
+    environment:
+      <<: *pilot-env
+      # Near-duplicate detection on the pilot workspace only (#394).
+      WORKSPACE_REUSE_DETECTION: "${E2E_PILOT_WORKSPACE_ID:-ws_pilot_e2e_001}"
+
+  inh-public-api-svc:
+    volumes:
+      - ${E2E_VERTICAL_PACK_DIR:-./services/inh-public-api-svc/tests/fixtures/handbook_pack}:/packs/pilot-pack:ro
+    environment:
+      <<: *pilot-env
+      # Usage-based ranking boost for the pilot workspace only (#394).
+      WORKSPACE_REUSE_BOOST: "${E2E_PILOT_WORKSPACE_ID:-ws_pilot_e2e_001}=0.2"
