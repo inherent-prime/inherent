@@ -307,6 +307,36 @@ async def test_list_workspaces_missing_metadata_row() -> None:
 
 
 @pytest.mark.asyncio
+async def test_list_workspaces_uses_mongo_name_over_empty_metadata() -> None:
+    """Mongo ``workspaces.name`` fills the name when metadata JSONB is empty.
+
+    Regression: the tool returned bare UUIDs because it only read metadata.
+    """
+    mock_db = AsyncMock()
+    mock_db.get_user_workspace_ids = AsyncMock(return_value=["ws-a", "ws-b"])
+    mock_db.get_workspace_names_in_mongo = AsyncMock(
+        return_value={"ws-a": "Sales", "ws-b": "Legal"}
+    )
+    mock_session = AsyncMock()
+    mock_db.session = MagicMock(return_value=mock_session.__aenter__.return_value)
+    mock_db.session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_db.session.return_value.__aexit__ = AsyncMock(return_value=None)
+    mock_result = MagicMock()
+    # ws-a: empty metadata; ws-b: no metadata row at all
+    mock_result.fetchall = MagicMock(return_value=[_mock_workspace_row("ws-a", 3, None)])
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    with patch.object(mcp_server, "get_database", AsyncMock(return_value=mock_db)):
+        result = await mcp_server._handle_list_workspaces(_key(), {})
+
+    ws_by_id = {w["workspace_id"]: w for w in _structured_payload(result)["workspaces"]}
+    assert ws_by_id["ws-a"]["name"] == "Sales"
+    assert ws_by_id["ws-a"]["document_count"] == 3
+    assert ws_by_id["ws-b"]["name"] == "Legal"
+    assert "(Sales)" in result[0].text
+
+
+@pytest.mark.asyncio
 async def test_list_workspaces_tool_registered() -> None:
     """list_workspaces is registered in _TOOLS with correct config."""
     assert "list_workspaces" in mcp_server._TOOLS

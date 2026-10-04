@@ -1549,6 +1549,12 @@ async def _handle_list_workspaces(key_info: APIKeyInfo, arguments: dict) -> list
         )
         rows = result.fetchall()
 
+    # Mongo ``workspaces.name`` is the canonical name; the metadata JSONB is
+    # usually empty, which made callers see bare UUIDs.
+    mongo_names = await database.get_workspace_names_in_mongo(authorized)
+    if not isinstance(mongo_names, dict):
+        mongo_names = {}
+
     # Build a lookup map from query results
     metadata_by_ws = {
         row.workspace_id: {
@@ -1557,6 +1563,9 @@ async def _handle_list_workspaces(key_info: APIKeyInfo, arguments: dict) -> list
         }
         for row in rows
     }
+    for ws_id, ws_name in mongo_names.items():
+        if ws_id in metadata_by_ws:
+            metadata_by_ws[ws_id]["name"] = ws_name
 
     # Build workspaces list, preserving order from authorized list and handling
     # missing workspace_metadata rows (include them with count=0, name=null).
@@ -1576,7 +1585,7 @@ async def _handle_list_workspaces(key_info: APIKeyInfo, arguments: dict) -> list
             workspaces.append(
                 {
                     "workspace_id": workspace_id,
-                    "name": None,
+                    "name": mongo_names.get(workspace_id),
                     "document_count": 0,
                 }
             )
