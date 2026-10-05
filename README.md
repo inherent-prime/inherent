@@ -82,7 +82,7 @@ curl -s -X POST "$API_BASE/v1/search" -H "X-API-Key: $API_KEY" -H "X-Workspace-I
   -H "Content-Type: application/json" -d '{"query":"what retrieval modes does Inherent support","limit":3}' | jq .
 ```
 
-Full endpoint reference: [REST API](docs/reference/rest-api.md) · [MCP tools](docs/reference/mcp-tools.md) · [Examples](docs/examples/README.md).
+Full endpoint reference: [REST API](docs/reference/rest-api.md) · [MCP tools](docs/reference/mcp-tools.md) · [CLI](docs/reference/cli.md) · [Examples](docs/examples/README.md).
 
 ## Architecture
 
