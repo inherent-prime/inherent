@@ -375,7 +375,7 @@ parameters below.
 | Tool | HTTP | Parameters | Purpose | REST twin |
 | --- | --- | --- | --- | --- |
 | `whoami` | ✅ | none | Return the authenticated key's identity, binding, authoritative workspace set, engine version, and endpoint | `GET /v1/whoami` |
-| `list_workspaces` | ✅ | (none — uses authorized workspaces only) | List caller's authorized workspaces with metadata. Response includes top-level `is_scoped_binding` flag (true for workspace-scoped keys, false for user-scoped) and array of workspaces, each with `workspace_id`, `name` (null if not set), and `document_count`. A workspace-scoped key sees exactly its bound workspace; a user-scoped key sees every workspace its owner owns | No direct REST twin; closest: `GET /v1/documents` |
+| `list_workspaces` | ✅ | (none — uses authorized workspaces only) | List caller's authorized workspaces with metadata. Response includes top-level `is_scoped_binding` flag (true for workspace-scoped keys, false for user-scoped) and array of workspaces, each with `workspace_id`, `name` (the workspace's name from the control plane, falling back to the metadata name; null only if neither is set), and `document_count`. A workspace-scoped key sees exactly its bound workspace; a user-scoped key sees every workspace its owner owns | No direct REST twin; closest: `GET /v1/documents` |
 | `list_documents` | ✅ | `workspace_id`, `page` (1), `page_size` (20) | Paginated document listing | `GET /v1/documents` |
 | `get_document` | ✅ | `document_id` (required) | Single document's metadata | `GET /v1/documents/{id}` |
 | `list_chunks` | ✅ | `document_id` (required) | All chunks for a document. `chunk_index` may have gaps after deletes (#133 Option A) | `GET /v1/chunks/{document_id}` |
