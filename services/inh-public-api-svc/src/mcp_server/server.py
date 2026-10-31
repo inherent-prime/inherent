@@ -147,6 +147,10 @@ from src.services.search import (
     get_search_service,
 )
 from src.services.verify import verify_claim
+from src.services.workspace_provisioning import (
+    WorkspaceProvisioningError,
+    create_workspace_via_host,
+)
 from src.utils import get_logger
 
 logger = get_logger(__name__)
@@ -1600,6 +1604,70 @@ async def _handle_list_workspaces(key_info: APIKeyInfo, arguments: dict) -> list
     )
 
 
+# Prefix `http_transport._api_key_info_for_oauth` puts on `APIKeyInfo.key_id` for
+# an OAuth caller; the remainder is the token's `sub` (the Clerk user id).
+_OAUTH_KEY_ID_PREFIX = "oauth:"
+
+
+async def _handle_create_workspace(key_info: APIKeyInfo, arguments: dict) -> list[TextContent]:
+    """Handle create_workspace: ask the host app to create a workspace.
+
+    The engine owns no workspace-creation logic (ownership and plan limits
+    live in the host app), so this validates the caller and delegates to
+    ``create_workspace_via_host``. The 'write' permission (OAuth: kb:write) is
+    already enforced by the dispatcher before this runs.
+
+    Identity: the workspace must belong to a real user, so only a user-scoped
+    OAuth caller qualifies -- its Clerk user id is the token ``sub``, carried
+    on ``key_info.key_id`` as ``oauth:<sub>``. A workspace-scoped key is bound
+    to one workspace and must not mint new ones; a plain API key has no Clerk
+    identity to hand the host.
+    """
+    if key_info.workspace_id:
+        return [
+            TextContent(
+                type="text",
+                text="Error: a workspace-scoped API key cannot create workspaces; "
+                "sign in with OAuth (user-scoped access) instead",
+            )
+        ]
+    if not key_info.key_id.startswith(_OAUTH_KEY_ID_PREFIX):
+        return [
+            TextContent(
+                type="text",
+                text="Error: create_workspace requires signing in with OAuth "
+                "(for example from Claude); API keys have no user identity to own a workspace",
+            )
+        ]
+    clerk_user_id = key_info.key_id[len(_OAUTH_KEY_ID_PREFIX) :]
+
+    name = arguments.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return [TextContent(type="text", text="Error: name is required (a non-empty string)")]
+    description = arguments.get("description")
+    if description is not None and not isinstance(description, str):
+        return [TextContent(type="text", text="Error: description must be a string")]
+
+    try:
+        created = await create_workspace_via_host(
+            clerk_user_id, name.strip(), description.strip() if description else None
+        )
+    except WorkspaceProvisioningError as exc:
+        return [TextContent(type="text", text=exc.message)]
+
+    # Audit trail for the write: who created what. Ids only -- never the
+    # service secret, never the workspace description.
+    logger.info(
+        "workspace_created_via_mcp",
+        user_id=key_info.user_id,
+        principal_id=clerk_user_id,
+        workspace_id=created["workspace_id"],
+    )
+    return _structured(
+        f"Created workspace **{created['name']}** ({created['workspace_id']}).", created
+    )
+
+
 # Set by the HTTP transport per request so `whoami` can echo the URL the caller
 # actually reached. A ContextVar, not a tool argument: an argument would have to
 # be smuggled past the tool's own input_schema and would put a tool NAME back
@@ -2045,6 +2113,27 @@ _TOOLS: dict[str, ToolDef] = {
         },
         permission="read",
         handler=_handle_list_workspaces,
+    ),
+    "create_workspace": ToolDef(
+        description="Create a new workspace owned by the signed-in user. Requires "
+        "OAuth sign-in (a user-scoped identity) and 'write' permission (kb:write "
+        "scope); workspace-scoped API keys and plain API keys are refused. Plan "
+        "limits are enforced by the host app and reported in the error. Returns "
+        "workspace_id, name, description, role.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "api_key": {"type": "string", "description": "Your Inherent API key"},
+                "name": {"type": "string", "description": "Workspace name"},
+                "description": {
+                    "type": "string",
+                    "description": "Optional: what the workspace is for",
+                },
+            },
+            "required": ["api_key", "name"],
+        },
+        permission="write",
+        handler=_handle_create_workspace,
     ),
 }
 

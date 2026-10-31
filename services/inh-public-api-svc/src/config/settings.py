@@ -10,7 +10,7 @@ from inh_contracts.defaults import DEFAULT_MONGODB_URI, DEFAULT_S3_BUCKET, DEFAU
 from inh_contracts.workspace_hybrid_alpha import parse_workspace_hybrid_alpha
 from inh_contracts.workspace_packs import parse_workspace_vertical_packs
 from inh_contracts.workspace_reuse_boost import parse_workspace_reuse_boost
-from pydantic import AliasChoices, Field, PrivateAttr, model_validator
+from pydantic import AliasChoices, Field, PrivateAttr, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.config.constants import DEFAULT_DATABASE_NAME, ERROR_BASE_URL
@@ -713,6 +713,30 @@ class Settings(BaseSettings):
             "Soft-delete marker: a user whose document has a non-null value here "
             "never resolves. Empty string disables the check."
         ),
+    )
+    # Host-app (intg-svc) workspace provisioning. The engine cannot create
+    # workspaces itself -- ownership and plan limits live in the host app --
+    # so the `create_workspace` MCP tool calls POST {INTG_SVC_URL}/internal/
+    # workspaces, authenticated with the shared service secret. Both unset =
+    # the tool answers "not available on this deployment" (OSS default).
+    intg_svc_url: str | None = Field(
+        default=None,
+        alias="INTG_SVC_URL",
+        description="Base URL of the host app's integration service (e.g. http://inh-intg-svc:3001).",
+    )
+    engine_service_secret: SecretStr | None = Field(
+        default=None,
+        alias="ENGINE_SERVICE_SECRET",
+        description=(
+            "Shared secret sent as X-Service-Secret on engine -> host calls. "
+            "SecretStr so it is masked in repr()/model_dump()/logs."
+        ),
+    )
+    intg_svc_timeout_seconds: float = Field(
+        default=10.0,
+        gt=0,
+        alias="INTG_SVC_TIMEOUT_SECONDS",
+        description="Total timeout for one engine -> host call.",
     )
     oauth_subject_users_raw: str = Field("", alias="OAUTH_SUBJECT_USERS")
     _oauth_subject_users: dict[str, str] = PrivateAttr(default_factory=dict)
