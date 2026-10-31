@@ -29,7 +29,7 @@ claude mcp add --transport http inherent https://api.inherent.sh/mcp \
   a tool argument removes that surface entirely. Missing/invalid/expired
   keys get the same 401 REST returns, before any JSON-RPC request is even
   parsed.
-- **Tool surface: 15 of 19.** `verify_claim`, `search_memory`,
+- **Tool surface: 16 of 20.** `verify_claim`, `search_memory`,
   `get_citations`, and `report_feedback` are not advertised and cannot be
   called by name over HTTP
   (see [Surface difference](#surface-difference-http-vs-stdio) below) —
@@ -315,14 +315,14 @@ naming the two settings, never a fabricated identity.
   exactly its one workspace — a `workspace_id` naming any other workspace
   is rejected, even one the key's owner also owns. A user-scoped key
   (`workspace_id` unset on the key) may use any workspace its owner owns.
-- **All 19 tools** are advertised and callable, including the 4 excluded
+- **All 20 tools** are advertised and callable, including the 4 excluded
   from HTTP (below) — unaffected by the HTTP transport's existence.
 
 ## Surface difference: HTTP vs stdio
 
 | | stdio | Streamable HTTP |
 | --- | --- | --- |
-| Tool count | 19 | 15 |
+| Tool count | 20 | 16 |
 | API key | `api_key` schema argument | `X-API-Key` / `Authorization` header |
 | `verify_claim` | ✅ | ❌ excluded |
 | `search_memory` | ✅ | ❌ excluded |
@@ -353,7 +353,7 @@ name list maintained separately):
 
 ## Tools
 
-The full, stdio-side catalogue (all 19 tools). The **HTTP** column marks
+The full, stdio-side catalogue (all 20 tools). The **HTTP** column marks
 whether a tool is also on the Streamable HTTP surface (see
 [Surface difference](#surface-difference-http-vs-stdio) above). On
 stdio every tool requires `api_key` (string) as a schema argument; on HTTP
@@ -388,6 +388,7 @@ parameters below.
 | Tool | HTTP | Parameters | Purpose | REST twin |
 | --- | --- | --- | --- | --- |
 | `upload_document` | ✅ | `filename`, `content` (required); `content_type` (optional — omit it: derived from `filename`'s extension, see below), `workspace_id` | **Text-only** ingestion sharing REST's validate/dedup/store/enqueue pipeline. Binary formats (PDF/DOCX/PNG) and JSON are REST-only — use `POST /v1/documents`. If the key owns several workspaces, `workspace_id` is required | `POST /v1/documents` |
+| `create_workspace` | ✅ | `name` (required); `description` | Create a workspace owned by the signed-in user. **OAuth only** (needs the user's Clerk id, the token `sub`) and `kb:write`; workspace-scoped keys and plain API keys are refused. Delegates to the host app (`POST $INTG_SVC_URL/internal/workspaces`, `X-Service-Secret`) because ownership and plan limits live there. Returns `workspace_id`, `name`, `description`, `role: "owner"`. Host plan-limit/entitlement messages pass through; an unknown user, invalid input, or host outage return a plain error (outage: "try again later"). Unset `INTG_SVC_URL`/`ENGINE_SERVICE_SECRET` = "not available on this deployment" | None (host-app feature) |
 | `create_chunk` | ✅ | `document_id`, `content` (required) | Append a chunk at `max(chunk_index)+1`; PG then Weaviate (compensated on vector failure) | `POST /v1/chunks/{document_id}` |
 | `edit_chunk` | ✅ | `document_id`, `chunk_index`, `content` (required) | Edit by stable `chunk_index`; re-embeds. Vector failure restores prior PG content | `PATCH /v1/chunks/{document_id}/index/{chunk_index}` |
 | `delete_chunk` | ✅ | `document_id`, `chunk_index` (required) | Hard-delete one chunk (vector first); leaves gaps | `DELETE /v1/chunks/{document_id}/index/{chunk_index}` |

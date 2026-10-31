@@ -84,15 +84,16 @@ REST_HEADERS = {"X-API-Key": API_KEY, "X-Workspace-Id": WORKSPACE_ID}
 # would make this test tautological: it would assert that the registry equals
 # itself and would keep passing while a tool is silently added, renamed, or
 # flipped on/off for HTTP. The whole value here is that registry drift BREAKS
-# a live test and forces a human to re-confirm the published surface -- 19
-# tools on stdio, 15 of them exposed on HTTP (#220's "10, not 13" base, plus
-# report_feedback, plus whoami from #278 and list_workspaces from #297, plus
+# a live test and forces a human to re-confirm the published surface -- 20
+# tools on stdio, 16 of them exposed on HTTP (#220's "10, not 13" base, plus
+# report_feedback, plus whoami from #278 and list_workspaces from #297, plus create_workspace, plus
 # chunk CRUD create/edit/delete from #133). If a diff to these lists is
 # intentional, update them in the same commit as the registry change.
 # ---------------------------------------------------------------------------
 EXPECTED_STDIO_TOOLS = sorted(
     [
         "create_chunk",
+        "create_workspace",
         "delete_chunk",
         "delete_document",
         "edit_chunk",
@@ -117,6 +118,7 @@ EXPECTED_STDIO_TOOLS = sorted(
 EXPECTED_HTTP_TOOLS = sorted(
     [
         "create_chunk",
+        "create_workspace",
         "delete_chunk",
         "delete_document",
         "edit_chunk",

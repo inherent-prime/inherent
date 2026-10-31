@@ -28,7 +28,7 @@ MongoDB's `audit_logs` collection. This page lists every field on that event.
   underlying tool/search call.
 
 A tool that never returns retrieved chunk content (`whoami`,
-`upload_document`, `delete_document`, chunk CRUD, `list_workspaces`, …) is
+`upload_document`, `delete_document`, chunk CRUD, `list_workspaces`, `create_workspace`, …) is
 unaffected — no audit event, same as before #393.
 
 ## Event fields

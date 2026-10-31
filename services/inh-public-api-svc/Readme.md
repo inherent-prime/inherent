@@ -63,8 +63,8 @@ uv run python -m src.main
 ```
 
 The MCP server is exposed over two transports: stdio, and Streamable HTTP at
-`POST /mcp` (#220) in this same service process. 19 tools are available on
-stdio; 15 of those are exposed over HTTP. See
+`POST /mcp` (#220) in this same service process. 20 tools are available on
+stdio; 16 of those are exposed over HTTP. See
 [docs/reference/mcp-tools.md](../../docs/reference/mcp-tools.md) for the
 per-transport surface and why the four stdio-only tools are excluded.
 
@@ -119,6 +119,7 @@ per-transport surface and why the four stdio-only tools are excluded.
 | `get_retrieval_health` | Retrieve the workspace's retrieval scorecard |
 | `whoami` | Identify the calling key: workspace, permissions, expiry (#278) |
 | `list_workspaces` | List the workspaces the calling key is authorized for (#297) |
+| `create_workspace` | Create a workspace for the signed-in OAuth user via the host app (needs `kb:write`, `INTG_SVC_URL`, `ENGINE_SERVICE_SECRET`) |
 
 ## Validation Commands
 

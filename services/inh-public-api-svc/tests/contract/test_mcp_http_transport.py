@@ -84,6 +84,7 @@ HTTP_EXPOSED_TOOLS = {
     "refresh_stale_source",
     "get_retrieval_health",
     "list_workspaces",
+    "create_workspace",
     "create_chunk",
     "edit_chunk",
     "delete_chunk",
