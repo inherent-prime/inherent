@@ -971,7 +971,7 @@ wheels = [
 
 [[package]]
 name = "inh-contracts"
-version = "2.3.1"
+version = "2.4.0"
 source = { directory = "../inh-contracts" }
 dependencies = [
     { name = "httpx" },
@@ -1011,7 +1011,7 @@ dev = [
 
 [[package]]
 name = "inh-public-api-svc"
-version = "0.4.1"
+version = "0.5.0"
 source = { editable = "." }
 dependencies = [
     { name = "asyncpg" },

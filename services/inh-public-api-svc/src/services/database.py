@@ -1441,6 +1441,26 @@ class DatabaseService:
             record_workspace_ownership_lookup_degraded(source="mongo_ownership_check")
             raise
 
+    async def get_workspace_names_in_mongo(self, workspace_ids: Iterable[str]) -> dict[str, str]:
+        """``{workspace_id: name}`` from Mongo ``workspaces.name``.
+
+        Display-only (used by ``list_workspaces``), so unlike the
+        authorization reads it is best-effort: a Mongo failure returns ``{}``
+        and callers fall back to ids rather than failing the listing.
+        """
+        from src.services.mongo_client import get_mongo_client
+
+        ids = list(workspace_ids)
+        if not ids:
+            return {}
+        try:
+            collection = get_mongo_client()[settings.mongodb_db_name]["workspaces"]
+            cursor = collection.find({"_id": {"$in": _id_variants(ids)}}, {"_id": 1, "name": 1})
+            return {str(doc["_id"]): str(doc["name"]) async for doc in cursor if doc.get("name")}
+        except Exception:
+            logger.warning("workspace name lookup failed; falling back to ids", exc_info=True)
+            return {}
+
     async def get_workspace_role_in_mongo(
         self, user_id: str, workspace_id: str
     ) -> WorkspaceRole | None:

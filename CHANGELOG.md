@@ -5,6 +5,8 @@ All notable changes to Inherent are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-10-24
+
 ### Added
 
 - **MCP `create_workspace` tool: create a workspace from Claude.** Takes `name` and optional `description`; needs OAuth sign-in (the token `sub` is the Clerk user id) and `kb:write`. Workspace-scoped keys and plain API keys are refused. The engine delegates to the host app (`POST $INTG_SVC_URL/internal/workspaces` with `X-Service-Secret`), which owns ownership and plan limits; plan-limit messages pass through, host outages become "try again later". New settings `INTG_SVC_URL`, `ENGINE_SERVICE_SECRET` (masked), `INTG_SVC_TIMEOUT_SECONDS`; unset = tool unavailable. Tool counts: 20 on stdio, 16 on HTTP. See `docs/reference/mcp-tools.md` (#418).
@@ -23,6 +25,7 @@ All notable changes to Inherent are documented here. The format follows
 
 ### Fixed
 
+- **MCP `list_workspaces` returned `name: null` (bare UUIDs) for workspaces.** The tool only read `workspace_metadata.metadata.name`, which is usually empty; the canonical name is Mongo `workspaces.name`. It now reads Mongo first (new best-effort `DatabaseService.get_workspace_names_in_mongo`, falls back to the metadata name, then `null`; a Mongo failure degrades to ids instead of failing the listing). Authorization is unchanged.
 - **`GET /admin/workspaces/{id}/purge/{job}` returned HTTP 500 for every completed purge (#395, #399).** The route read the workflow result through an untyped Temporal handle, which decodes the result to a plain dict, so `result.residue` raised; it now requests `PurgeWorkspaceResult`. Found by the pilot-flow compose E2E.
 - **Search results and pack MCP profile tools never carried a section heading (#390, #392, #399).** The chunker's per-chunk `section_heading` reached Postgres only; `inh-ingestion-svc` now also writes it to a new Weaviate `section_heading` property (added to existing collections by the existing reconcile step) and `inh-public-api-svc` selects it, so `metadata.section_heading` and the profile tool's `section_heading` are populated. Upgrade `inh-ingestion-svc` before `inh-public-api-svc`, as with every earlier chunk property.
 - **Audit events dropped `returned_chunk_ids` on the way into Mongo `audit_logs` (#41, #393, #399).** The public API publishes the ids on every retrieval event, but the ingestion-side writer never stored them; they are now persisted (empty list when absent).
