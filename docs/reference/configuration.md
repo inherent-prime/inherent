@@ -108,6 +108,9 @@ and binds all datastore ports to `127.0.0.1`.
 | `OAUTH_SUBJECT_LOOKUP_COLLECTION` / `OAUTH_SUBJECT_LOOKUP_FIELD` | unset / unset | Mongo collection and field (e.g. `users` / `clerk_id`) matched against the token's `sub` (prime#329). Set together or not at all; simple identifiers only, validated at startup. Both unset = step skipped |
 | `OAUTH_SUBJECT_LOOKUP_ID_FIELD` | `_id` | Field of the matched document holding the Inherent user id (ObjectIds are stringified) |
 | `OAUTH_SUBJECT_LOOKUP_DELETED_FIELD` | `deleted_at` | Soft-delete marker: a non-null value means the user never resolves. Empty string disables the check |
+| `INTG_SVC_URL` | unset | Host app integration-service base URL; used only by the `create_workspace` MCP tool (`POST /internal/workspaces`). Unset = tool answers "not available" |
+| `ENGINE_SERVICE_SECRET` | unset | Shared secret sent as `X-Service-Secret` to the host app. Masked (`SecretStr`), never logged. Unset = `create_workspace` unavailable |
+| `INTG_SVC_TIMEOUT_SECONDS` | `10` | Timeout for one engine -> host call |
 | `OAUTH_SUBJECT_USERS` | empty | Static `sub=user_id,...` fallback mapping, consulted last |
 
 ## inh-ingestion-svc
