@@ -25,24 +25,26 @@
 
 # Inherent
 
-**One brain, every agent.** Store company context once and let every AI agent
-query it with citations, instead of paying to re-load the same context into
-every prompt.
+**One brain, every agent.** Store your company context once. Every AI agent
+(Claude, Cursor, and anything that speaks MCP or REST) queries it with
+citations.
 
 Inherent is the open-source context layer behind [inherent.sh](https://inherent.sh/).
-You connect sources (text, Markdown, PDF, DOCX, source code, and
-[more](docs/reference/file-types.md)). It extracts, chunks, embeds, and indexes
-them, then serves cited retrieval over REST and MCP. Self-host it in your own
-VPC or run it locally with one command.
+Self-host it in your own VPC or run it locally with one command.
 
 https://github.com/user-attachments/assets/c01c0e25-c995-4e70-b07c-ce6da2ff393d
 
-## Why Inherent
+## The problems it solves
 
-- **Connected once, queried everywhere.** Ingest a source one time; every agent reads from the same governed index.
-- **Every answer cites its source.** Retrieval returns passages with document, chunk, and position, not a black-box summary.
-- **Measured, not claimed.** Retrieval quality is a CI gate with a ratcheting baseline (table below).
-- **Yours to run.** FastAPI, PostgreSQL, Weaviate, Temporal, Valkey, S3. MIT licensed, deployable in your VPC.
+| Problem | What Inherent does |
+| --- | --- |
+| Paying to re-send the same context | Ingest a source once. Agents search the index and pull back only the passages they need. |
+| Every agent has its own version of the truth | One index serves every agent over [REST](docs/reference/rest-api.md) and [MCP](docs/reference/mcp-tools.md). |
+| Answers you cannot verify | Search results carry citations, with document, chunk, and position. A lineage lookup shows where a document came from and whether it is stale. |
+| Outdated content outranking current content | Re-upload a file under the same name and it is reindexed in place; the old text stops being retrievable. See [Keeping content current](docs/keeping-content-current.md). |
+| Sensitive data and who can see it | Self-host it. Each workspace is a security boundary, and API keys can be scoped to a single workspace. See the [access-control model](docs/access-control.md). |
+| Content in many formats | Text, Markdown, PDF, DOCX, source code, and [more](docs/reference/file-types.md) are extracted, chunked, embedded, and indexed for you. |
+| Not knowing if search is any good | Run your own test queries with `inherent eval run` to measure hit rate, and check a per-workspace retrieval scorecard. See [retrieval evals](docs/reference/retrieval-evals.md). |
 
 ## Quickstart
 
@@ -54,114 +56,34 @@ inherent up
 inherent connect claude --print
 ```
 
-`inherent up` pulls the version-matched engine images, waits for health, and
-stores local credentials in `~/.inherent/`.
+`inherent up` pulls the engine images, waits for health, and stores local
+credentials in `~/.inherent/`. Next, upload a document and run your first
+search: [Getting Started Locally](docs/getting-started/local.md).
 
-Contributing from a checkout instead?
-
-```bash
-git clone https://github.com/inherent-prime/inherent.git && cd inherent
-make quickstart   # .env, install, Compose stack, dev workspace + API key, health check
-```
-
-`make quickstart` already seeds a dev workspace and API key (via `bootstrap`).
-Then follow [Getting Started Locally](docs/getting-started/local.md) for
-endpoints, a smoke test, and troubleshooting. Going live? Read
-[Taking Inherent to Production](docs/deploy/production.md) or
-[Deploy to Azure](docs/deploy/azure.md).
-
-## First search
+## Connect your agent
 
 ```bash
-export API_BASE=http://localhost:18000 API_KEY=ink_dev_local_key_001 WORKSPACE_ID=ws_local_001
-
-# Upload
-curl -s -X POST "$API_BASE/v1/documents" -H "X-API-Key: $API_KEY" -H "X-Workspace-Id: $WORKSPACE_ID" \
-  -F "file=@docs/examples/sample-documents/sample.txt;type=text/plain" | jq .document_id
-
-# Search (once status is "processed")
-curl -s -X POST "$API_BASE/v1/search" -H "X-API-Key: $API_KEY" -H "X-Workspace-Id: $WORKSPACE_ID" \
-  -H "Content-Type: application/json" -d '{"query":"what retrieval modes does Inherent support","limit":3}' | jq .
+inherent connect claude --print    # Claude Code
+inherent connect cursor --print    # Cursor
 ```
 
-Full endpoint reference: [REST API](docs/reference/rest-api.md) · [MCP tools](docs/reference/mcp-tools.md) · [CLI](docs/reference/cli.md) · [Examples](docs/examples/README.md).
+Hosted endpoint, claude.ai connector and other options: [MCP tools](docs/reference/mcp-tools.md) · [CLI reference](docs/reference/cli.md#connect). Anything else can call the [REST API](docs/reference/rest-api.md).
 
-## Architecture
+## Use cases
 
-```text
-                 documents
-                     |
-                     v
-          +------------------------+
-          |  inh-ingestion-svc     |
-          |  extract / chunk /     |
-          |  embed / index         |
-          +-----------+------------+
-                      |
-        +-------------+-------------+
-        v                           v
-  +-------------+             +-------------+
-  | PostgreSQL  |             |  Weaviate   |
-  | metadata    |             | vectors     |
-  +------+------+             +------+------+
-         \                           /
-          v                         v
-             +-------------------+
-             | inh-public-api-svc|
-             | REST + MCP        |
-             +---------+---------+
-                       |
-                       v
-                    agents
-```
+- **A shared company brain** for every coding agent and assistant your team runs.
+- **Cited answers** from policies, specs, contracts, and transcripts, with a source for each claim.
+- **Agents that read and write context.** Over MCP they can search, read, upload, and edit documents and chunks.
+- **A private RAG backend** you can run in your own VPC, behind your own keys.
+- **Custom agents** that query the same index. See the [examples](docs/examples/README.md).
 
-Ingestion consumes upload events from Valkey, runs Temporal workflows, and
-writes to PostgreSQL and Weaviate. The public API reads both and serves search
-over REST and MCP. Product boundary and non-goals:
-[ADR 0001](docs/adr/0001-agent-memory-substrate.md).
+## Learn more
 
-## Retrieval quality baseline
-
-Committed floor in [`retrieval_baseline.json`](services/inh-public-api-svc/tests/evals/corpus/retrieval_baseline.json),
-measured on the golden corpus over the full Compose stack. A regression over
-`0.02` fails the build; a green run on `main` ratchets the floor up.
-
-<!-- retrieval-baseline:start -->
-<!-- Generated from services/inh-public-api-svc/tests/evals/corpus/retrieval_baseline.json by tests/evals/render_baseline_table.py — do not edit by hand. The eval-baseline-ratchet job regenerates it whenever the baseline moves. -->
-
-| Mode | Recall@5 | MRR | nDCG@5 |
-| --- | --- | --- | --- |
-| Hybrid | 0.910 | 0.885 | 0.844 |
-| Keyword | 0.860 | 0.841 | 0.796 |
-| Semantic | 0.880 | 0.798 | 0.768 |
-<!-- retrieval-baseline:end -->
-
-Details and local runs: [docs/testing.md](docs/testing.md#retrieval-eval-gate-baseline-ratchet-and-trend-history-139).
-
-## Project health
-
-- **Every PR runs** lint, format, mypy, bandit, unit tests, Compose E2E, and the retrieval eval gate.
-- **Coverage floors are enforced and never lowered**: ingestion 82%, public API 84%, CLI 89%, contracts 98%, plus per-module floors on auth, search, and verify.
-- **Releases** follow [Keep a Changelog](CHANGELOG.md) and semver; images publish to `ghcr.io/inherent-prime/*` on every tag.
-- **Docs** build in strict mode on every PR and publish to [docs.inherent.sh](https://docs.inherent.sh/).
-
-## Repository layout
-
-| Path | What it is |
-| --- | --- |
-| [`services/inh-ingestion-svc`](services/inh-ingestion-svc/Readme.md) | Temporal worker: extract, chunk, embed, index |
-| [`services/inh-public-api-svc`](services/inh-public-api-svc/Readme.md) | REST API and MCP server over indexed content |
-| [`services/inh-cli`](services/inh-cli/Readme.md) | `inherent` CLI for local stack and admin tasks |
-| [`services/inh-contracts`](services/inh-contracts) | Shared constants and contracts between services |
-| [`docs/`](docs/README.md) | Agent-first docs: getting started, reference, deploy, ADRs |
-| [`infra/`](infra) | Terraform for Hetzner and Azure |
-
-## Contributing and support
-
-- Development setup, checks, and PR expectations: [CONTRIBUTING.md](CONTRIBUTING.md)
-- Bugs and feature requests: [GitHub Issues](https://github.com/inherent-prime/inherent/issues) · Support routes: [SUPPORT.md](SUPPORT.md)
+- [Documentation](https://docs.inherent.sh/) · [REST API](docs/reference/rest-api.md) · [MCP tools](docs/reference/mcp-tools.md) · [CLI](docs/reference/cli.md)
+- Going live: [Production hardening](docs/deploy/production.md) · [Deploy to Azure](docs/deploy/azure.md)
+- Help: [Support](SUPPORT.md) · [GitHub Issues](https://github.com/inherent-prime/inherent/issues)
+- Contributing: [CONTRIBUTING.md](CONTRIBUTING.md) · [Code of Conduct](CODE_OF_CONDUCT.md)
 - Security reports (private): [SECURITY.md](SECURITY.md)
-- Code of conduct: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
 
 ## License
 

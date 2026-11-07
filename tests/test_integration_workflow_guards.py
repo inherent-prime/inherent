@@ -118,7 +118,7 @@ def test_ratchet_outputs_are_in_paths_ignore() -> None:
 
 
 def test_ratchet_job_regenerates_docs_snippet() -> None:
-    """The ratchet must publish the docs snippet in the same step as README.md.
+    """The ratchet must publish the docs snippet alongside the baseline.
 
     Splitting the two outputs across jobs (or forgetting --docs-snippet) would
     let the MkDocs table freeze while the README table moved, which is the
@@ -127,6 +127,6 @@ def test_ratchet_job_regenerates_docs_snippet() -> None:
     text = WORKFLOW.read_text()
     assert "--docs-snippet" in text
     assert (
-        'git add "$baseline" "$history" README.md docs/_generated/retrieval-baseline.md'
+        'git add "$baseline" "$history" docs/_generated/retrieval-baseline.md'
         in text
     )
