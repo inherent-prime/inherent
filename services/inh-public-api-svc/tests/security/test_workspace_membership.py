@@ -396,8 +396,11 @@ WRITE_TOOL_ARGS: dict[str, dict[str, Any]] = {
 async def test_every_mcp_write_tool_is_covered_by_the_viewer_test():
     """A new write tool must be added to WRITE_TOOL_ARGS (and so to the viewer
     denial test below) or this fails."""
+    # create_workspace writes no existing workspace (it mints a new one the
+    # caller owns, via the host app), so a workspace role cannot apply to it.
+    not_workspace_scoped = {"create_workspace"}
     write_tools = {n for n, t in mcp_server._TOOLS.items() if t.permission == "write"}
-    assert write_tools == set(WRITE_TOOL_ARGS)
+    assert write_tools - not_workspace_scoped == set(WRITE_TOOL_ARGS)
 
 
 @pytest.mark.parametrize("tool_name", sorted(WRITE_TOOL_ARGS))

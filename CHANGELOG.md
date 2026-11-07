@@ -5,6 +5,12 @@ All notable changes to Inherent are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-11-01
+
+### Added
+
+- **MCP `create_workspace` tool: create a workspace from Claude.** Takes `name` and optional `description`; needs OAuth sign-in (the token `sub` is the Clerk user id) and `kb:write`. Workspace-scoped keys and plain API keys are refused. The engine delegates to the host app (`POST $INTG_SVC_URL/internal/workspaces` with `X-Service-Secret`), which owns ownership and plan limits; plan-limit messages pass through, host outages become "try again later". New settings `INTG_SVC_URL`, `ENGINE_SERVICE_SECRET` (masked), `INTG_SVC_TIMEOUT_SECONDS`; unset = tool unavailable. Tool counts: 20 on stdio, 16 on HTTP. See `docs/reference/mcp-tools.md` (#418).
+
 ## [0.8.0] — 2026-10-24
 
 ### Added
