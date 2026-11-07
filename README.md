@@ -13,9 +13,14 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/inherent-prime/inherent/actions/workflows/ci.yml"><img src="https://github.com/inherent-prime/inherent/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" /></a>
+  <a href="https://github.com/inherent-prime/inherent/actions/workflows/integration.yml"><img src="https://github.com/inherent-prime/inherent/actions/workflows/integration.yml/badge.svg?branch=main" alt="Integration & Eval Gate" /></a>
+  <a href="https://github.com/inherent-prime/inherent/actions/workflows/ci.yml"><img src="https://img.shields.io/badge/coverage-floors%2082%E2%80%9398%25%20enforced-brightgreen" alt="Coverage floors enforced in CI" /></a>
+  <!-- Coverage badge: swap for the dynamic gist endpoint once COVERAGE_GIST_ID is set — see docs/maintainers/coverage-badge.md -->
   <a href="https://github.com/inherent-prime/inherent/releases"><img src="https://img.shields.io/github/v/release/inherent-prime/inherent" alt="Release" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/inherent-prime/inherent" alt="License: MIT" /></a>
-  <a href="https://github.com/inherent-prime/inherent/actions/workflows/ci.yml"><img src="https://github.com/inherent-prime/inherent/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" /></a>
+  <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+" />
+  <a href="https://docs.inherent.sh/"><img src="https://github.com/inherent-prime/inherent/actions/workflows/docs.yml/badge.svg?branch=main" alt="Docs" /></a>
 </p>
 
 # Inherent
@@ -29,17 +34,9 @@ Self-host it in your own VPC or run it locally with one command.
 
 https://github.com/user-attachments/assets/c01c0e25-c995-4e70-b07c-ce6da2ff393d
 
-## The problem
+## The problems it solves
 
-- **You re-load the same context into every prompt.** Every agent, every session, you paste in the same docs and pay for the tokens again.
-- **Each agent knows something different.** Context lives in one tool's project, another tool's rules file, someone's chat history.
-- **You cannot trust the answer.** Without a source, you cannot tell a grounded answer from a guess.
-- **Stale docs keep winning.** The agent quotes last quarter's policy because the old file is still indexed.
-- **Company data is sensitive.** You cannot send it to every tool, and teams cannot all see everything.
-
-## How Inherent helps
-
-| Your problem | What Inherent does |
+| Problem | What Inherent does |
 | --- | --- |
 | Paying to re-send the same context | Ingest a source once. Agents search the index and pull back only the passages they need. |
 | Every agent has its own version of the truth | One index serves every agent over [REST](docs/reference/rest-api.md) and [MCP](docs/reference/mcp-tools.md). |
@@ -65,23 +62,12 @@ search: [Getting Started Locally](docs/getting-started/local.md).
 
 ## Connect your agent
 
-`inherent connect` prints (or writes) the MCP config for your agent:
-
 ```bash
 inherent connect claude --print    # Claude Code
 inherent connect cursor --print    # Cursor
 ```
 
-Using the hosted endpoint with Claude Code:
-
-```bash
-claude mcp add --transport http inherent https://api.inherent.sh/mcp \
-  --header "X-API-Key: ink_..."
-```
-
-Want it as a claude.ai connector? See [MCP tools](docs/reference/mcp-tools.md#connecting-claudeai-remote-mcp-connector).
-Anything else can call the [REST API](docs/reference/rest-api.md) directly.
-Options are in the [CLI reference](docs/reference/cli.md#connect).
+Hosted endpoint, claude.ai connector and other options: [MCP tools](docs/reference/mcp-tools.md) · [CLI reference](docs/reference/cli.md#connect). Anything else can call the [REST API](docs/reference/rest-api.md).
 
 ## Use cases
 
