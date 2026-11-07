@@ -36,9 +36,9 @@ on:
     # an unbounded main<->ratchet loop, each cycle up to the 40-minute
     # Compose job below (#146 cross-review finding).
     #
-    # README.md is on this list because the ratchet job also regenerates the
-    # published baseline table in it (#158). The docs snippet is here for the
-    # same reason (#153): it is a pure function of the baseline, so a ratchet
+    # README.md is on this list because the ratchet job used to regenerate a
+    # baseline table in it (#158); a README-only edit still has no bearing on
+    # an e2e run. The docs snippet is here because (#153): it is a pure function of the baseline, so a ratchet
     # that moves a metric rewrites it in the same commit. Excluding either
     # costs nothing else: a README-only or snippet-only edit has no bearing
     # on a Compose e2e run, and an edit bundled with a service change still
@@ -448,8 +448,8 @@ jobs:
             --argjson n "$n" \
             '{sha: $sha, date: $date, n: $n, metrics: .}' "$report" >> "$history"
 
-          # Republish the baseline table in README.md (#158) and the docs
-          # snippet (#153) from the just-ratcheted baseline, so the advertised
+          # Republish the baseline table in the docs snippet (#153; README no
+          # longer carries it) from the just-ratcheted baseline, so the advertised
           # numbers (GitHub README and the MkDocs site) can never drift from
           # the enforced floor. Rendering is a pure function of $baseline, so
           # this is a no-op whenever the ratchet didn't move a metric --
@@ -469,10 +469,9 @@ jobs:
           # ModuleNotFoundError: No module named 'tests'.
           ( cd "$api" && uv run --no-project python -m tests.evals.render_baseline_table \
               --baseline tests/evals/corpus/retrieval_baseline.json \
-              --readme "$GITHUB_WORKSPACE/README.md" \
               --docs-snippet "$GITHUB_WORKSPACE/docs/_generated/retrieval-baseline.md" )
 
-          git add "$baseline" "$history" README.md docs/_generated/retrieval-baseline.md
+          git add "$baseline" "$history" docs/_generated/retrieval-baseline.md
           if git diff --cached --quiet; then
             echo "no baseline/history change"; exit 0
           fi
