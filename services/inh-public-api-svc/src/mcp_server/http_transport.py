@@ -496,6 +496,29 @@ def create_http_mcp_server() -> Server:
     return server
 
 
+def _unlinked_identity_message() -> str:
+    """Operator-facing text for an authorized OAuth token whose `sub`
+    resolved to no Inherent user. With the Mongo subject lookup configured
+    the cause is missing DATA (no live row carrying the token's subject in
+    the lookup field), so say that instead of pointing at settings that are
+    already (or deliberately not) in use."""
+    if settings.oauth_subject_lookup_enabled:
+        return (
+            "Error: no Inherent identity is linked to this token's subject -- "
+            f"no live user was found whose {settings.oauth_subject_lookup_collection}."
+            f"{settings.oauth_subject_lookup_field} equals the token's `sub`. "
+            "The user's record is missing that field (or the account is deleted or "
+            "ambiguous); fix the data (see docs/reference/mcp-tools.md's "
+            "'Connecting claude.ai' section)"
+        )
+    return (
+        "Error: no Inherent identity is linked to this token's subject -- "
+        "set OAUTH_USER_ID_CLAIM, the OAUTH_SUBJECT_LOOKUP_* Mongo lookup, or "
+        "OAUTH_SUBJECT_USERS to link OAuth callers to an Inherent user "
+        "(see docs/reference/mcp-tools.md's 'Connecting claude.ai' section)"
+    )
+
+
 async def _call_tool_oauth(name: str, arguments: dict, principal: Principal) -> CallToolResult:
     """OAuth-authenticated `call_tool` dispatch (#295, executed since
     inherent#392 follow-up).
@@ -657,13 +680,7 @@ async def _call_tool_oauth(name: str, arguments: dict, principal: Principal) -> 
         # audit trail must be able to see this OAuth subject tried and was
         # rejected, not just silently missing.
         audit_denied_unresolved_oauth(tool, name, principal.principal_id, arguments, surface="mcp")
-        return _error_result(
-            "Error: no Inherent identity is linked to this token's subject -- "
-            "set OAUTH_USER_ID_CLAIM or OAUTH_SUBJECT_USERS to link OAuth "
-            "callers to an Inherent user (see docs/reference/mcp-tools.md's "
-            "'Connecting claude.ai' section)",
-            FAILURE_CLASS_AUTHENTICATION,
-        )
+        return _error_result(_unlinked_identity_message(), FAILURE_CLASS_AUTHENTICATION)
 
     try:
         # Attribution (#393): the ONE choke point for HTTP OAuth calls -- see

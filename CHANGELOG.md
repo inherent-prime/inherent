@@ -5,6 +5,12 @@ All notable changes to Inherent are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-11-08
+
+### Fixed
+
+- **Unlinked OAuth identity now says what is actually missing (prime#329).** When the `OAUTH_SUBJECT_LOOKUP_*` Mongo lookup is configured and no live user row carries the token's `sub`, the `tools/call` rejection names the lookup (`users.clerk_id`) instead of telling the operator to set `OAUTH_USER_ID_CLAIM` / `OAUTH_SUBJECT_USERS`, and the engine logs `oauth_identity_unmatched` (subject and lookup field, never the token) so the cause is visible in logs. Release bumps `inh-public-api-svc` 0.5.0 -> 0.5.1 and chart `appVersion` 0.8.0 -> 0.8.1.
+
 ## [0.8.0] — 2026-10-24
 
 ### Added

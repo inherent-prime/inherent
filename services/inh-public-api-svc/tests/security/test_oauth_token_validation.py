@@ -584,6 +584,39 @@ class TestOAuthToolExecution:
         assert result["structuredContent"].get("error") != "insufficient_scope"
         assert "no Inherent identity is linked" in result["content"][0]["text"]
 
+    def test_unmatched_subject_with_lookup_configured_names_the_lookup(
+        self, monkeypatch, client: TestClient
+    ):
+        """With OAUTH_SUBJECT_LOOKUP_* configured and no row matching the
+        token's `sub`, the rejection must point at the missing data (the
+        user row's lookup field), not tell the operator to set
+        OAUTH_USER_ID_CLAIM / OAUTH_SUBJECT_USERS (which prime forbids in prod)."""
+        from unittest.mock import AsyncMock, patch
+
+        import src.services.auth as auth_mod
+
+        monkeypatch.setattr(settings, "_oauth_subject_users", {})
+        monkeypatch.setattr(settings, "oauth_subject_lookup_collection", "users")
+        monkeypatch.setattr(settings, "oauth_subject_lookup_field", "clerk_id")
+        db = AsyncMock()
+        db.find_users_by_subject = AsyncMock(return_value=[])
+        token = make_token(scope="kb:read kb:search")
+        with patch.object(auth_mod, "get_database", AsyncMock(return_value=db)):
+            r = client.post(
+                "/mcp",
+                headers={**_HTTP_MCP_HEADERS, "Authorization": f"Bearer {token}"},
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {"name": "list_documents", "arguments": {}},
+                },
+            )
+        text = r.json()["result"]["content"][0]["text"]
+        assert "no Inherent identity is linked" in text
+        assert "users.clerk_id" in text
+        assert "OAUTH_USER_ID_CLAIM" not in text
+
     def test_tools_list_over_oauth_is_unaffected_by_this_change_when_unmapped(
         self, monkeypatch, client: TestClient
     ):
