@@ -546,6 +546,9 @@ async def resolve_oauth_user(claims: OAuthClaims) -> str | None:
         if matches:  # only soft-deleted accounts matched
             logger.warning("oauth_identity_user_deleted")
             return None
+        # Nothing matched: usually a user record missing the lookup field.
+        # No subject in the log, it is an account identifier.
+        logger.warning("oauth_identity_not_found")
 
     return settings.oauth_subject_users.get(claims.subject)
 

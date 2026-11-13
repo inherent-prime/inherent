@@ -582,7 +582,10 @@ class TestOAuthToolExecution:
         result = r.json()["result"]
         assert result["isError"] is True
         assert result["structuredContent"].get("error") != "insufficient_scope"
-        assert "no Inherent identity is linked" in result["content"][0]["text"]
+        text = result["content"][0]["text"]
+        assert "no Inherent identity is linked" in text
+        # The Mongo lookup is the production path; the operator hint must name it.
+        assert "OAUTH_SUBJECT_LOOKUP_FIELD" in text
 
     def test_tools_list_over_oauth_is_unaffected_by_this_change_when_unmapped(
         self, monkeypatch, client: TestClient
