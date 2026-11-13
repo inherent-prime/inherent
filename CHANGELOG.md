@@ -5,6 +5,10 @@ All notable changes to Inherent are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **OAuth identity: an unlinked subject is now diagnosable (#424).** The `tools/call` error for a token whose `sub` maps to no user now names `OAUTH_SUBJECT_LOOKUP_FIELD` (the production path) alongside `OAUTH_USER_ID_CLAIM` and `OAUTH_SUBJECT_USERS`, and a lookup that matches nothing logs `oauth_identity_not_found` (no subject in the log). Behaviour is unchanged otherwise.
+
 ## [0.8.0] — 2026-10-24
 
 ### Added

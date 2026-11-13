@@ -650,8 +650,8 @@ async def _call_tool_oauth(name: str, arguments: dict, principal: Principal) -> 
         # IS authorized for this tool, there is simply no Inherent
         # user/workspace configured to run it against yet. See
         # `resolve_oauth_user`'s docstring (src/services/auth.py) for the
-        # two ways an operator closes this: `OAUTH_USER_ID_CLAIM` or
-        # `OAUTH_SUBJECT_USERS`.
+        # ways an operator closes this: the Mongo lookup
+        # (`OAUTH_SUBJECT_LOOKUP_*`), `OAUTH_USER_ID_CLAIM` or `OAUTH_SUBJECT_USERS`.
         #
         # Attribution (#393): logged as "denied" too -- a caller reading the
         # audit trail must be able to see this OAuth subject tried and was
@@ -659,9 +659,10 @@ async def _call_tool_oauth(name: str, arguments: dict, principal: Principal) -> 
         audit_denied_unresolved_oauth(tool, name, principal.principal_id, arguments, surface="mcp")
         return _error_result(
             "Error: no Inherent identity is linked to this token's subject -- "
-            "set OAUTH_USER_ID_CLAIM or OAUTH_SUBJECT_USERS to link OAuth "
-            "callers to an Inherent user (see docs/reference/mcp-tools.md's "
-            "'Connecting claude.ai' section)",
+            "this login has no Inherent user yet. Operator: make sure the user "
+            "record carries the field named by OAUTH_SUBJECT_LOOKUP_FIELD, or "
+            "set OAUTH_USER_ID_CLAIM or OAUTH_SUBJECT_USERS (see "
+            "docs/reference/mcp-tools.md's 'Connecting claude.ai' section)",
             FAILURE_CLASS_AUTHENTICATION,
         )
 

@@ -123,6 +123,22 @@ async def test_not_found_and_no_static_entry_resolves_to_none(users):
     assert await resolve_oauth_user(_claims()) is None
 
 
+async def test_no_match_is_logged_without_the_subject(users):
+    users.docs.clear()
+    with patch.object(auth_mod, "logger") as mock_logger:
+        assert await resolve_oauth_user(_claims()) is None
+    mock_logger.warning.assert_called_once()
+    event, kwargs = mock_logger.warning.call_args.args[0], mock_logger.warning.call_args.kwargs
+    assert event == "oauth_identity_not_found"
+    assert SUB not in str(kwargs)  # the Clerk id is an identifier, keep it out of logs
+
+
+async def test_no_not_found_log_when_a_user_matches(users):
+    with patch.object(auth_mod, "logger") as mock_logger:
+        assert await resolve_oauth_user(_claims()) == str(USER_OID)
+    mock_logger.warning.assert_not_called()
+
+
 async def test_duplicate_matches_do_not_resolve_and_skip_the_static_map(users, monkeypatch):
     monkeypatch.setattr(settings, "_oauth_subject_users", {SUB: "from-static-map"})
     users.docs.append({"_id": ObjectId(), "clerk_id": SUB})
